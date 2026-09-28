@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+/*
+ * 设计 token：取自 dataviz 参考调色板（已跑校验脚本，明暗两套各自选取，不是自动反色）。
+ * 涨跌按国内习惯红涨绿跌，且始终带正负号，颜色不是唯一识别渠道。
+ */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  /* 5、6 取参考调色板的洋红、紫；绿与红留给涨跌，不做策略色（已跑校验脚本，6 色相邻对全过） */
+  --series-5: #e87ba4;
+  --series-6: #4a3aa7;
+  --bench: #898781;
+  --up: #d03b3b;
+  --down: #006300;
+  --warn: #b45309;
+  --warn-bg: #fdf4e3;
+  --info-bg: #eaf2fc;
+  --wash: rgba(42, 120, 214, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --accent: #3987e5;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #9085e9;
+    --up: #e66767;
+    --down: #0ca30c;
+    --warn: #fab219;
+    --warn-bg: #2e2412;
+    --info-bg: #15233a;
+    --wash: rgba(57, 135, 229, 0.12);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #3987e5;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #9085e9;
+  --up: #e66767;
+  --down: #0ca30c;
+  --warn: #fab219;
+  --warn-bg: #2e2412;
+  --info-bg: #15233a;
+  --wash: rgba(57, 135, 229, 0.12);
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-grid: var(--grid);
+  --color-line: var(--border);
+  --color-accent: var(--accent);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-info-bg: var(--info-bg);
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+::selection {
+  background: var(--wash);
+}

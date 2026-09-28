@@ -1,0 +1,49 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# 跨包共享依赖的单一版本来源。各包用 "catalog:" 引用，避免版本漂移。
+# typescript 固定在 6.0.x：typescript-eslint 8.x 只支持 <6.1（TS 7 原生编译器暂不兼容）。
+catalog:
+  # 工具链
+  "@eslint/js": ^10.0.1
+  "@types/node": ^22.20.4
+  eslint: ^10.11.0
+  eslint-plugin-react-hooks: ^7.1.1
+  globals: ^17.12.0
+  prettier: ^3.9.9
+  tsx: ^4.23.15
+  turbo: ^2.11.5
+  typescript: ~6.0.3
+  typescript-eslint: ^8.70.1
+  vitest: ^5.0.2
+  # 服务端
+  "@duckdb/node-api": 1.5.5-r.5
+  "@hono/node-server": ^2.1.1
+  better-auth: ^1.7.6
+  better-sqlite3: ^13.0.3
+  "@types/better-sqlite3": ^9.6.0
+  croner: ^10.0.1
+  drizzle-orm: ^0.45.3
+  drizzle-kit: ^0.31.11
+  hono: ^4.13.10
+  zod: ^4.6.5
+  # AI
+  ai: ^7.0.118
+  "@ai-sdk/anthropic": ^4.0.65
+  "@ai-sdk/openai-compatible": ^3.0.57
+  "@ai-sdk/react": ^4.0.121
+  # 前端
+  "@tailwindcss/vite": ^4.3.3
+  "@tanstack/react-query": ^5.104.0
+  "@types/react": ^19.3.0
+  "@types/react-dom": ^19.3.0
+  "@vitejs/plugin-react": ^6.1.1
+  clsx: ^2.1.1
+  echarts: ^6.1.0
+  lucide-react: ^1.48.0
+  react: ^19.3.0
+  react-dom: ^19.3.0
+  react-router: ^8.4.0
+  tailwindcss: ^4.3.3
+  vite: ^8.3.1

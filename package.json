@@ -1,0 +1,45 @@
+{
+  "name": "ivan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI native 的选股策略回测与向前跟踪（A 股 + 港股，可自部署）",
+  "packageManager": "pnpm@10.34.4",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "ivan": "tsx apps/worker/src/cli.ts",
+    "start": "node scripts/start.mjs",
+    "admin": "tsx apps/server/src/cli.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
+    "globals": "catalog:",
+    "prettier": "catalog:",
+    "tsx": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild",
+      "@duckdb/node-bindings"
+    ]
+  }
+}

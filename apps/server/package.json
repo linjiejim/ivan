@@ -1,0 +1,31 @@
+{
+  "name": "@ivan/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hono：鉴权、REST、对话 Agent、托管前端构建产物（对外唯一端口）",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "catalog:",
+    "@ivan/ai": "workspace:*",
+    "@ivan/core": "workspace:*",
+    "@ivan/db": "workspace:*",
+    "@ivan/engine": "workspace:*",
+    "ai": "catalog:",
+    "better-auth": "catalog:",
+    "hono": "catalog:",
+    "zod": "catalog:",
+    "better-sqlite3": "catalog:",
+    "drizzle-orm": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "@types/better-sqlite3": "catalog:"
+  }
+}

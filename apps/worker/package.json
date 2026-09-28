@@ -1,0 +1,32 @@
+{
+  "name": "@ivan/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "调度 + ETL + 任务执行（回测/扫描/跟踪/简报）；行情仓 DuckDB 的唯一持有者",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "cli": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "catalog:",
+    "@ivan/ai": "workspace:*",
+    "@ivan/core": "workspace:*",
+    "@ivan/data": "workspace:*",
+    "@ivan/db": "workspace:*",
+    "@ivan/engine": "workspace:*",
+    "ai": "catalog:",
+    "croner": "catalog:",
+    "hono": "catalog:",
+    "drizzle-orm": "catalog:",
+    "better-sqlite3": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "@types/better-sqlite3": "catalog:"
+  }
+}
