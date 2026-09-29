@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # 全量回填（线上维护用，见 DEPLOY.md）：worker 独占行情仓，回填前要停 worker。
 #
+#   0. 先等 worker 手上的任务做完（最多一小时，等不到就不回填）
 #   1. 在数据目录放维护标记 .maintenance —— 部署脚本看到它会等，不会中途重启 worker
 #   2. 停 ivan-worker → 回填 A 股 → 回填港股 → doctor
 #   3. 不管回填成没成功，最后都把 worker 拉起来、去掉标记（回填可断点续跑，失败了重跑本脚本即可）
 #
 # 用法：bash scripts/backfill-full.sh            （仓库根目录；日志写到 logs/backfill-日期.log）
 #       也可以交给定时器在夜里跑，比如：
-#       systemd-run --unit=ivan-backfill --on-calendar="2026-09-29 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh
+#       systemd-run --unit=ivan-backfill --setenv=HOME=/root --on-calendar="2026-09-29 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -24,6 +25,11 @@ LOG="logs/backfill-$(date +%Y%m%d-%H%M).log"
 exec >>"$LOG" 2>&1
 
 echo "== $(date '+%F %T') 全量回填开始"
+# 先等 worker 手上的任务（夜间更新、回测）做完，最多一小时；还忙就这次不回填，什么都不动
+if ! WAIT_MINUTES=60 node --no-warnings scripts/deploy-wait-idle.mjs; then
+  echo "== worker 一直在忙，这次不回填"
+  exit 1
+fi
 echo "全量回填 $(date '+%F %T')（scripts/backfill-full.sh，日志 $LOG）" >"$MARKER"
 finish() {
   echo "== $(date '+%F %T') 收尾：拉起 worker、去掉维护标记"

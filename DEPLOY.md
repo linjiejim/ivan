@@ -49,7 +49,7 @@ worker 独占行情仓，**回填要先停 worker**。`scripts/backfill-full.sh`
 ```bash
 ssh jim-server 'cd /root/ivan/ivan && nohup bash scripts/backfill-full.sh >/dev/null 2>&1 &'   # 现在跑
 # 或者交给定时器在夜里跑（工作日避开 17:30–19:30 的夜间任务）：
-ssh jim-server 'systemd-run --unit=ivan-backfill --on-calendar="YYYY-MM-DD 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh'
+ssh jim-server 'systemd-run --unit=ivan-backfill --setenv=HOME=/root --on-calendar="YYYY-MM-DD 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh'
 ssh jim-server 'tail -f /root/ivan/ivan/logs/backfill-*.log'
 ```
 
