@@ -5,8 +5,8 @@ coverage/
 logs/
 *.log
 
-# 运行时数据：应用库、行情仓、接口缓存
-data/
+# 运行时数据：应用库、行情仓、接口缓存（只认根目录；不带 / 会连 packages/data 源码一起忽略）
+/data/
 
 .env
 .env.*.local

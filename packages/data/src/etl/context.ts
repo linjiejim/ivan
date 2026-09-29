@@ -1,0 +1,87 @@
+import type { DateStr, Market } from "@ivan/core";
+import type { Http } from "../http.ts";
+import type { Warehouse } from "../warehouse/db.ts";
+
+export type LogFn = (msg: string) => void;
+
+export interface EtlContext {
+  wh: Warehouse;
+  http: Http;
+  today: DateStr;
+  log: LogFn;
+  /** 进度回调（0–1），任务页面展示用 */
+  progress?: (fraction: number, note?: string) => void;
+}
+
+export interface SecurityRow {
+  code: string;
+  market: Market;
+  name: string | null;
+  board: string | null;
+  list_date: DateStr | null;
+  delist_date: DateStr | null;
+  lot_size: number | null;
+  industry_l1: string | null;
+  industry: string | null;
+  sec_type: string | null;
+}
+
+export async function loadSecurities(
+  wh: Warehouse,
+  market: Market,
+  activeSince?: DateStr,
+): Promise<SecurityRow[]> {
+  const where = activeSince
+    ? `AND (delist_date IS NULL OR delist_date >= DATE '${activeSince}')`
+    : "";
+  return wh.all<SecurityRow>(
+    `SELECT code, market, name, board, list_date::VARCHAR AS list_date,
+            delist_date::VARCHAR AS delist_date, lot_size, industry_l1, industry, sec_type
+     FROM securities WHERE market = $m ${where} ORDER BY code`,
+    { m: market },
+  );
+}
+
+/**
+ * 库里至少有一根日线的股票。夜间增量、财报增量、每周抽检都只管这些：
+ * 用 --top 回填的库里，其余股票从没回填过，增量不替它们补历史。
+ */
+export async function filledCodes(wh: Warehouse, market: Market): Promise<Set<string>> {
+  const rows = await wh.all<{ code: string }>(
+    `SELECT DISTINCT code FROM bars_daily WHERE code ${market === "HK" ? "" : "NOT "}LIKE '%.HK'`,
+  );
+  return new Set(rows.map((r) => r.code));
+}
+
+/** 断点续跑：记录每个（任务, 键）的完成状态。 */
+export async function doneKeys(wh: Warehouse, task: string): Promise<Set<string>> {
+  const rows = await wh.all<{ key: string }>(
+    `SELECT key FROM etl_progress WHERE task = $t AND status = 'done'`,
+    { t: task },
+  );
+  return new Set(rows.map((r) => r.key));
+}
+
+export async function markDone(wh: Warehouse, task: string, key: string, detail = ""): Promise<void> {
+  await wh.run(
+    `INSERT OR REPLACE INTO etl_progress (task, key, status, detail, updated_at)
+     VALUES ($t, $k, 'done', $d, current_timestamp)`,
+    { t: task, k: key, d: detail },
+  );
+}
+
+export async function markFailed(wh: Warehouse, task: string, key: string, err: string): Promise<void> {
+  await wh.run(
+    `INSERT OR REPLACE INTO etl_progress (task, key, status, detail, updated_at)
+     VALUES ($t, $k, 'failed', $d, current_timestamp)`,
+    { t: task, k: key, d: err.slice(0, 500) },
+  );
+}
+
+export async function resetTask(wh: Warehouse, task: string): Promise<void> {
+  await wh.run(`DELETE FROM etl_progress WHERE task = $t`, { t: task });
+}
+
+export function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
