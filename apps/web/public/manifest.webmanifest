@@ -1,0 +1,20 @@
+{
+  "name": "Ivan · 选股策略回测与跟踪",
+  "short_name": "Ivan",
+  "description": "说出选股思路，AI 写成规则、引擎回测；上线后每个交易日收盘自动跟踪。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f2",
+  "theme_color": "#f5f5f2",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

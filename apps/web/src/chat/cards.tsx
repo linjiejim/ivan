@@ -2,39 +2,108 @@
  * 工具卡片（D16）：卡片直接渲染工具输出或按 id 读库，数字以卡片为准；LLM 的文字只做解读。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check as CheckIcon, ChevronRight, Loader2, Wrench, X } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 import { NavChart } from "../components/charts/nav-chart.tsx";
 import { MonthlyTable, PnlBars } from "../components/charts/small.tsx";
 import { CompareView } from "../components/compare-view.tsx";
 import { DiffView } from "../components/diff-view.tsx";
+import {
+  type Icon,
+  IconBacktest,
+  IconBoard,
+  IconCheck,
+  IconCompare,
+  IconError,
+  IconGoLive,
+  IconHistory,
+  IconRules,
+  IconScreen,
+  IconSpinner,
+  IconStop,
+  IconStrategy,
+  IconSweep,
+  IconTracking,
+  IconData,
+  IconChevronDown,
+} from "../components/icons.tsx";
 import { ScreenTable } from "../components/screen-table.tsx";
-import { Badge, Button, Checks, cx, ErrorNote, Info, InfoRows } from "../components/ui.tsx";
+import {
+  Badge,
+  Button,
+  Checks,
+  cx,
+  ErrorNote,
+  Figure,
+  Info,
+  InfoRows,
+  Tag,
+  TextLink,
+} from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { deviationText, fmtFactor, MARKET_TEXT, money, pct, tone } from "../lib/format.ts";
+import { deviationText, fmtFactor, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
 import type { RunDetail, ScreenResult, SpecChange } from "../lib/types.ts";
+import { TOOL_ACTIVITY } from "./activity.ts";
 
 function Frame({
   title,
+  icon: Ico,
   children,
   right,
   info,
 }: {
   title: React.ReactNode;
+  icon?: Icon;
   children: React.ReactNode;
   right?: React.ReactNode;
   /** 标题旁的 ⓘ：次要说明按需看 */
   info?: React.ReactNode;
 }) {
   return (
-    <div className="my-2 rounded-lg border border-line bg-page">
-      <div className="flex items-center gap-1.5 border-b border-line px-3 py-1.5 text-xs font-medium text-ink-2">
-        {title}
+    <div className="my-2.5 animate-enter overflow-hidden rounded-xl border border-line bg-page/70">
+      <div className="flex h-9 items-center gap-1.5 border-b border-line px-3 text-xs font-medium text-ink-2">
+        {Ico && <Ico size={14} className="shrink-0 text-muted" />}
+        <span className="min-w-0 truncate">{title}</span>
         {info && <Info>{info}</Info>}
-        <span className="ml-auto">{right}</span>
+        <span className="ml-auto flex shrink-0 items-center">{right}</span>
       </div>
-      <div className="px-3 py-2.5">{children}</div>
+      <div className="px-3 py-3">{children}</div>
+    </div>
+  );
+}
+
+/** 卡片里的小指标：标签在上、数字在下 */
+function MiniStats({ items }: { items: Array<[string, string, string?]> }) {
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {items.map(([l, v, c]) => (
+        <div key={l}>
+          <div className="text-2xs text-muted">{l}</div>
+          <div className={cx("mt-0.5 text-sm font-semibold tracking-[-0.01em] text-ink", c)}>
+            <Figure text={v} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 进度：一行说明 + 一道细进度条 */
+function Progress({ note, progress }: { note: string; progress: number }) {
+  const p = Math.round(progress * 100);
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-xs">
+        <IconSpinner size={13} className="animate-spin text-accent" />
+        <span className="ai-shimmer font-medium">{note}</span>
+        <span className="tabular ml-auto text-muted">{p}%</span>
+      </div>
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-2">
+        <div
+          className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
+          style={{ width: `${Math.max(p, 3)}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -53,14 +122,24 @@ function useDraft(draftId: string) {
   });
 }
 
+/** 草稿卡片右上角的状态：和下面的按钮读同一份缓存，不会一个说「待确认」一个说「已确认」 */
+function DraftBadge({ draftId }: { draftId: string }) {
+  const d = useDraft(draftId);
+  if (d.data?.status === "confirmed") return <Badge icon={IconCheck}>已确认</Badge>;
+  if (d.data?.status === "discarded") return <Badge>已放弃</Badge>;
+  return <Badge tone="warn">待你确认</Badge>;
+}
+
 function DraftActions({
   draftId,
   onConfirmed,
   confirmLabel,
+  confirmIcon,
 }: {
   draftId: string;
   onConfirmed: (r: Record<string, string>) => void;
   confirmLabel: string;
+  confirmIcon?: Icon;
 }) {
   const d = useDraft(draftId);
   const qc = useQueryClient();
@@ -79,30 +158,33 @@ function DraftActions({
   });
   if (d.data?.status === "confirmed")
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-accent">
-        <CheckIcon className="size-3.5" />
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-down">
+        <IconCheck size={14} weight="bold" />
         已确认
       </span>
     );
   if (d.data?.status === "discarded") return <span className="text-xs text-muted">已放弃</span>;
   return (
-    <div className="flex items-center gap-2">
-      <Button
-        size="sm"
-        variant="primary"
-        loading={confirm.isPending}
-        onClick={() => confirm.mutate()}
-      >
-        {confirmLabel}
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        loading={discard.isPending}
-        onClick={() => discard.mutate()}
-      >
-        放弃
-      </Button>
+    <div>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="primary"
+          icon={confirmIcon ?? IconCheck}
+          loading={confirm.isPending}
+          onClick={() => confirm.mutate()}
+        >
+          {confirmLabel}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={discard.isPending}
+          onClick={() => discard.mutate()}
+        >
+          放弃
+        </Button>
+      </div>
       <ErrorNote error={confirm.error ?? discard.error} />
     </div>
   );
@@ -125,8 +207,8 @@ export function StrategyDraftCard({
 }) {
   if (!output.ok) {
     return (
-      <Frame title="策略草稿没有通过校验">
-        <ul className="list-disc pl-4 text-xs text-ink-2">
+      <Frame title="策略草稿没有通过校验" icon={IconError}>
+        <ul className="list-disc space-y-0.5 pl-4 text-xs text-ink-2 marker:text-faint">
           {output.errors?.map((e) => (
             <li key={e}>{e}</li>
           ))}
@@ -138,10 +220,11 @@ export function StrategyDraftCard({
   return (
     <Frame
       title={isNew ? `新策略草稿「${output.strategyName}」` : `修改「${output.strategyName}」`}
-      right={<Badge tone="warn">待确认</Badge>}
+      icon={isNew ? IconStrategy : IconRules}
+      right={<DraftBadge draftId={output.draftId!} />}
     >
       <DiffView changes={output.changes ?? []} describe={isNew ? output.describe : undefined} />
-      <div className="mt-3">
+      <div className="mt-3.5 border-t border-line pt-3">
         <DraftActions
           draftId={output.draftId!}
           confirmLabel={isNew ? "确认创建" : "确认修改"}
@@ -169,18 +252,25 @@ export function TrackingDraftCard({
   send: (text: string) => void;
 }) {
   return (
-    <Frame title="上线跟踪" right={<Badge tone="warn">待确认</Badge>}>
-      <p className="text-sm">
-        「{output.strategyName}」v{output.versionN}，{output.startDate} 起，模拟资金{" "}
-        {output.capital.toLocaleString()}。
-      </p>
+    <Frame title="上线跟踪" icon={IconGoLive} right={<DraftBadge draftId={output.draftId} />}>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+        <dt className="text-muted">策略</dt>
+        <dd className="text-ink">
+          「{output.strategyName}」<span className="font-mono">v{output.versionN}</span>
+        </dd>
+        <dt className="text-muted">上线日</dt>
+        <dd className="font-mono text-ink">{output.startDate}</dd>
+        <dt className="text-muted">模拟资金</dt>
+        <dd className="tabular text-ink">{output.capital.toLocaleString()} 元</dd>
+      </dl>
       {!output.hasBaseline && (
-        <p className="mt-1 text-xs text-warn">这个版本还没有跑完的回测，上线后没法和回测比。</p>
+        <p className="mt-2 text-xs text-warn">这个版本还没有跑完的回测，上线后没法和回测比。</p>
       )}
-      <div className="mt-3">
+      <div className="mt-3.5 border-t border-line pt-3">
         <DraftActions
           draftId={output.draftId}
           confirmLabel="确认上线"
+          confirmIcon={IconGoLive}
           onConfirmed={(r) => send(`我确认上线了（trackingId=${r.trackingId}）。`)}
         />
       </div>
@@ -207,25 +297,20 @@ export function RunCard({ runId }: { runId: string }) {
   const r = q.data;
   if (!r)
     return (
-      <Frame title="回测">
-        {q.error ? (
-          <ErrorNote error={q.error} />
-        ) : (
-          <Loader2 className="size-4 animate-spin text-muted" />
-        )}
+      <Frame title="回测" icon={IconBacktest}>
+        {q.error ? <ErrorNote error={q.error} /> : <Progress note="读取中" progress={0} />}
       </Frame>
     );
   if (r.status !== "done") {
     return (
-      <Frame title="回测">
+      <Frame title="回测" icon={IconBacktest}>
         {r.status === "failed" ? (
-          <ErrorNote error={new Error(r.error ?? "失败")} />
+          <ErrorNote error={new Error(r.error ?? "失败")} className="mt-0" />
         ) : (
-          <div className="flex items-center gap-2 text-xs text-ink-2">
-            <Loader2 className="size-3.5 animate-spin" />
-            {r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}{" "}
-            {Math.round((r.job?.progress ?? 0) * 100)}%
-          </div>
+          <Progress
+            note={r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}
+            progress={r.job?.progress ?? 0}
+          />
         )}
       </Frame>
     );
@@ -234,13 +319,18 @@ export function RunCard({ runId }: { runId: string }) {
   const m = r.metrics!;
   return (
     <Frame
-      title={`回测 ${r.params.start} ~ ${r.params.end}`}
+      title={
+        <span className="font-mono text-[11px]">
+          {r.params.start} ~ {r.params.end}
+        </span>
+      }
+      icon={IconBacktest}
       info={
         <InfoRows
           rows={[
             ["总收益", pct(m.totalReturn)],
             ["基准年化", pct(m.benchCagr)],
-            ["胜率", m.winRate === null ? "—" : pct(m.winRate, 0, false)],
+            ["胜率", m.winRate === null ? NA : pct(m.winRate, 0, false)],
             ["买入笔数", String(m.buys)],
             ...(r.segments?.outOfSample
               ? ([
@@ -251,30 +341,21 @@ export function RunCard({ runId }: { runId: string }) {
           ]}
         />
       }
-      right={
-        <Link to={`/runs/${r.id}`} className="inline-flex items-center text-accent">
-          完整报告 <ChevronRight className="size-3.5" />
-        </Link>
-      }
+      right={<TextLink to={`/runs/${r.id}`}>完整报告</TextLink>}
     >
-      <div className="grid grid-cols-4 gap-2 text-center">
-        {[
+      <MiniStats
+        items={[
           ["年化", pct(m.cagr), tone(m.cagr)],
           ["年化超额", pct(m.excessCagr), tone(m.excessCagr)],
-          ["最大回撤", pct(m.maxDrawdown, 1, false), ""],
-          ["夏普", m.sharpe.toFixed(2), ""],
-        ].map(([l, v, c]) => (
-          <div key={l}>
-            <div className="text-[11px] text-muted">{l}</div>
-            <div className={`text-sm font-semibold ${c}`}>{v}</div>
-          </div>
-        ))}
-      </div>
-      <div className="mt-2">
-        <NavChart points={r.series} height={160} />
+          ["最大回撤", pct(m.maxDrawdown, 1, false)],
+          ["夏普", m.sharpe.toFixed(2)],
+        ]}
+      />
+      <div className="mt-3">
+        <NavChart points={r.series} height={168} />
       </div>
       {r.checks.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-2.5">
           <Checks checks={r.checks} compact />
         </div>
       )}
@@ -287,50 +368,46 @@ export function SweepCard({ runId }: { runId: string }) {
   const r = q.data;
   if (!r || r.status !== "done")
     return (
-      <Frame title="参数扫描">
-        <div className="flex items-center gap-2 text-xs text-ink-2">
-          <Loader2 className="size-3.5 animate-spin" />
-          {r?.job?.note ?? "扫描中…"} {Math.round((r?.job?.progress ?? 0) * 100)}%
-        </div>
+      <Frame title="参数扫描" icon={IconSweep}>
+        <Progress note={r?.job?.note ?? "扫描中…"} progress={r?.job?.progress ?? 0} />
       </Frame>
     );
   const max = Math.max(...r.children.map((c) => Math.abs(c.headline?.excessCagr ?? 0)), 0.01);
   return (
     <Frame
       title={`参数扫描：${r.label}`}
+      icon={IconSweep}
       info="条的长度 = 年化超额（红为正、蓝为负）。相邻取值之间跳得厉害，说明策略对这个参数敏感。"
-      right={
-        <Link to={`/runs/${r.id}`} className="text-accent">
-          详情
-        </Link>
-      }
+      right={<TextLink to={`/runs/${r.id}`}>详情</TextLink>}
     >
-      <ul className="space-y-1">
+      <ul className="space-y-1.5">
         {r.children.map((c) => {
           const v = c.headline?.excessCagr ?? 0;
           return (
             <li
               key={c.id}
-              className="grid grid-cols-[minmax(0,8rem)_1fr_auto] items-center gap-2 text-xs"
+              className="grid grid-cols-[minmax(0,6rem)_1fr_auto] items-center gap-2.5 text-xs"
             >
-              <span className="truncate text-ink-2">{c.label?.split(" = ").pop()}</span>
-              <span className="h-2.5">
+              <span className="truncate font-mono text-[11px] text-ink-2">
+                {c.label?.split(" = ").pop()}
+              </span>
+              <span className="h-2">
                 <span
-                  className="block h-2.5 rounded-r-[4px]"
+                  className="block h-2 rounded-r-[3px] rounded-l-[1px]"
                   style={{
-                    width: `${(Math.abs(v) / max) * 100}%`,
-                    background: v >= 0 ? "var(--up)" : "var(--series-1)",
-                    opacity: 0.85,
+                    width: `${Math.max((Math.abs(v) / max) * 100, 1.5)}%`,
+                    background: v >= 0 ? "var(--up)" : "var(--neg)",
+                    opacity: 0.8,
                   }}
                 />
               </span>
-              <span className={`tabular ${tone(v)}`}>{pct(v)}</span>
+              <span className={cx("tabular w-14 text-right font-medium", tone(v))}>{pct(v)}</span>
             </li>
           );
         })}
       </ul>
       {r.checks.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-2.5">
           <Checks checks={r.checks} compact />
         </div>
       )}
@@ -340,21 +417,22 @@ export function SweepCard({ runId }: { runId: string }) {
 
 // ── 下钻 ──
 
+const QUERY_TITLE: Record<string, string> = {
+  drawdowns: "最大几次回撤",
+  period: "区间表现",
+  holdings_on: "当天持仓",
+  trades: "交易明细",
+  contributors: "盈亏贡献",
+  industry: "行业",
+  monthly: "月度收益",
+};
+
 export function QueryCard({
   output,
 }: {
   output: { runId: string; result: Record<string, unknown> & { what: string } };
 }) {
   const res = output.result;
-  const title: Record<string, string> = {
-    drawdowns: "最大几次回撤",
-    period: "区间表现",
-    holdings_on: "当天持仓",
-    trades: "交易明细",
-    contributors: "盈亏贡献",
-    industry: "行业",
-    monthly: "月度收益",
-  };
   let body: React.ReactNode = null;
   if (res.what === "drawdowns") {
     const dd = res.drawdowns as Array<{
@@ -368,11 +446,11 @@ export function QueryCard({
         <tbody>
           {dd.map((d) => (
             <tr key={d.peak} className="border-b border-line last:border-0">
-              <td className="py-1 text-down">{pct(d.depth, 1, false)}</td>
-              <td className="py-1 text-ink-2">
+              <td className="py-1.5 font-medium text-down">{pct(d.depth, 1, false)}</td>
+              <td className="py-1.5 font-mono text-[11px] text-ink-2">
                 {d.peak} → {d.trough}
               </td>
-              <td className="py-1 text-right text-muted">
+              <td className="py-1.5 text-right text-muted">
                 {d.recovery ? `${d.recovery} 修复` : "未修复"}
               </td>
             </tr>
@@ -392,20 +470,15 @@ export function QueryCard({
     const best = res.bestClosed as Array<{ code: string; pnl: number }>;
     const worst = res.worstClosed as Array<{ code: string; pnl: number }>;
     body = (
-      <div className="space-y-2 text-xs">
-        <div className="grid grid-cols-4 gap-2 text-center">
-          {[
+      <div className="space-y-3 text-xs">
+        <MiniStats
+          items={[
             ["策略", pct(m.totalReturn), tone(m.totalReturn)],
             ["基准", pct(m.benchReturn), tone(m.benchReturn)],
             ["超额", pct(m.excessTotal), tone(m.excessTotal)],
-            ["回撤", pct(m.maxDrawdown, 1, false), ""],
-          ].map(([l, v, c]) => (
-            <div key={l}>
-              <div className="text-muted">{l}</div>
-              <div className={`font-semibold ${c}`}>{v}</div>
-            </div>
-          ))}
-        </div>
+            ["回撤", pct(m.maxDrawdown, 1, false)],
+          ]}
+        />
         {worst.length > 0 && (
           <PnlBars rows={worst.map((w) => ({ label: w.code, value: w.pnl }))} format={money} />
         )}
@@ -420,12 +493,12 @@ export function QueryCard({
       items: Array<{ code: string; weight: number }>;
     } | null;
     body = snap ? (
-      <div className="flex flex-wrap gap-1.5">
-        <span className="text-xs text-muted">{snap.date}</span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 font-mono text-[11px] text-muted">{snap.date}</span>
         {snap.items.map((i) => (
-          <Badge key={i.code}>
+          <Tag key={i.code} mono>
             {i.code} {pct(i.weight, 0, false)}
-          </Badge>
+          </Tag>
         ))}
       </div>
     ) : (
@@ -443,23 +516,25 @@ export function QueryCard({
       reason: string;
     }>;
     body = (
-      <table className="tabular w-full text-xs">
-        <tbody>
-          {trades.slice(0, 30).map((t) => (
-            <tr key={t.seq} className="border-b border-line last:border-0">
-              <td className="py-1 text-ink-2">{t.date}</td>
-              <td className="py-1">{t.name ?? t.code}</td>
-              <td className={t.side === "buy" ? "text-up" : "text-down"}>
-                {t.side === "buy" ? "买" : "卖"}
-              </td>
-              <td className="py-1 text-right">{t.price.toFixed(2)}</td>
-              <td className={`py-1 text-right ${tone(t.pnl)}`}>
-                {t.pnl === null ? "" : money(t.pnl)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="max-h-72 overflow-y-auto">
+        <table className="tabular w-full text-xs">
+          <tbody>
+            {trades.slice(0, 30).map((t) => (
+              <tr key={t.seq} className="border-b border-line last:border-0">
+                <td className="py-1.5 font-mono text-[11px] text-muted">{t.date}</td>
+                <td className="py-1.5 text-ink">{t.name ?? t.code}</td>
+                <td className={cx("py-1.5", t.side === "buy" ? "text-up" : "text-down")}>
+                  {t.side === "buy" ? "买" : "卖"}
+                </td>
+                <td className="py-1.5 text-right">{t.price.toFixed(2)}</td>
+                <td className={cx("py-1.5 text-right font-medium", tone(t.pnl))}>
+                  {t.pnl === null ? "" : money(t.pnl)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     );
   } else if (res.what === "contributors") {
     const best = res.best as Array<{ code: string; name: string; pnl: number }>;
@@ -491,7 +566,11 @@ export function QueryCard({
   } else if (res.what === "monthly") {
     body = <MonthlyTable monthly={res.monthly as never} yearly={res.yearly as never} />;
   }
-  return <Frame title={title[res.what] ?? res.what}>{body}</Frame>;
+  return (
+    <Frame title={QUERY_TITLE[res.what] ?? res.what} icon={IconBacktest}>
+      {body}
+    </Frame>
+  );
 }
 
 export function SecurityCard({
@@ -499,7 +578,12 @@ export function SecurityCard({
 }: {
   output: { found: boolean; query: string; card?: Record<string, unknown> };
 }) {
-  if (!output.found || !output.card) return <Frame title="个股">没找到「{output.query}」。</Frame>;
+  if (!output.found || !output.card)
+    return (
+      <Frame title="个股" icon={IconScreen}>
+        <p className="text-xs text-muted">没找到「{output.query}」。</p>
+      </Frame>
+    );
   const sec = output.card.security as {
     code: string;
     name: string;
@@ -508,7 +592,7 @@ export function SecurityCard({
     delist_date: string | null;
   };
   const f = (output.card.factors ?? {}) as Record<string, number | string | boolean | null>;
-  const items: Array<[string, string, string?]> = [
+  const items: Array<[string, string]> = [
     ["收盘", fmtFactor(f.close)],
     ["市值", fmtFactor(f.mcap, "亿")],
     ["PE TTM", fmtFactor(f.pe_ttm)],
@@ -522,49 +606,95 @@ export function SecurityCard({
   ];
   return (
     <Frame
-      title={`${sec.name} ${sec.code}`}
-      right={<span className="text-muted">{String(f.date ?? "")}</span>}
+      title={
+        <>
+          {sec.name}
+          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">{sec.code}</span>
+        </>
+      }
+      icon={IconScreen}
+      right={
+        <span className="font-mono text-[11px] font-normal text-muted">{String(f.date ?? "")}</span>
+      }
     >
-      <div className="mb-2 text-xs text-muted">
-        {sec.industry ?? "—"} · 上市 {sec.list_date ?? "—"}
-        {sec.delist_date ? ` · 已退市 ${sec.delist_date}` : ""}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+        <Tag>{sec.industry ?? NA}</Tag>
+        <span>上市 {sec.list_date ?? NA}</span>
+        {sec.delist_date && <Badge tone="warn">已退市 {sec.delist_date}</Badge>}
       </div>
-      <div className="grid grid-cols-5 gap-2 text-center text-xs">
+      <dl className="grid grid-cols-5 gap-x-2 gap-y-3 text-xs">
         {items.map(([l, v]) => (
-          <div key={l}>
-            <div className="text-muted">{l}</div>
-            <div className="tabular font-medium">{v}</div>
+          <div key={l} className="min-w-0">
+            <dt className="truncate text-2xs text-muted">{l}</dt>
+            <dd className="tabular mt-0.5 font-medium text-ink">{v}</dd>
           </div>
         ))}
-      </div>
+      </dl>
     </Frame>
   );
 }
 
+/** 工具名 → 人话 + 图标（没有卡片的工具在对话里显示成一行小字） */
+const TOOL_META: Record<string, [string, Icon]> = {
+  list_factors: ["查看可用因子", IconRules],
+  list_strategies: ["查看你的策略", IconStrategy],
+  get_strategy: ["读取策略", IconStrategy],
+  propose_strategy: ["写策略草稿", IconStrategy],
+  run_backtest: ["提交回测", IconBacktest],
+  get_run: ["读取回测", IconBacktest],
+  list_runs: ["查看回测记录", IconHistory],
+  query_run: ["下钻回测", IconBacktest],
+  compare_runs: ["对比回测", IconCompare],
+  run_sensitivity: ["提交参数扫描", IconSweep],
+  screen_today: ["按策略选股", IconScreen],
+  screen_rules: ["按条件选股", IconScreen],
+  lookup_security: ["查个股", IconScreen],
+  propose_tracking: ["准备上线跟踪", IconGoLive],
+  get_tracking: ["读取跟踪", IconTracking],
+  get_overview: ["查看看板", IconBoard],
+  propose_stop_tracking: ["准备停止跟踪", IconStop],
+};
+
 export function ToolChip({ name, state, error }: { name: string; state: string; error?: string }) {
   const [open, setOpen] = useState(false);
-  const label: Record<string, string> = {
-    list_factors: "查看因子",
-    list_strategies: "查看策略列表",
-    get_strategy: "读取策略",
-    list_runs: "查看回测记录",
-    get_tracking: "读取跟踪",
-    get_run: "读取回测",
-  };
+  const [label, Ico] = TOOL_META[name] ?? [TOOL_ACTIVITY[name] ?? name, IconData];
+  const failed = state === "output-error";
+  const done = state === "output-available";
   return (
-    <div className="my-1 text-xs text-muted">
-      <button className="inline-flex items-center gap-1" onClick={() => setOpen(!open)}>
-        {state === "output-error" ? (
-          <X className="size-3 text-warn" />
-        ) : state === "output-available" ? (
-          <Wrench className="size-3" />
-        ) : (
-          <Loader2 className="size-3 animate-spin" />
+    <div className="my-1.5">
+      <button
+        type="button"
+        onClick={() => failed && setOpen(!open)}
+        aria-expanded={failed ? open : undefined}
+        className={cx(
+          "inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-2xs ring-1 ring-inset",
+          failed ? "bg-warn-bg text-warn ring-warn-line" : "bg-surface-2/60 text-muted ring-line",
+          !failed && "cursor-default",
         )}
-        {label[name] ?? name}
-        {state === "output-error" && "失败"}
+      >
+        {failed ? (
+          <IconError size={12} weight="bold" />
+        ) : done ? (
+          <Ico size={12} />
+        ) : (
+          <IconSpinner size={12} className="animate-spin" />
+        )}
+        {label}
+        {failed && (
+          <>
+            失败
+            <IconChevronDown
+              size={10}
+              className={cx("transition-transform", open && "rotate-180")}
+            />
+          </>
+        )}
       </button>
-      {open && error && <div className="mt-1 whitespace-pre-wrap text-warn">{error}</div>}
+      {open && error && (
+        <div className="mt-1.5 rounded-lg bg-warn-bg px-2.5 py-2 text-2xs whitespace-pre-wrap text-warn">
+          {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -578,7 +708,13 @@ export function ScreenCard({
 }) {
   return (
     <Frame
-      title={`${title} · ${output.date}`}
+      title={
+        <>
+          {title}
+          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">{output.date}</span>
+        </>
+      }
+      icon={IconScreen}
       info={
         <>
           {output.describe?.length ? (
@@ -591,7 +727,11 @@ export function ScreenCard({
           按规则在这一天的数据上算出的结果，不是投资建议。
         </>
       }
-      right={<span className="text-muted">共 {output.rows.length} 只</span>}
+      right={
+        <span className="font-normal text-muted">
+          共 <span className="tabular">{output.rows.length}</span> 只
+        </span>
+      }
     >
       <div className="max-h-72 overflow-auto">
         <ScreenTable result={output} />
@@ -627,9 +767,13 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
   const asOf = Object.entries(output.dataAsOf)
     .filter(([, d]) => d)
     .map(([m, d]) => `${MARKET_TEXT[m]} ${d}`)
-    .join(" · ");
+    .join("，");
   return (
-    <Frame title="我的跟踪" right={<span className="text-muted">数据截至 {asOf || "—"}</span>}>
+    <Frame
+      title="我的跟踪"
+      icon={IconTracking}
+      right={<span className="font-normal text-muted">数据截至 {asOf || NA}</span>}
+    >
       {output.failedMarkets.length > 0 && (
         <p className="mb-2 text-xs text-warn">
           {output.failedMarkets.map((m) => MARKET_TEXT[m]).join("、")}
@@ -637,19 +781,31 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
         </p>
       )}
       {output.trackings.length ? (
-        <ul className="divide-y divide-line">
+        <ul>
           {output.trackings.map((t) => (
-            <li key={t.id} className="flex items-center gap-2 py-1.5 text-xs">
-              <Link to={`/trackings/${t.id}`} className="min-w-0 flex-1 hover:text-accent">
-                <div className="truncate font-medium text-ink">{t.strategyName}</div>
-                <div className="truncate text-muted">
-                  {t.days ? `跟踪 ${t.days} 天` : `${t.startDate} 开始`} ·{" "}
-                  {deviationText(t.deviationPct, t.days)}
+            <li key={t.id} className="border-b border-line last:border-0">
+              <Link
+                to={`/trackings/${t.id}`}
+                className="group/ov flex items-center gap-2 py-2 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-ink transition-colors group-hover/ov:text-accent">
+                    {t.strategyName}
+                  </div>
+                  <div className="truncate text-muted">
+                    {t.days ? `跟踪 ${t.days} 天` : `${t.startDate} 开始`}，
+                    {deviationText(t.deviationPct, t.days)}
+                  </div>
                 </div>
+                <span
+                  className={cx(
+                    "text-sm font-semibold tracking-[-0.01em]",
+                    t.days ? tone(t.excess) : "text-muted",
+                  )}
+                >
+                  <Figure text={t.days ? pct(t.excess) : NA} />
+                </span>
               </Link>
-              <span className={cx("tabular text-sm font-semibold", tone(t.excess))}>
-                {t.days ? pct(t.excess) : "—"}
-              </span>
             </li>
           ))}
         </ul>
@@ -657,20 +813,22 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
         <p className="text-xs text-muted">还没有上线跟踪的策略。</p>
       )}
       {output.plans.length > 0 && (
-        <div className="mt-2 space-y-1.5 border-t border-line pt-2">
+        <div className="mt-2 space-y-2 border-t border-line pt-2.5">
           {output.plans.map((p) => (
             <div key={p.trackingId} className="flex flex-wrap items-center gap-1 text-xs">
-              <span className="text-muted">
-                {p.strategyName} · {p.planDate}：
+              <span className="mr-0.5 text-muted">
+                {p.strategyName} <span className="font-mono text-[11px]">{p.planDate}</span>
               </span>
               {p.buys.map((n) => (
                 <Badge key={`b-${n}`} tone="up">
-                  买 {n}
+                  <span className="opacity-70">买</span>
+                  {n}
                 </Badge>
               ))}
               {p.sells.map((n) => (
                 <Badge key={`s-${n}`} tone="down">
-                  卖 {n}
+                  <span className="opacity-70">卖</span>
+                  {n}
                 </Badge>
               ))}
             </div>
@@ -713,16 +871,23 @@ export function StopTrackingCard({
   return (
     <Frame
       title="停止跟踪"
-      right={stopped ? <Badge>已停止</Badge> : <Badge tone="warn">待确认</Badge>}
+      icon={IconStop}
+      right={stopped ? <Badge>已停止</Badge> : <Badge tone="warn">待你确认</Badge>}
     >
-      <p className="text-sm">
-        「{output.strategyName}」{output.startDate} 起
+      <p className="text-sm text-ink">
+        「{output.strategyName}」<span className="font-mono text-xs">{output.startDate}</span> 起
         {output.days ? `，已跟踪 ${output.days} 天，跟踪超额 ${pct(output.excess)}` : ""}。
       </p>
       <p className="mt-1 text-xs text-muted">停止后不再每日结算，历史记录都保留。</p>
       {!stopped && (
-        <div className="mt-3 flex items-center gap-2">
-          <Button size="sm" variant="danger" loading={stop.isPending} onClick={() => stop.mutate()}>
+        <div className="mt-3.5 border-t border-line pt-3">
+          <Button
+            size="sm"
+            variant="danger"
+            icon={IconStop}
+            loading={stop.isPending}
+            onClick={() => stop.mutate()}
+          >
             确认停止
           </Button>
           <ErrorNote error={stop.error} />
@@ -734,7 +899,7 @@ export function StopTrackingCard({
 
 export function CompareCard({ runIds }: { runIds: string[] }) {
   return (
-    <Frame title="回测对比">
+    <Frame title="回测对比" icon={IconCompare}>
       <CompareView ids={runIds} />
     </Frame>
   );

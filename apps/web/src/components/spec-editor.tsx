@@ -2,14 +2,14 @@
  * 表单式策略编辑器（spec §11）：和对话改的是同一个对象。保存 = 提交草稿 → 看差异 → 确认后才生成新版本。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import type { Condition, FactorDef, Market, StrategySpec } from "@ivan/core";
 import { api } from "../lib/api.ts";
 import type { ProposeResult } from "../lib/types.ts";
 import { DiffView } from "./diff-view.tsx";
-import { Button, ErrorNote, Field, Input, Modal, Select } from "./ui.tsx";
+import { IconAdd, IconCheck, IconDelete, IconEdit } from "./icons.tsx";
+import { Button, Checkbox, cx, ErrorNote, Field, IconButton, Input, Modal, Select } from "./ui.tsx";
 
 const BOARDS: Record<Market, Array<[string, string]>> = {
   A: [
@@ -52,6 +52,31 @@ function blank(market: Market): StrategySpec {
 function numOrUndef(v: string): number | undefined {
   const n = Number(v);
   return v.trim() === "" || !Number.isFinite(n) ? undefined : n;
+}
+
+/** 表单分区：标题 + 一句说明，和上一区之间一条细线 */
+function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <section className="border-t border-line pt-5">
+      <div className="mb-3">
+        <h3 className="text-sm font-semibold text-ink">{title}</h3>
+        {hint && <p className="mt-0.5 text-xs text-muted">{hint}</p>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** 行内的「文字 + 输入框 + 单位」 */
+function Inline({ children, title }: { children: ReactNode; title?: string }) {
+  return (
+    <label
+      title={title}
+      className="inline-flex items-center gap-1.5 text-sm whitespace-nowrap text-ink-2"
+    >
+      {children}
+    </label>
+  );
 }
 
 export function SpecEditor({
@@ -128,122 +153,136 @@ export function SpecEditor({
     const f = byKey.get(c.factor);
     const setCond = (next: Condition) => up((s) => void (s.filters[i] = next));
     return (
-      <div key={i} className="flex flex-wrap items-center gap-2">
-        <Select
-          value={c.factor}
-          onChange={(e) => {
-            const nf = byKey.get(e.target.value);
-            if (!nf) return;
-            if (nf.kind === "bool") setCond({ factor: nf.key, op: "not" });
-            else if (nf.kind === "category") setCond({ factor: nf.key, op: "in", value: [""] });
-            else setCond({ factor: nf.key, op: ">=", value: 0 });
-          }}
-          className="w-48"
-        >
-          {factorOptions(factors.data?.factors ?? [])}
-        </Select>
-        {f?.kind === "bool" && (
+      <div key={i} className="rounded-lg bg-surface-2/70 px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-2">
           <Select
-            value={c.op}
-            onChange={(e) => setCond({ factor: c.factor, op: e.target.value as "is" | "not" })}
+            aria-label="因子"
+            value={c.factor}
+            onChange={(e) => {
+              const nf = byKey.get(e.target.value);
+              if (!nf) return;
+              if (nf.kind === "bool") setCond({ factor: nf.key, op: "not" });
+              else if (nf.kind === "category") setCond({ factor: nf.key, op: "in", value: [""] });
+              else setCond({ factor: nf.key, op: ">=", value: 0 });
+            }}
+            className="w-52"
           >
-            <option value="is">是</option>
-            <option value="not">不是</option>
+            {factorOptions(factors.data?.factors ?? [])}
           </Select>
-        )}
-        {f?.kind === "category" && "value" in c && Array.isArray(c.value) && c.op !== "between" && (
-          <>
+          {f?.kind === "bool" && (
             <Select
+              aria-label="条件"
               value={c.op}
-              onChange={(e) =>
-                setCond({
-                  factor: c.factor,
-                  op: e.target.value as "in" | "not_in",
-                  value: c.value as string[],
-                })
-              }
+              onChange={(e) => setCond({ factor: c.factor, op: e.target.value as "is" | "not" })}
             >
-              <option value="in">属于</option>
-              <option value="not_in">不属于</option>
+              <option value="is">是</option>
+              <option value="not">不是</option>
             </Select>
-            <Input
-              className="w-56"
-              placeholder="用顿号或逗号分隔，如 银行、保险"
-              value={(c.value as string[]).join("、")}
-              onChange={(e) =>
-                setCond({
-                  factor: c.factor,
-                  op: c.op as "in" | "not_in",
-                  value: e.target.value.split(/[、,，]/).map((x) => x.trim()),
-                })
-              }
-            />
-          </>
-        )}
-        {f?.kind === "number" && (
-          <>
-            <Select
-              value={c.op}
-              onChange={(e) => {
-                const op = e.target.value;
-                if (op === "between") setCond({ factor: c.factor, op: "between", value: [0, 10] });
-                else {
-                  const prev = (c as { value?: unknown }).value;
-                  setCond({
-                    factor: c.factor,
-                    op: op as ">",
-                    value: typeof prev === "number" ? prev : 0,
-                  });
-                }
-              }}
-            >
-              {[">=", ">", "<=", "<", "between"].map((o) => (
-                <option key={o} value={o}>
-                  {o === "between" ? "介于" : o.replace(">=", "≥").replace("<=", "≤")}
-                </option>
-              ))}
-            </Select>
-            {c.op === "between" ? (
+          )}
+          {f?.kind === "category" &&
+            "value" in c &&
+            Array.isArray(c.value) &&
+            c.op !== "between" && (
               <>
+                <Select
+                  aria-label="条件"
+                  value={c.op}
+                  onChange={(e) =>
+                    setCond({
+                      factor: c.factor,
+                      op: e.target.value as "in" | "not_in",
+                      value: c.value as string[],
+                    })
+                  }
+                >
+                  <option value="in">属于</option>
+                  <option value="not_in">不属于</option>
+                </Select>
                 <Input
-                  className="w-24"
-                  type="number"
-                  value={c.value[0]}
-                  onChange={(e) => setCond({ ...c, value: [Number(e.target.value), c.value[1]] })}
-                />
-                <span className="text-xs text-muted">到</span>
-                <Input
-                  className="w-24"
-                  type="number"
-                  value={c.value[1]}
-                  onChange={(e) => setCond({ ...c, value: [c.value[0], Number(e.target.value)] })}
+                  aria-label="取值"
+                  className="w-60"
+                  placeholder="用顿号或逗号分隔，如 银行、保险"
+                  value={(c.value as string[]).join("、")}
+                  onChange={(e) =>
+                    setCond({
+                      factor: c.factor,
+                      op: c.op as "in" | "not_in",
+                      value: e.target.value.split(/[、,，]/).map((x) => x.trim()),
+                    })
+                  }
                 />
               </>
-            ) : (
-              <Input
-                className="w-24"
-                type="number"
-                value={
-                  typeof (c as { value?: unknown }).value === "number"
-                    ? (c as { value: number }).value
-                    : 0
-                }
-                onChange={(e) =>
-                  setCond({ factor: c.factor, op: c.op as ">", value: Number(e.target.value) })
-                }
-              />
             )}
-            {f.unit && <span className="text-xs text-muted">{f.unit}</span>}
-          </>
-        )}
-        <button
-          className="rounded p-1 text-muted hover:text-up"
-          onClick={() => up((s) => void s.filters.splice(i, 1))}
-          aria-label="删除条件"
-        >
-          <Trash2 className="size-4" />
-        </button>
-        {f && <p className="w-full text-[11px] text-muted">{f.describe}</p>}
+          {f?.kind === "number" && (
+            <>
+              <Select
+                aria-label="比较"
+                value={c.op}
+                onChange={(e) => {
+                  const op = e.target.value;
+                  if (op === "between")
+                    setCond({ factor: c.factor, op: "between", value: [0, 10] });
+                  else {
+                    const prev = (c as { value?: unknown }).value;
+                    setCond({
+                      factor: c.factor,
+                      op: op as ">",
+                      value: typeof prev === "number" ? prev : 0,
+                    });
+                  }
+                }}
+              >
+                {[">=", ">", "<=", "<", "between"].map((o) => (
+                  <option key={o} value={o}>
+                    {o === "between" ? "介于" : o.replace(">=", "≥").replace("<=", "≤")}
+                  </option>
+                ))}
+              </Select>
+              {c.op === "between" ? (
+                <>
+                  <Input
+                    aria-label="下限"
+                    className="w-24"
+                    type="number"
+                    value={c.value[0]}
+                    onChange={(e) => setCond({ ...c, value: [Number(e.target.value), c.value[1]] })}
+                  />
+                  <span className="text-xs text-muted">到</span>
+                  <Input
+                    aria-label="上限"
+                    className="w-24"
+                    type="number"
+                    value={c.value[1]}
+                    onChange={(e) => setCond({ ...c, value: [c.value[0], Number(e.target.value)] })}
+                  />
+                </>
+              ) : (
+                <Input
+                  aria-label="取值"
+                  className="w-24"
+                  type="number"
+                  value={
+                    typeof (c as { value?: unknown }).value === "number"
+                      ? (c as { value: number }).value
+                      : 0
+                  }
+                  onChange={(e) =>
+                    setCond({ factor: c.factor, op: c.op as ">", value: Number(e.target.value) })
+                  }
+                />
+              )}
+              {f.unit && <span className="text-xs text-muted">{f.unit}</span>}
+            </>
+          )}
+          <IconButton
+            icon={IconDelete}
+            label="删除条件"
+            size="sm"
+            className="ml-auto hover:text-danger"
+            onClick={() => up((s) => void s.filters.splice(i, 1))}
+          />
+        </div>
+        {f && <p className="mt-1.5 text-2xs leading-4 text-muted">{f.describe}</p>}
       </div>
     );
   };
@@ -286,30 +325,28 @@ export function SpecEditor({
         </Field>
       </div>
 
-      <section>
-        <h3 className="mb-2 text-sm font-semibold">股票池</h3>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-          <div className="flex gap-3">
+      <Section title="股票池" hint="先圈定范围，下面的条件只在这里面挑">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
             {BOARDS[spec.market].map(([v, l]) => (
-              <label key={v} className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                <input
-                  type="checkbox"
-                  checked={!spec.universe.boards || spec.universe.boards.includes(v)}
-                  onChange={(e) =>
-                    up((s) => {
-                      const all = BOARDS[s.market].map((b) => b[0]);
-                      const cur = new Set(s.universe.boards ?? all);
-                      if (e.target.checked) cur.add(v);
-                      else cur.delete(v);
-                      s.universe.boards = cur.size === all.length ? undefined : [...cur];
-                    })
-                  }
-                />
-                {l}
-              </label>
+              <Checkbox
+                key={v}
+                label={l}
+                checked={!spec.universe.boards || spec.universe.boards.includes(v)}
+                onChange={(e) =>
+                  up((s) => {
+                    const all = BOARDS[s.market].map((b) => b[0]);
+                    const cur = new Set(s.universe.boards ?? all);
+                    if (e.target.checked) cur.add(v);
+                    else cur.delete(v);
+                    s.universe.boards = cur.size === all.length ? undefined : [...cur];
+                  })
+                }
+              />
             ))}
           </div>
-          <div className="flex gap-3">
+          <span aria-hidden className="h-4 w-px bg-line-strong max-sm:hidden" />
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
             {(
               [
                 ["st", "排除 ST"],
@@ -318,25 +355,24 @@ export function SpecEditor({
               ] as const
             ).map(([v, l]) =>
               spec.market === "HK" && v === "st" ? null : (
-                <label key={v} className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                  <input
-                    type="checkbox"
-                    checked={spec.universe.exclude.includes(v)}
-                    onChange={(e) =>
-                      up((s) => {
-                        const set = new Set(s.universe.exclude);
-                        if (e.target.checked) set.add(v);
-                        else set.delete(v);
-                        s.universe.exclude = [...set];
-                      })
-                    }
-                  />
-                  {l}
-                </label>
+                <Checkbox
+                  key={v}
+                  label={l}
+                  checked={spec.universe.exclude.includes(v)}
+                  onChange={(e) =>
+                    up((s) => {
+                      const set = new Set(s.universe.exclude);
+                      if (e.target.checked) set.add(v);
+                      else set.delete(v);
+                      s.universe.exclude = [...set];
+                    })
+                  }
+                />
               ),
             )}
           </div>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <span aria-hidden className="h-4 w-px bg-line-strong max-sm:hidden" />
+          <Inline>
             市值 ≥
             <Input
               className="w-20"
@@ -345,37 +381,40 @@ export function SpecEditor({
               onChange={(e) => up((s) => void (s.universe.minMcap = numOrUndef(e.target.value)))}
             />
             亿
-          </label>
+          </Inline>
         </div>
-      </section>
+      </Section>
 
-      <section>
-        <h3 className="mb-2 text-sm font-semibold">条件（全部满足）</h3>
+      <Section title="条件" hint="全部满足才入选">
         <div className="space-y-2">{spec.filters.map(condRow)}</div>
         <Button
           size="sm"
           variant="ghost"
+          icon={IconAdd}
           className="mt-2"
           onClick={() => up((s) => void s.filters.push({ factor: "pe_ttm", op: "<=", value: 30 }))}
         >
-          <Plus className="size-3.5" />
           加条件
         </Button>
-      </section>
+      </Section>
 
-      <section>
-        <h3 className="mb-2 text-sm font-semibold">排序（横截面百分位加权）</h3>
+      <Section title="排序" hint="按横截面百分位加权打分，取前 N 只">
         <div className="space-y-2">
           {spec.rank?.terms.map((t, i) => (
-            <div key={i} className="flex flex-wrap items-center gap-2">
+            <div
+              key={i}
+              className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-2/70 px-3 py-2.5"
+            >
               <Select
+                aria-label="排序因子"
                 value={t.factor}
                 onChange={(e) => up((s) => void (s.rank!.terms[i]!.factor = e.target.value))}
-                className="w-48"
+                className="w-52"
               >
                 {factorOptions(numeric)}
               </Select>
               <Select
+                aria-label="方向"
                 value={t.better}
                 onChange={(e) =>
                   up((s) => void (s.rank!.terms[i]!.better = e.target.value as "high" | "low"))
@@ -384,41 +423,43 @@ export function SpecEditor({
                 <option value="high">越高越好</option>
                 <option value="low">越低越好</option>
               </Select>
-              <span className="text-xs text-muted">权重</span>
-              <Input
-                className="w-20"
-                type="number"
-                min={0.1}
-                step={0.5}
-                value={t.weight}
-                onChange={(e) =>
-                  up((s) => void (s.rank!.terms[i]!.weight = Number(e.target.value) || 1))
-                }
-              />
+              <Inline>
+                权重
+                <Input
+                  className="w-20"
+                  type="number"
+                  min={0.1}
+                  step={0.5}
+                  value={t.weight}
+                  onChange={(e) =>
+                    up((s) => void (s.rank!.terms[i]!.weight = Number(e.target.value) || 1))
+                  }
+                />
+              </Inline>
               {(spec.rank?.terms.length ?? 0) > 1 && (
-                <button
-                  className="rounded p-1 text-muted hover:text-up"
+                <IconButton
+                  icon={IconDelete}
+                  label="删除排序项"
+                  size="sm"
+                  className="ml-auto hover:text-danger"
                   onClick={() => up((s) => void s.rank!.terms.splice(i, 1))}
-                  aria-label="删除排序项"
-                >
-                  <Trash2 className="size-4" />
-                </button>
+                />
               )}
             </div>
           ))}
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+        <div className="mt-2 flex flex-wrap items-center gap-4">
           <Button
             size="sm"
             variant="ghost"
+            icon={IconAdd}
             onClick={() =>
               up((s) => void s.rank!.terms.push({ factor: "roe_ttm", weight: 1, better: "high" }))
             }
           >
-            <Plus className="size-3.5" />
             加排序项
           </Button>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          <Inline>
             持有前
             <Input
               className="w-16"
@@ -431,15 +472,15 @@ export function SpecEditor({
               }
             />
             只
-          </label>
+          </Inline>
         </div>
-      </section>
+      </Section>
 
-      <section>
-        <h3 className="mb-2 text-sm font-semibold">调仓与卖出</h3>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <Section title="调仓与卖出" hint="多久调一次、什么时候卖、单只最多买多少">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <Inline>
             <Select
+              aria-label="调仓频率"
               value={spec.rebalance.every}
               onChange={(e) => up((s) => void (s.rebalance.every = e.target.value as "week"))}
             >
@@ -448,11 +489,8 @@ export function SpecEditor({
               <option value="quarter">每季</option>
             </Select>
             第一个交易日调仓
-          </label>
-          <label
-            className="inline-flex items-center gap-1.5 whitespace-nowrap"
-            title="持仓掉出前 top × 缓冲 名才卖，降低换手"
-          >
+          </Inline>
+          <Inline title="持仓掉出前 top × 缓冲 名才卖，降低换手">
             缓冲
             <Input
               className="w-16"
@@ -466,16 +504,15 @@ export function SpecEditor({
               }
             />
             倍
-          </label>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
-            <input
-              type="checkbox"
-              checked={spec.exits.dropWhenFiltered}
-              onChange={(e) => up((s) => void (s.exits.dropWhenFiltered = e.target.checked))}
-            />
-            掉出名单就卖
-          </label>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          </Inline>
+          <Checkbox
+            label="掉出名单就卖"
+            checked={spec.exits.dropWhenFiltered}
+            onChange={(e) => up((s) => void (s.exits.dropWhenFiltered = e.target.checked))}
+          />
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3">
+          <Inline>
             止盈
             <Input
               className="w-16"
@@ -491,8 +528,8 @@ export function SpecEditor({
               }
             />
             %
-          </label>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          </Inline>
+          <Inline>
             止损
             <Input
               className="w-16"
@@ -508,8 +545,8 @@ export function SpecEditor({
               }
             />
             %
-          </label>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          </Inline>
+          <Inline>
             最长持有
             <Input
               className="w-20"
@@ -518,8 +555,8 @@ export function SpecEditor({
               onChange={(e) => up((s) => void (s.exits.maxHoldDays = numOrUndef(e.target.value)))}
             />
             个交易日
-          </label>
-          <label className="inline-flex items-center gap-1.5 whitespace-nowrap">
+          </Inline>
+          <Inline>
             单只上限
             <Input
               className="w-16"
@@ -535,17 +572,28 @@ export function SpecEditor({
               }
             />
             %
-          </label>
+          </Inline>
         </div>
-      </section>
+      </Section>
 
       <ErrorNote error={propose.error} />
       {propose.data && !propose.data.ok && (
         <ErrorNote error={new Error(propose.data.errors.join("\n"))} />
       )}
-      <div className="flex justify-end gap-2">
+      <div
+        className={cx(
+          "flex items-center justify-end gap-2 border-t border-line pt-4",
+          !onDone && "sticky bottom-0 bg-surface",
+        )}
+      >
+        <span className="mr-auto text-xs text-muted">保存后先看差异，确认了才生成新版本</span>
         {onDone && <Button onClick={onDone}>取消</Button>}
-        <Button variant="primary" loading={propose.isPending} onClick={() => propose.mutate()}>
+        <Button
+          variant="primary"
+          icon={IconEdit}
+          loading={propose.isPending}
+          onClick={() => propose.mutate()}
+        >
           {strategyId ? "保存为新版本…" : "创建…"}
         </Button>
       </div>
@@ -554,11 +602,13 @@ export function SpecEditor({
         open={!!proposal}
         onClose={() => setProposal(null)}
         title={strategyId ? "确认这些修改？" : "确认创建这个策略？"}
+        icon={IconCheck}
         footer={
           <>
             <Button onClick={() => setProposal(null)}>再改改</Button>
             <Button
               variant="primary"
+              icon={IconCheck}
               loading={confirm.isPending}
               onClick={() => proposal && confirm.mutate(proposal.draftId)}
             >

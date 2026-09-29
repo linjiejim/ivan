@@ -2,14 +2,50 @@
  * 跟踪详情（spec §7）：回测段 + 跟踪段曲线、与回测的偏离、持仓、明日计划、停止。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
-import { Link, useParams } from "react-router";
+import { useEffect, useState } from "react";
+import { useParams } from "react-router";
 import type { OpenPosition } from "@ivan/core";
 import { useChatUi } from "../chat/chat-context.tsx";
 import { NavChart } from "../components/charts/nav-chart.tsx";
-import { Badge, Button, Card, Checks, ErrorNote, Spinner, Stat } from "../components/ui.tsx";
+import {
+  IconAI,
+  IconChart,
+  IconChecks,
+  IconPlan,
+  IconPositions,
+  IconStop,
+} from "../components/icons.tsx";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  Checks,
+  cx,
+  DataTable,
+  ErrorNote,
+  LiveDot,
+  Modal,
+  PageHeader,
+  PageSkeleton,
+  Skeleton,
+  Stat,
+  Tag,
+  Td,
+  TextLink,
+  Th,
+} from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { DEVIATION_INFO, deviationText, MARKET_TEXT, money, pct, tone } from "../lib/format.ts";
+import {
+  beatPct,
+  DEVIATION_INFO,
+  deviationText,
+  MARKET_TEXT,
+  money,
+  pct,
+  tone,
+} from "../lib/format.ts";
+import { usePageTitle } from "../lib/title.ts";
 import type { Check, TrackingChart, TrackingView } from "../lib/types.ts";
 
 type TrackingDetail = TrackingView & {
@@ -35,11 +71,17 @@ export function TrackingPage() {
   });
   const chat = useChatUi();
   const qc = useQueryClient();
+  const [stopping, setStopping] = useState(false);
   const stop = useMutation({
     mutationFn: () => api.post(`/api/trackings/${id}/stop`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["tracking", id] }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["tracking", id] });
+      await qc.invalidateQueries({ queryKey: ["dashboard"] });
+      setStopping(false);
+    },
   });
   const t = q.data;
+  usePageTitle(t ? `跟踪「${t.strategyName}」` : "跟踪");
   useEffect(() => {
     if (t)
       chat.setPage({
@@ -49,7 +91,7 @@ export function TrackingPage() {
         label: `跟踪「${t.strategyName}」`,
       });
   }, [t?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (q.isLoading) return <Spinner />;
+  if (q.isLoading) return <PageSkeleton />;
   if (!t) return <ErrorNote error={q.error} />;
   const summary = (t.summary ?? {}) as {
     positions?: OpenPosition[];
@@ -65,49 +107,65 @@ export function TrackingPage() {
       ? summary.replay
       : null;
   const points = chart.data ? [...chart.data.backtest, ...chart.data.tracking] : [];
+  const active = t.status === "active";
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-lg font-semibold">跟踪：{t.strategyName}</h1>
-        <Badge>{MARKET_TEXT[t.market]}</Badge>
-        <Badge tone={t.status === "active" ? "accent" : "neutral"}>
-          {t.status === "active" ? "运行中" : "已停止"}
-        </Badge>
-        <Link to={`/strategies/${t.strategyId}`} className="text-sm text-accent">
-          策略
-        </Link>
-        <div className="ml-auto flex gap-2">
-          <Button
-            onClick={() =>
-              chat.ask("这个跟踪最近表现怎么样？和回测相比偏离大吗？", { trackingId: t.id })
-            }
-          >
-            问 AI
-          </Button>
-          {t.status === "active" && (
+    <div className="space-y-6">
+      <PageHeader
+        back={{ to: "/", label: "看板" }}
+        title={t.strategyName}
+        badges={
+          <>
+            <Tag>{MARKET_TEXT[t.market]}</Tag>
+            {active ? (
+              <Badge tone="accent">
+                <LiveDot />
+                运行中
+              </Badge>
+            ) : (
+              <Badge>已停止</Badge>
+            )}
+          </>
+        }
+        meta={
+          <>
+            <span>
+              <span className="font-mono">{t.startDate}</span> 上线，已跟踪{" "}
+              <span className="tabular font-medium text-ink-2">{t.days.length}</span> 天
+            </span>
+            <TextLink to={`/strategies/${t.strategyId}`}>策略详情</TextLink>
+          </>
+        }
+        actions={
+          <>
             <Button
-              variant="danger"
-              loading={stop.isPending}
-              onClick={() => confirm("停止后不再每日结算，确定？") && stop.mutate()}
+              variant="ai"
+              icon={IconAI}
+              onClick={() =>
+                chat.ask("这个跟踪最近表现怎么样？和回测相比偏离大吗？", { trackingId: t.id })
+              }
             >
-              停止跟踪
+              问 AI
             </Button>
-          )}
-        </div>
-      </div>
+            {active && (
+              <Button variant="danger" icon={IconStop} onClick={() => setStopping(true)}>
+                停止跟踪
+              </Button>
+            )}
+          </>
+        }
+      />
       {summary.waitingForStart ? (
-        <Card>
-          <p className="text-sm text-ink-2">
-            {t.startDate} 开盘建仓，当天收盘后第一次结算。下面是按最新数据算出的首日计划。
-          </p>
-        </Card>
+        <Callout tone="info" title="等待开盘建仓">
+          <span className="font-mono">{t.startDate}</span>{" "}
+          开盘建仓，当天收盘后第一次结算。下面是按最新数据算出的首日计划。
+        </Callout>
       ) : (
-        <div className="grid grid-cols-2 gap-2 @2xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 @2xl:grid-cols-4">
           <Stat
             label="跟踪收益"
             value={pct(t.nav !== null ? t.nav - 1 : null)}
             valueClass={tone(t.nav !== null ? t.nav - 1 : null)}
-            note={`${t.startDate} 起 · ${t.days.length} 天`}
+            note={`${t.startDate} 起`}
           />
           <Stat
             label="跟踪超额"
@@ -117,7 +175,7 @@ export function TrackingPage() {
           />
           <Stat
             label="跑赢回测同期"
-            value={t.deviationPct === null ? "—" : `${t.deviationPct.toFixed(0)}%`}
+            value={beatPct(t.deviationPct)}
             note={t.deviationPct === null ? deviationText(null, t.days.length) : "低于 10% 要留意"}
             info={DEVIATION_INFO}
           />
@@ -126,6 +184,7 @@ export function TrackingPage() {
       )}
       <Card
         title="回测段 + 跟踪段"
+        icon={IconChart}
         info={
           <>
             上线日之前是回测，之后是每天收盘重放的模拟盘。在图上拖动框选一段，可以问 AI 为什么。
@@ -138,6 +197,7 @@ export function TrackingPage() {
             points={points}
             splitDate={chart.data.tracking.length ? t.startDate : undefined}
             strategyLabel={t.strategyName}
+            height={300}
             onAsk={(range) =>
               chat.ask(`${range.from} 到 ${range.to} 这段为什么是这样？`, {
                 trackingId: t.id,
@@ -146,55 +206,114 @@ export function TrackingPage() {
             }
           />
         ) : (
-          <Spinner />
+          <div className="space-y-3">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-[300px] w-full rounded-lg" />
+          </div>
         )}
         {drift && (
-          <p className="mt-2 text-xs text-muted">
+          <p className="mt-3 text-xs text-muted">
             {drift.at} 结算时发现数据被修订过（最早影响 {drift.firstDrift}：净值 {drift.navDrift}{" "}
             天、基准 {drift.benchDrift} 天），曲线已按最新数据重算。
           </p>
         )}
       </Card>
-      <div className="grid gap-4 @4xl:grid-cols-2">
-        <Card title="明日计划" subtitle={t.orders[0] ? `${t.orders[0].planDate} 开盘` : undefined}>
+      <div className="grid gap-5 @4xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        <Card
+          title="明日计划"
+          icon={IconPlan}
+          subtitle={t.orders[0] ? `${t.orders[0].planDate} 开盘` : undefined}
+        >
           {t.orders.length ? (
             <div className="flex flex-wrap gap-1.5">
               {t.orders.map((o) => (
                 <Badge key={`${o.side}-${o.code}`} tone={o.side === "buy" ? "up" : "down"}>
-                  {o.side === "buy" ? "买" : "卖"} {o.name ?? o.code}
+                  <span className="opacity-70">{o.side === "buy" ? "买" : "卖"}</span>
+                  {o.name ?? o.code}
                 </Badge>
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted">没有计划中的买卖。</p>
+            <p className="text-sm text-muted">没有计划中的买卖，持仓照旧。</p>
           )}
         </Card>
-        <Card title="当前持仓">
+        <Card
+          title="当前持仓"
+          icon={IconPositions}
+          action={
+            summary.positions?.length ? (
+              <span className="text-xs text-muted">
+                <span className="tabular font-medium text-ink-2">{summary.positions.length}</span>{" "}
+                只
+              </span>
+            ) : null
+          }
+        >
           {summary.positions?.length ? (
-            <table className="tabular w-full text-sm">
+            <DataTable>
+              <thead>
+                <tr>
+                  <Th>股票</Th>
+                  <Th align="right">仓位</Th>
+                  <Th align="right">浮动盈亏</Th>
+                  <Th align="right">买入日</Th>
+                </tr>
+              </thead>
               <tbody>
                 {summary.positions.map((p) => (
-                  <tr key={p.code} className="border-b border-line last:border-0">
-                    <td className="py-1.5">
-                      {p.name} <span className="text-xs text-muted">{p.code}</span>
-                    </td>
-                    <td className="py-1.5 text-right text-ink-2">{pct(p.weight, 1, false)}</td>
-                    <td className={`py-1.5 text-right ${tone(p.ret)}`}>{pct(p.ret)}</td>
-                    <td className="py-1.5 text-right text-xs text-muted">{p.entryDate} 买入</td>
+                  <tr key={p.code} className="transition-colors hover:bg-surface-2/60">
+                    <Td>
+                      <span className="text-ink">{p.name}</span>
+                      <span className="ml-1.5 font-mono text-[11px] text-muted">{p.code}</span>
+                    </Td>
+                    <Td align="right" className="text-ink-2">
+                      {pct(p.weight, 1, false)}
+                    </Td>
+                    <Td align="right" className={cx("font-medium", tone(p.ret))}>
+                      {pct(p.ret)}
+                    </Td>
+                    <Td align="right" className="font-mono text-[12px] text-muted">
+                      {p.entryDate}
+                    </Td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           ) : (
-            <p className="text-sm text-muted">空仓</p>
+            <p className="text-sm text-muted">空仓。</p>
           )}
         </Card>
       </div>
       {summary.checks && summary.checks.length > 0 && (
-        <Card title="检查">
+        <Card title="检查" icon={IconChecks}>
           <Checks checks={summary.checks} />
         </Card>
       )}
+      <Modal
+        open={stopping}
+        onClose={() => setStopping(false)}
+        title="停止跟踪？"
+        icon={IconStop}
+        footer={
+          <>
+            <Button onClick={() => setStopping(false)}>先不停</Button>
+            <Button
+              variant="danger"
+              icon={IconStop}
+              loading={stop.isPending}
+              onClick={() => stop.mutate()}
+            >
+              确认停止
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm leading-6 text-ink-2">
+          「{t.strategyName}
+          」停止后不再每日结算，已有的历史记录、曲线和持仓都会保留。想继续跟踪需要重新上线。
+        </p>
+        <ErrorNote error={stop.error} />
+      </Modal>
     </div>
   );
 }

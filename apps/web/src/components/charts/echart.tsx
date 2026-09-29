@@ -12,7 +12,7 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import * as echarts from "echarts/core";
-import { LabelLayout } from "echarts/features";
+import { LabelLayout, LegacyGridContainLabel } from "echarts/features";
 import { SVGRenderer } from "echarts/renderers";
 import { useEffect, useRef, useState } from "react";
 
@@ -28,6 +28,8 @@ echarts.use([
   ToolboxComponent,
   // 线尾名字挨得近时上下错开（labelLayout.moveOverlap）
   LabelLayout,
+  // 各图的 grid 都用 containLabel 留出坐标轴文字（ECharts 6 起要显式引入，否则控制台报弃用）
+  LegacyGridContainLabel,
   SVGRenderer,
 ]);
 
@@ -50,8 +52,15 @@ export interface Tokens {
   bench: string;
   up: string;
   down: string;
+  neg: string;
   wash: string;
+  accent: string;
+  line: string;
 }
+
+/** 图里的字：正文走 Geist + 系统黑体，坐标轴数字走 Geist Mono（和界面同一套字） */
+export const CHART_FONT = `"Geist Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif`;
+export const CHART_MONO = `"Geist Mono Variable", "SF Mono", ui-monospace, monospace`;
 
 export function readTokens(): Tokens {
   const cs = getComputedStyle(document.documentElement);
@@ -72,7 +81,10 @@ export function readTokens(): Tokens {
     bench: v("--bench"),
     up: v("--up"),
     down: v("--down"),
+    neg: v("--neg"),
     wash: v("--wash"),
+    accent: v("--accent"),
+    line: v("--line-strong"),
   };
 }
 
@@ -121,7 +133,7 @@ export function EChart({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    chart.setOption(option, { notMerge: true });
+    chart.setOption({ textStyle: { fontFamily: CHART_FONT }, ...option }, { notMerge: true });
     onReady?.(chart);
   }, [option, onReady]);
   return <div ref={ref} className={className} style={{ height, width: "100%" }} />;
@@ -140,18 +152,43 @@ export function axisStyle(t: Tokens) {
   return {
     axisLine: { lineStyle: { color: t.axis, width: 1 } },
     axisTick: { show: false },
-    axisLabel: { color: t.muted, fontSize: 11 },
+    axisLabel: { color: t.muted, fontSize: 10.5, fontFamily: CHART_MONO },
     splitLine: { lineStyle: { color: t.grid, width: 1, type: "solid" as const } },
   };
 }
 
+/** 提示框：和界面上的浮层同一种质感（纸色底、细边、带色调的阴影） */
 export function tooltipStyle(t: Tokens) {
   return {
     backgroundColor: t.surface,
-    borderColor: t.grid,
+    borderColor: t.line,
     borderWidth: 1,
-    padding: [8, 10],
-    textStyle: { color: t.ink, fontSize: 12 },
-    extraCssText: "box-shadow: 0 4px 16px rgba(0,0,0,0.08); border-radius: 8px;",
+    padding: [9, 12],
+    textStyle: { color: t.ink, fontSize: 12, fontFamily: CHART_FONT },
+    extraCssText:
+      "box-shadow: var(--elev-pop); border-radius: 10px; font-variant-numeric: tabular-nums;",
   };
+}
+
+/** 提示框里的一行：色标 + 数值 + 名字（dash = 第二条基准的虚线） */
+export function tipRow(
+  t: Tokens,
+  color: string,
+  value: string,
+  name: string,
+  opts: { tag?: string; dash?: boolean; faded?: boolean } = {},
+): string {
+  return (
+    `<div style="display:flex;align-items:center;gap:8px;margin-top:3px">` +
+    `<span style="display:inline-block;width:12px;height:0;border-top:2px ${opts.dash ? "dashed" : "solid"} ${color};opacity:${opts.faded ? 0.45 : 1}"></span>` +
+    `<b style="min-width:54px;font-weight:600">${esc(value)}</b>` +
+    `<span style="color:${t.ink2}">${esc(name)}</span>` +
+    (opts.tag ? `<span style="color:${t.muted};font-size:11px">${esc(opts.tag)}</span>` : "") +
+    `</div>`
+  );
+}
+
+/** 提示框的日期抬头 */
+export function tipHead(t: Tokens, text: string): string {
+  return `<div style="color:${t.muted};font-size:11px;font-family:${CHART_MONO.replace(/"/g, "'")};margin-bottom:2px">${esc(text)}</div>`;
 }
