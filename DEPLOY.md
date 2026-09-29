@@ -43,16 +43,14 @@ push `main` 触发 GitHub Actions 检查并部署（`.github/workflows/deploy.ym
 
 ## 维护：回填、手动重跑
 
-worker 独占行情仓，**回填要先停 worker**。回填期间放一个维护标记，部署会等它（不会中途重启 worker）：
+worker 独占行情仓，**回填要先停 worker**。`scripts/backfill-full.sh` 把这些都包好了：放维护标记（部署会等它，不会中途重启 worker）
+→ 停 worker → 回填 A 股 → 回填港股 → doctor → 不管成败都拉起 worker、去掉标记。日志在 `logs/backfill-日期.log`，可断点续跑。
 
 ```bash
-ssh jim-server
-cd /root/ivan/ivan && export NVM_DIR=$HOME/.nvm && . $NVM_DIR/nvm.sh && nvm use 22
-echo "全量回填 $(date +%F)" > /root/ivan/data/.maintenance
-pm2 stop ivan-worker
-nohup sh -c 'pnpm ivan backfill --market A; pnpm ivan backfill --market HK; pnpm ivan doctor; \
-  pm2 start ivan-worker; rm -f /root/ivan/data/.maintenance' > logs/backfill.log 2>&1 &
-tail -f logs/backfill.log      # 可断点续跑：中断后重跑同一条命令
+ssh jim-server 'cd /root/ivan/ivan && nohup bash scripts/backfill-full.sh >/dev/null 2>&1 &'   # 现在跑
+# 或者交给定时器在夜里跑（工作日避开 17:30–19:30 的夜间任务）：
+ssh jim-server 'systemd-run --unit=ivan-backfill --on-calendar="YYYY-MM-DD 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh'
+ssh jim-server 'tail -f /root/ivan/ivan/logs/backfill-*.log'
 ```
 
 回填期间网站照常可用，但看板会提示「行情服务没有运行」；东财对服务器 IP 更敏感，被封会自动暂停、换源、等解封。
