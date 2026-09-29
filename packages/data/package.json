@@ -1,0 +1,22 @@
+{
+  "name": "@ivan/data",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "行情/财务数据源 adapter（东财、腾讯、交易所、中证、外汇中心）+ DuckDB 行情仓 + ETL",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "catalog:",
+    "@ivan/core": "workspace:*",
+    "@ivan/engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}
