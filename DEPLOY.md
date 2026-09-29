@@ -20,6 +20,16 @@ push `main` 触发 GitHub Actions 检查并部署（`.github/workflows/deploy.ym
 `.env` 里和默认值不同的几项：`PORT=18907`、`HOST=127.0.0.1`、`WORKER_PORT=18917`、`PUBLIC_URL=https://ivan.linjiejim.com`、
 `DATA_DIR=/root/ivan/data`、`DUCKDB_MEMORY_LIMIT=384MB`（服务器只剩约 1.2 GB 可用内存，先保守，看一周 swap 再调）。
 
+## 原生模块（OpenCloudOS 8 的特殊处理）
+
+服务器是 glibc 2.28 / GCC 8 / Python 3.6，比依赖期待的新：
+
+- **better-sqlite3 13** 把预编译打进了 npm 包，自带的 linux-x64 要 glibc 2.34，这里加载不了；默认安装在有预编译时又不编译。
+  `scripts/ensure-native.sh` 在每次重装依赖后检查：能加载就跳过，加载不了就用已装的 `gcc-toolset-13` 从源码编译（约 2 分钟），
+  放到预编译文件的位置（先断开和 pnpm store 的硬链接，不改 store）。
+- **node-gyp** 要 Python ≥ 3.8：装了并存的 `python3.11`（`dnf install python3.11`，不替换系统的 `python3`），安装时用 `npm_config_python` 指过去。
+- **DuckDB** 的预编译要 glibc 2.25，直接可用。
+
 ## 一次 push 会发生什么
 
 1. **检查**：`pnpm install --frozen-lockfile` → lint → format → typecheck → test → build。PR 只跑这一步。
@@ -62,7 +72,7 @@ git reset --hard <好的提交> && pnpm --filter @ivan/web build && pm2 restart 
 1. 端口：`ss -tln` 确认 18907 / 18917 空闲（登记表见 deploy-jim-server 技能）。
 2. 服务器生成只读 deploy key `~/.ssh/ivan_deploy`，公钥加到仓库 Deploy keys；本机生成专用 CI key，
    公钥进服务器 `authorized_keys`（先备份），私钥进 GitHub environment `jim-server` 的 `DEV_SERVER_SSH_KEY`。
-3. `git clone`（经 `ssh.github.com:443`）到 `/root/ivan/ivan`；`pnpm install --frozen-lockfile && pnpm rebuild esbuild && pnpm build`。
+3. `git clone`（经 `ssh.github.com:443`）到 `/root/ivan/ivan`；`npm_config_python=$(command -v python3.11) pnpm install --frozen-lockfile && pnpm rebuild esbuild && bash scripts/ensure-native.sh && pnpm build`。
 4. `.env`：从 `.env.example` 起，`BETTER_AUTH_SECRET` / `INTERNAL_SECRET` 用 `openssl rand -base64 32` 在服务器上生成，
    LLM key 从本机管道传过去（不回显）。
 5. 行情仓：先把本机回填好的 `market.duckdb` 传上去（马上能用），再按上面的「维护」做全量回填。
