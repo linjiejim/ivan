@@ -8,29 +8,48 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import {
+  axisStyle,
   EChart,
-  esc,
   readTokens,
+  tipHead,
   tooltipStyle,
   useThemeVersion,
-  axisStyle,
 } from "../components/charts/echart.tsx";
 import { NavChart } from "../components/charts/nav-chart.tsx";
 import { MonthlyTable, PnlBars } from "../components/charts/small.tsx";
 import {
+  IconAI,
+  IconChart,
+  IconChecks,
+  IconChevronLeft,
+  IconChevronRight,
+  IconSweep,
+} from "../components/icons.tsx";
+import {
   Badge,
-  Button,
+  Callout,
   Card,
   Checks,
+  cx,
+  DataTable,
+  Empty,
   ErrorNote,
+  IconButton,
   Info,
   InfoRows,
-  Spinner,
+  PageHeader,
+  PageSkeleton,
+  Skeleton,
   Stat,
   Tabs,
+  Tag,
+  Td,
+  Th,
+  Button,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { money, num, pct, tone } from "../lib/format.ts";
+import { money, NA, num, pct, tone } from "../lib/format.ts";
+import { usePageTitle } from "../lib/title.ts";
 import type { RunDetail, Trade } from "../lib/types.ts";
 
 function useRun(id: string) {
@@ -64,60 +83,82 @@ function Trades({ runId }: { runId: string }) {
       api.get<{ total: number; trades: Array<Trade & { seq: number; name: string | null }> }>(
         `/api/runs/${runId}/trades?limit=${size}&offset=${page * size}`,
       ),
+    placeholderData: (prev) => prev,
   });
-  if (!q.data) return <Spinner />;
+  if (!q.data)
+    return (
+      <div className="space-y-3 py-2">
+        {Array.from({ length: 8 }, (_, i) => (
+          <Skeleton key={i} className="h-4 w-full" />
+        ))}
+      </div>
+    );
   const pages = Math.ceil(q.data.total / size);
   return (
-    <div>
-      <div className="overflow-x-auto">
-        <table className="tabular w-full min-w-[640px] text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-xs text-muted">
-              <th className="py-2 font-normal">日期</th>
-              <th className="py-2 font-normal">股票</th>
-              <th className="py-2 font-normal">方向</th>
-              <th className="py-2 text-right font-normal">价格</th>
-              <th className="py-2 text-right font-normal">金额</th>
-              <th className="py-2 text-right font-normal">费用</th>
-              <th className="py-2 text-right font-normal">盈亏</th>
-              <th className="py-2 pl-3 font-normal">原因</th>
-            </tr>
-          </thead>
-          <tbody>
-            {q.data.trades.map((t) => (
-              <tr key={t.seq} className="border-b border-line last:border-0">
-                <td className="py-1.5 text-ink-2">{t.date}</td>
-                <td className="py-1.5">
-                  {t.name ?? t.code}
-                  {t.name && <span className="ml-1 text-xs text-muted">{t.code}</span>}
-                </td>
-                <td className={`py-1.5 ${t.side === "buy" ? "text-up" : "text-down"}`}>
+    <div className={cx("transition-opacity", q.isFetching && "opacity-60")}>
+      <DataTable minWidth={680}>
+        <thead>
+          <tr>
+            <Th>日期</Th>
+            <Th>股票</Th>
+            <Th>方向</Th>
+            <Th align="right">价格</Th>
+            <Th align="right">金额</Th>
+            <Th align="right">费用</Th>
+            <Th align="right">盈亏</Th>
+            <Th>原因</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {q.data.trades.map((t) => (
+            <tr key={t.seq} className="transition-colors hover:bg-surface-2/60">
+              <Td className="font-mono text-[12px] text-ink-2">{t.date}</Td>
+              <Td>
+                <span className="text-ink">{t.name ?? t.code}</span>
+                {t.name && (
+                  <span className="ml-1.5 font-mono text-[11px] text-muted">{t.code}</span>
+                )}
+              </Td>
+              <Td>
+                <Badge tone={t.side === "buy" ? "up" : "down"}>
                   {t.side === "buy" ? "买" : "卖"}
-                </td>
-                <td className="py-1.5 text-right">{num(t.price, 3)}</td>
-                <td className="py-1.5 text-right">{money(t.amount)}</td>
-                <td className="py-1.5 text-right text-ink-2">{num(t.fee, 2)}</td>
-                <td className={`py-1.5 text-right ${tone(t.pnl)}`}>
-                  {t.pnl === null || t.pnl === undefined ? "" : money(t.pnl)}
-                </td>
-                <td className="py-1.5 pl-3 text-ink-2">
-                  {REASON[t.reason] ?? t.reason}
-                  {t.holdDays ? ` · 持有 ${t.holdDays} 天` : ""}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                </Badge>
+              </Td>
+              <Td align="right">{num(t.price, 3)}</Td>
+              <Td align="right">{money(t.amount)}</Td>
+              <Td align="right" className="text-muted">
+                {num(t.fee, 2)}
+              </Td>
+              <Td align="right" className={cx("font-medium", tone(t.pnl))}>
+                {t.pnl === null || t.pnl === undefined ? "" : money(t.pnl)}
+              </Td>
+              <Td className="text-ink-2">
+                {REASON[t.reason] ?? t.reason}
+                {t.holdDays ? <span className="text-muted">，持有 {t.holdDays} 天</span> : ""}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
       {pages > 1 && (
-        <div className="mt-2 flex items-center gap-2 text-xs text-muted">
-          <Button size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>
-            上一页
-          </Button>
-          第 {page + 1}/{pages} 页，共 {q.data.total} 笔
-          <Button size="sm" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>
-            下一页
-          </Button>
+        <div className="mt-3 flex items-center justify-end gap-2 text-xs text-muted">
+          <span className="tabular mr-1">
+            第 {page + 1} / {pages} 页，共 {q.data.total} 笔
+          </span>
+          <IconButton
+            size="sm"
+            icon={IconChevronLeft}
+            label="上一页"
+            disabled={page === 0}
+            onClick={() => setPage(page - 1)}
+          />
+          <IconButton
+            size="sm"
+            icon={IconChevronRight}
+            label="下一页"
+            disabled={page >= pages - 1}
+            onClick={() => setPage(page + 1)}
+          />
         </div>
       )}
     </div>
@@ -136,12 +177,12 @@ function SweepChart({
     const ax = axisStyle(t);
     return {
       animation: false,
-      grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+      grid: { left: 8, right: 16, top: 24, bottom: 8, containLabel: true },
       tooltip: {
         trigger: "item",
         ...tooltipStyle(t),
         formatter: (p: { name: string; value: number }) =>
-          `<b>${esc(pct(p.value))}</b> <span style="color:${t.ink2}">${esc(p.name)}</span>`,
+          tipHead(t, p.name) + `<b style="font-weight:600">${pct(p.value)}</b>`,
       },
       xAxis: {
         type: "category",
@@ -158,12 +199,12 @@ function SweepChart({
       series: [
         {
           type: "bar",
-          barMaxWidth: 24,
+          barMaxWidth: 28,
           data: variants.map((v) => ({
             value: v.excessCagr,
             name: v.label,
             itemStyle: {
-              color: (v.excessCagr ?? 0) >= 0 ? t.up : t.s1,
+              color: (v.excessCagr ?? 0) >= 0 ? t.up : t.neg,
               borderRadius: (v.excessCagr ?? 0) >= 0 ? [4, 4, 0, 0] : [0, 0, 4, 4],
             },
           })),
@@ -172,6 +213,7 @@ function SweepChart({
             position: "top",
             color: t.ink2,
             fontSize: 11,
+            fontWeight: 500,
             formatter: (p: { value: number }) => pct(p.value),
           },
         },
@@ -181,11 +223,53 @@ function SweepChart({
   return <EChart option={option} height={240} />;
 }
 
+function RunningCard({ r }: { r: RunDetail }) {
+  const progress = Math.round((r.job?.progress ?? 0) * 100);
+  return (
+    <div className="space-y-5">
+      <Card>
+        <div className="py-2">
+          <div className="flex items-baseline justify-between gap-3 text-sm">
+            <span className="ai-shimmer font-medium">
+              {r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}
+            </span>
+            <span className="tabular text-xs text-muted">{progress}%</span>
+          </div>
+          <div
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress}
+            className="mt-3 h-1 overflow-hidden rounded-full bg-surface-2"
+          >
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
+              style={{ width: `${Math.max(progress, 2)}%` }}
+            />
+          </div>
+          <p className="mt-3 text-xs text-muted">
+            在点时正确的历史数据上逐日重放；全市场、长区间的回测大约要半分钟。
+          </p>
+        </div>
+      </Card>
+      <div aria-hidden className="grid grid-cols-2 gap-3 opacity-60 @3xl:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div key={i} className="space-y-3 rounded-xl border border-line bg-surface p-4">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-7 w-24" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function RunPage() {
   const { id = "" } = useParams();
   const q = useRun(id);
   const chat = useChatUi();
   const r = q.data;
+  usePageTitle(r ? `${r.strategyName ?? "回测"} 回测报告` : "回测报告");
   useEffect(() => {
     if (r)
       chat.setPage({
@@ -195,74 +279,84 @@ export function RunPage() {
         label: `回测 ${r.params.start} ~ ${r.params.end}`,
       });
   }, [r?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (q.isLoading) return <Spinner />;
+  if (q.isLoading) return <PageSkeleton />;
   if (!r) return <ErrorNote error={q.error} />;
   const m = r.metrics;
 
   const header = (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <h1 className="text-lg font-semibold">
-        <Link to={`/strategies/${r.strategyId}`} className="hover:text-accent">
-          {r.strategyName ?? "回测报告"}
-        </Link>
-      </h1>
-      {r.versionN ? <Badge tone="accent">v{r.versionN}</Badge> : null}
-      <span className="text-sm text-ink-2">
-        {r.kind === "sweep" ? `参数扫描：${r.label}` : `${r.params.start} ~ ${r.params.end}`}
-      </span>
-      <Info label="回测设置">
-        <InfoRows
-          rows={[
-            ["区间", `${r.params.start} ~ ${r.params.end}`],
-            ["初始资金", money(r.params.capital)],
-            ["样本外", r.params.oosMonths ? `最后 ${r.params.oosMonths} 个月` : "不分"],
-            ["数据截至", r.dataAsOf ?? "—"],
-            ["引擎版本", r.engineVersion ?? "—"],
-          ]}
-        />
-        <p className="mt-1.5">
-          收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
-        </p>
-      </Info>
-      {r.status === "done" && r.kind !== "sweep" && (
-        <Button
-          size="sm"
-          className="ml-auto"
-          onClick={() =>
-            chat.ask("帮我解读一下这次回测：表现怎么样，最值得注意的是什么？", { runId: r.id })
-          }
-        >
-          让 AI 解读
-        </Button>
-      )}
-    </div>
+    <PageHeader
+      back={{ to: `/strategies/${r.strategyId}`, label: r.strategyName ?? "策略" }}
+      title={r.kind === "sweep" ? "参数扫描" : "回测报告"}
+      badges={
+        <>
+          {r.versionN ? <Tag mono>v{r.versionN}</Tag> : null}
+          {r.kind === "sweep" && <Tag>{r.label}</Tag>}
+        </>
+      }
+      meta={
+        <>
+          <span className="font-mono text-[12px]">
+            {r.params.start} ~ {r.params.end}
+          </span>
+          <span className="inline-flex items-center gap-1">
+            回测设置
+            <Info label="回测设置">
+              <InfoRows
+                rows={[
+                  ["区间", `${r.params.start} ~ ${r.params.end}`],
+                  ["初始资金", money(r.params.capital)],
+                  ["样本外", r.params.oosMonths ? `最后 ${r.params.oosMonths} 个月` : "不分"],
+                  ["数据截至", r.dataAsOf ?? NA],
+                  ["引擎版本", r.engineVersion ?? NA],
+                ]}
+              />
+              <p className="mt-2">
+                收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
+              </p>
+            </Info>
+          </span>
+        </>
+      }
+      actions={
+        r.status === "done" &&
+        r.kind !== "sweep" && (
+          <Button
+            variant="ai"
+            icon={IconAI}
+            onClick={() =>
+              chat.ask("帮我解读一下这次回测：表现怎么样，最值得注意的是什么？", { runId: r.id })
+            }
+          >
+            让 AI 解读
+          </Button>
+        )
+      }
+    />
   );
 
   if (r.status === "queued" || r.status === "running") {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         {header}
-        <Card>
-          <div className="py-6 text-center">
-            <div className="mx-auto h-1.5 w-64 overflow-hidden rounded-full bg-surface-2">
-              <div
-                className="h-full bg-accent transition-all"
-                style={{ width: `${Math.round((r.job?.progress ?? 0) * 100)}%` }}
-              />
-            </div>
-            <p className="mt-3 text-sm text-ink-2">
-              {r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}
-            </p>
-          </div>
-        </Card>
+        <RunningCard r={r} />
       </div>
     );
   }
   if (r.status === "failed") {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         {header}
-        <ErrorNote error={new Error(`回测失败：${r.error}`)} />
+        <Callout
+          tone="warn"
+          title="回测失败"
+          action={
+            <Link to={`/strategies/${r.strategyId}`} className="text-xs font-medium text-accent">
+              回到策略
+            </Link>
+          }
+        >
+          <span className="whitespace-pre-wrap">{r.error}</span>
+        </Callout>
       </div>
     );
   }
@@ -270,45 +364,57 @@ export function RunPage() {
   if (r.kind === "sweep") {
     const variants = r.final?.variants ?? [];
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         {header}
         <Checks checks={r.checks} compact />
         <Card
           title="各取值的年化超额"
+          icon={IconSweep}
           info="同一个策略只改这一个参数，各回测一次。相邻取值之间结果跳得厉害，说明策略对参数敏感（参数脆弱），历史上的好成绩可能是凑出来的。"
         >
           <SweepChart variants={variants} />
-          <table className="tabular mt-3 w-full text-sm">
+          <DataTable className="mt-4">
+            <thead>
+              <tr>
+                <Th>取值</Th>
+                <Th align="right">年化超额</Th>
+                <Th align="right">最大回撤</Th>
+                <Th align="right">夏普</Th>
+              </tr>
+            </thead>
             <tbody>
               {r.children.map((c) => (
-                <tr key={c.id} className="border-b border-line last:border-0">
-                  <td className="py-1.5">
-                    <Link to={`/runs/${c.id}`} className="hover:text-accent">
+                <tr key={c.id} className="transition-colors hover:bg-surface-2/60">
+                  <Td>
+                    <Link
+                      to={`/runs/${c.id}`}
+                      className="text-ink transition-colors hover:text-accent"
+                    >
                       {c.label}
                     </Link>
-                  </td>
-                  <td className={`py-1.5 text-right ${tone(c.headline?.excessCagr)}`}>
-                    超额 {pct(c.headline?.excessCagr)}
-                  </td>
-                  <td className="py-1.5 text-right text-ink-2">
-                    回撤 {pct(c.headline?.maxDrawdown, 1, false)}
-                  </td>
-                  <td className="py-1.5 text-right text-ink-2">
-                    夏普 {c.headline?.sharpe.toFixed(2) ?? "—"}
-                  </td>
+                  </Td>
+                  <Td align="right" className={cx("font-medium", tone(c.headline?.excessCagr))}>
+                    {pct(c.headline?.excessCagr)}
+                  </Td>
+                  <Td align="right" className="text-ink-2">
+                    {pct(c.headline?.maxDrawdown, 1, false)}
+                  </Td>
+                  <Td align="right" className="text-ink-2">
+                    {c.headline?.sharpe.toFixed(2) ?? NA}
+                  </Td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </DataTable>
         </Card>
       </div>
     );
   }
   if (!m) return <ErrorNote error={new Error("结果缺失")} />;
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {header}
-      <div className="grid grid-cols-2 gap-2 @3xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 @3xl:grid-cols-4">
         <Stat
           label="年化收益"
           value={pct(m.cagr)}
@@ -336,6 +442,7 @@ export function RunPage() {
         <Stat
           label="夏普"
           value={m.sharpe.toFixed(2)}
+          note={m.sharpe >= 1 ? "1 以上算不错" : "低于 1，波动换来的收益偏少"}
           info="年化收益 ÷ 年化波动（无风险利率按 0 算），衡量每承担一份波动换来多少收益；一般 1 以上算不错。"
         />
       </div>
@@ -343,7 +450,8 @@ export function RunPage() {
         {r.checks.length ? (
           <Checks checks={r.checks} compact />
         ) : (
-          <span className="inline-flex items-center gap-1 text-xs text-ink-2">
+          <span className="inline-flex items-center gap-1.5 text-xs text-ink-2">
+            <IconChecks size={15} className="text-down" />
             诚实检查没有发现需要注意的问题
             <Info>
               引擎按固定阈值检查：样本外是否明显变差、收益是否集中在少数股票或行业、交易是否太少、是否调参调太多次、费用是否吃掉太多收益。
@@ -356,8 +464,8 @@ export function RunPage() {
             <InfoRows
               rows={[
                 ["总收益", pct(m.totalReturn)],
-                ["胜率（卖出盈利的比例）", m.winRate === null ? "—" : pct(m.winRate, 0, false)],
-                ["平均持有", m.avgHoldDays ? `${m.avgHoldDays.toFixed(0)} 天` : "—"],
+                ["胜率（卖出盈利的比例）", m.winRate === null ? NA : pct(m.winRate, 0, false)],
+                ["平均持有", m.avgHoldDays ? `${m.avgHoldDays.toFixed(0)} 天` : NA],
                 ["买入笔数", String(m.buys)],
                 ["年化换手", `${m.turnover.toFixed(1)} 倍`],
                 ["费用拖累", `${pct(m.costDrag, 2, false)}/年`],
@@ -375,11 +483,12 @@ export function RunPage() {
       </div>
       <Card
         title="净值走势"
+        icon={IconChart}
         info="蓝线是策略（含分红再投入），灰线是基准。可以切到「超额」「回撤」视图；在图上拖动框选一段，可以问 AI 这段为什么是这样。"
       >
         <NavChart
           points={r.series}
-          height={300}
+          height={320}
           onAsk={(range) =>
             chat.ask(`为什么 ${range.from} 到 ${range.to} 这段是这样的表现？`, {
               runId: r.id,
@@ -414,103 +523,126 @@ function Details({ run: r }: { run: RunDetail }) {
   ];
   if (r.segments?.outOfSample) items.push({ value: "segments", label: "样本内外" });
   return (
-    <Card>
-      <div className="-mx-4 -mt-2 mb-3 overflow-x-auto px-2">
-        <Tabs value={tab} onChange={setTab} items={items} />
-      </div>
-      {tab === "monthly" && <MonthlyTable monthly={m.monthly} yearly={m.yearly} />}
-      {tab === "stocks" && (
-        <div className="space-y-4">
-          <p className="text-xs text-muted">按股票汇总的盈亏（已平仓 + 期末浮动）。</p>
+    <section className="rounded-xl border border-line bg-surface shadow-[var(--edge)]">
+      <Tabs value={tab} onChange={setTab} items={items} className="px-2" />
+      <div key={tab} className="animate-enter px-4 pt-4 pb-5">
+        {tab === "monthly" && <MonthlyTable monthly={m.monthly} yearly={m.yearly} />}
+        {tab === "stocks" && (
+          <div className="grid gap-6 @3xl:grid-cols-2">
+            <div>
+              <h3 className="mb-3 text-xs font-medium text-ink-2">赚得最多</h3>
+              <PnlBars
+                rows={best.map((s) => ({ label: s.name, sub: s.code, value: s.pnl }))}
+                format={money}
+              />
+            </div>
+            <div>
+              <h3 className="mb-3 text-xs font-medium text-ink-2">亏得最多</h3>
+              {worst.length > 0 ? (
+                <PnlBars
+                  rows={worst.map((s) => ({ label: s.name, sub: s.code, value: s.pnl }))}
+                  format={money}
+                />
+              ) : (
+                <p className="text-xs text-muted">没有亏钱的股票。</p>
+              )}
+            </div>
+            <p className="text-2xs text-muted @3xl:col-span-2">
+              按股票汇总的盈亏（已平仓 + 期末浮动）。
+            </p>
+          </div>
+        )}
+        {tab === "industry" && (
           <PnlBars
-            rows={best.map((s) => ({ label: s.name, sub: s.code, value: s.pnl }))}
+            rows={(r.attribution?.byIndustry ?? []).slice(0, 12).map((x) => ({
+              label: x.industry,
+              sub: `仓位 ${pct(x.avgWeight, 0, false)}`,
+              value: x.pnl,
+            }))}
             format={money}
           />
-          {worst.length > 0 && (
-            <PnlBars
-              rows={worst.map((s) => ({ label: s.name, sub: s.code, value: s.pnl }))}
-              format={money}
-            />
-          )}
-        </div>
-      )}
-      {tab === "industry" && (
-        <PnlBars
-          rows={(r.attribution?.byIndustry ?? []).slice(0, 12).map((x) => ({
-            label: x.industry,
-            sub: `仓位 ${pct(x.avgWeight, 0, false)}`,
-            value: x.pnl,
-          }))}
-          format={money}
-        />
-      )}
-      {tab === "positions" &&
-        (r.final ? (
+        )}
+        {tab === "positions" &&
+          (r.final ? (
+            <div>
+              <p className="mb-3 text-xs text-muted">
+                <span className="font-mono">{r.final.date}</span> 收盘，总资产{" "}
+                <span className="tabular font-medium text-ink-2">{money(r.final.equity)}</span>
+                ，现金 <span className="tabular font-medium text-ink-2">{money(r.final.cash)}</span>
+              </p>
+              {r.final.positions.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {r.final.positions.map((p) => (
+                    <span
+                      key={p.code}
+                      className="inline-flex h-7 items-center gap-2 rounded-lg px-2.5 text-xs ring-1 ring-line ring-inset"
+                    >
+                      <span className="text-ink">{p.name}</span>
+                      <span className="tabular text-muted">{pct(p.weight, 0, false)}</span>
+                      <span className={cx("tabular font-medium", tone(p.ret))}>
+                        {pct(p.ret, 0)}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">期末空仓。</p>
+              )}
+            </div>
+          ) : (
+            <Empty title="没有期末持仓数据" className="border-0" />
+          ))}
+        {tab === "trades" && <Trades runId={r.id} />}
+        {tab === "segments" && r.segments && (
           <div>
             <p className="mb-2 text-xs text-muted">
-              {r.final.date} 收盘 · 总资产 {money(r.final.equity)} · 现金 {money(r.final.cash)}
+              样本外 = 区间最后几个月单独算，用来看策略是不是只拟合了历史。
             </p>
-            {r.final.positions.length ? (
-              <div className="flex flex-wrap gap-1.5">
-                {r.final.positions.map((p) => (
-                  <Badge key={p.code} tone={p.ret >= 0 ? "up" : "down"}>
-                    {p.name} {pct(p.weight, 0, false)} · {pct(p.ret, 0)}
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted">空仓</p>
-            )}
+            <DataTable>
+              <thead>
+                <tr>
+                  <Th>区间</Th>
+                  <Th align="right">年化</Th>
+                  <Th align="right">年化超额</Th>
+                  <Th align="right">最大回撤</Th>
+                  <Th align="right">夏普</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {(
+                  [
+                    ["样本内", r.segments.inSample],
+                    ["样本外", r.segments.outOfSample],
+                  ] as const
+                ).map(([label, seg]) =>
+                  seg ? (
+                    <tr key={label}>
+                      <Td>
+                        <span className="text-ink">{label}</span>
+                        <span className="ml-2 font-mono text-[11px] text-muted">
+                          {seg.start} ~ {seg.end}
+                        </span>
+                      </Td>
+                      <Td align="right" className={tone(seg.cagr)}>
+                        {pct(seg.cagr)}
+                      </Td>
+                      <Td align="right" className={cx("font-medium", tone(seg.excessCagr))}>
+                        {pct(seg.excessCagr)}
+                      </Td>
+                      <Td align="right" className="text-ink-2">
+                        {pct(seg.maxDrawdown, 1, false)}
+                      </Td>
+                      <Td align="right" className="text-ink-2">
+                        {seg.sharpe.toFixed(2)}
+                      </Td>
+                    </tr>
+                  ) : null,
+                )}
+              </tbody>
+            </DataTable>
           </div>
-        ) : (
-          <p className="text-sm text-muted">没有期末持仓数据。</p>
-        ))}
-      {tab === "trades" && <Trades runId={r.id} />}
-      {tab === "segments" && r.segments && (
-        <div>
-          <p className="mb-2 text-xs text-muted">
-            样本外 = 区间最后几个月单独算，用来看策略是不是只拟合了历史。
-          </p>
-          <table className="tabular w-full text-sm">
-            <thead>
-              <tr className="border-b border-line text-xs text-muted">
-                <th className="py-2 text-left font-normal">区间</th>
-                <th className="py-2 text-right font-normal">年化</th>
-                <th className="py-2 text-right font-normal">年化超额</th>
-                <th className="py-2 text-right font-normal">最大回撤</th>
-                <th className="py-2 text-right font-normal">夏普</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(
-                [
-                  ["样本内", r.segments.inSample],
-                  ["样本外", r.segments.outOfSample],
-                ] as const
-              ).map(([label, seg]) =>
-                seg ? (
-                  <tr key={label} className="border-b border-line last:border-0">
-                    <td className="py-1.5">
-                      {label}
-                      <span className="ml-2 text-xs text-muted">
-                        {seg.start} ~ {seg.end}
-                      </span>
-                    </td>
-                    <td className={`py-1.5 text-right ${tone(seg.cagr)}`}>{pct(seg.cagr)}</td>
-                    <td className={`py-1.5 text-right ${tone(seg.excessCagr)}`}>
-                      {pct(seg.excessCagr)}
-                    </td>
-                    <td className="py-1.5 text-right text-ink-2">
-                      {pct(seg.maxDrawdown, 1, false)}
-                    </td>
-                    <td className="py-1.5 text-right text-ink-2">{seg.sharpe.toFixed(2)}</td>
-                  </tr>
-                ) : null,
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
+        )}
+      </div>
+    </section>
   );
 }

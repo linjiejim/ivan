@@ -1,18 +1,21 @@
 /** 数字格式：百分比带符号、金额自动缩写（万 / 亿）。 */
 
+/** 空值占位：国内行情软件的习惯写法「--」（不用破折号） */
+export const NA = "--";
+
 export function pct(x: number | null | undefined, digits = 1, signed = true): string {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
+  if (x === null || x === undefined || !Number.isFinite(x)) return NA;
   const v = (x * 100).toFixed(digits);
   return `${signed && x > 0 ? "+" : ""}${v}%`;
 }
 
 export function num(x: number | null | undefined, digits = 2): string {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
+  if (x === null || x === undefined || !Number.isFinite(x)) return NA;
   return x.toLocaleString("zh-CN", { maximumFractionDigits: digits, minimumFractionDigits: 0 });
 }
 
 export function money(x: number | null | undefined): string {
-  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
+  if (x === null || x === undefined || !Number.isFinite(x)) return NA;
   const a = Math.abs(x);
   if (a >= 1e8) return `${(x / 1e8).toFixed(2)} 亿`;
   if (a >= 1e4) return `${(x / 1e4).toFixed(a >= 1e6 ? 0 : 1)} 万`;
@@ -25,8 +28,13 @@ export function tone(x: number | null | undefined): string {
   return x > 0 ? "text-up" : "text-down";
 }
 
+/** 「跑赢回测同期」的百分位：98% */
+export function beatPct(p: number | null | undefined): string {
+  return p === null || p === undefined ? NA : `${p.toFixed(0)}%`;
+}
+
 export function dateTime(ms: number | null | undefined): string {
-  if (!ms) return "—";
+  if (!ms) return NA;
   return new Date(ms).toLocaleString("zh-CN", {
     hour12: false,
     month: "2-digit",
@@ -37,7 +45,7 @@ export function dateTime(ms: number | null | undefined): string {
 }
 
 export function fmtFactor(value: unknown, unit?: string): string {
-  if (value === null || value === undefined) return "—";
+  if (value === null || value === undefined) return NA;
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "number") {
     if (unit === "%") return `${value.toFixed(1)}%`;

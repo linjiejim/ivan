@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Ivan 标志：竖笔是「I」也是上线日；左边渐细的是回测，右边上扬的实线是跟踪 -->
+  <style>
+    .bg { fill: #141412; }
+    .fg { fill: #f5f5f2; stroke: #f5f5f2; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #ecebe7; }
+      .fg { fill: #141412; stroke: #141412; }
+    }
+  </style>
+  <rect class="bg" width="32" height="32" rx="8" />
+  <path class="fg" stroke="none" d="M4.5 17.1 12.5 16.2v1.8z" />
+  <g class="fg" fill="none" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path fill="none" d="M12.5 8v16" />
+    <path fill="none" d="M12.5 17.1H15c4.5 0 4.5-4.5 9-4.5h2" />
+  </g>
+</svg>

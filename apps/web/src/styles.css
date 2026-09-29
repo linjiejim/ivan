@@ -1,123 +1,415 @@
 @import "tailwindcss";
 
+/* dark: 变体同时认系统设置和手动切换（data-theme），和下面的 token 作用域一致 */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+}
+
 /*
- * 设计 token：取自 dataviz 参考调色板（已跑校验脚本，明暗两套各自选取，不是自动反色）。
- * 涨跌按国内习惯红涨绿跌，且始终带正负号，颜色不是唯一识别渠道。
+ * Ivan 设计系统「墨」：token 的唯一来源（组件只用下面的语义名，不写裸色值）。完整说明见 docs/design-system.md。
+ *
+ * 1. 墨为骨：界面骨架只用墨与纸两种中性色（同一个略暖的灰族），层级靠字重与深浅，不靠颜色。
+ * 2. 色为数：颜色只留给数据。涨红跌绿（国内习惯，数字始终带正负号，颜色不是唯一识别渠道）；
+ *    策略色取 dataviz 参考调色板去掉红绿后的 6 色，已按本页的表面色重跑校验脚本，明暗两套全过。
+ * 3. 一个强调色「花青」：取自同一套蓝色梯度，只用于 AI、链接、焦点、选中；主按钮用墨，不用强调色。
+ * 4. 线为界：发丝线分区，卡片只在层级真的需要时出现；浮层才有阴影，阴影带纸/墨的色调，不用纯黑。
  */
+
 :root {
   color-scheme: light;
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --surface-2: #f3f2ee;
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --muted: #898781;
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
-  --border: rgba(11, 11, 11, 0.1);
-  --accent: #2a78d6;
-  --accent-ink: #ffffff;
+  /* 纸与墨 */
+  --page: #f5f5f2;
+  --surface: #fcfcfa;
+  --surface-2: #f0efeb;
+  --surface-3: #e7e6e1;
+  --ink: #161614;
+  --ink-2: #4a4944;
+  --muted: #6b6a64;
+  --faint: #878580;
+  --line: rgba(22, 22, 20, 0.085);
+  --line-strong: rgba(22, 22, 20, 0.15);
+  /* 主按钮：墨底纸字 */
+  --primary: #161614;
+  --primary-hover: #2e2e2b;
+  --primary-ink: #fcfcfa;
+  /* 花青：AI、链接、焦点、选中 */
+  --accent: #256abf;
+  --accent-strong: #1c5cab;
+  --accent-ink: #fcfcfa;
+  --accent-wash: rgba(37, 106, 191, 0.085);
+  --accent-line: rgba(37, 106, 191, 0.28);
+  /* 数据语义 */
+  --up: #c7362f;
+  --down: #006300;
+  --neg: #2a78d6;
+  --warn: #9c5406;
+  --warn-bg: #fbf2e2;
+  --warn-line: rgba(156, 84, 6, 0.22);
+  --danger: #c7362f;
+  /* 图表 */
+  --grid: #e6e5df;
+  --axis: #c5c4bc;
+  --bench: #898781;
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
   --series-4: #eda100;
-  /* 5、6 取参考调色板的洋红、紫；绿与红留给涨跌，不做策略色（已跑校验脚本，6 色相邻对全过） */
   --series-5: #e87ba4;
   --series-6: #4a3aa7;
-  --bench: #898781;
-  --up: #d03b3b;
-  --down: #006300;
-  --warn: #b45309;
-  --warn-bg: #fdf4e3;
-  --info-bg: #eaf2fc;
-  --wash: rgba(42, 120, 214, 0.1);
+  --wash: var(--accent-wash);
+  /* 质感 */
+  --elev-pop: 0 1px 2px rgba(40, 36, 28, 0.05), 0 10px 28px -6px rgba(40, 36, 28, 0.16);
+  --elev-modal: 0 2px 6px rgba(40, 36, 28, 0.05), 0 28px 72px -16px rgba(40, 36, 28, 0.3);
+  --elev-raise: 0 1px 1px rgba(40, 36, 28, 0.04), 0 2px 6px -2px rgba(40, 36, 28, 0.08);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --scrim: rgba(22, 22, 20, 0.28);
+  --grain-opacity: 0.035;
+  --ink-art-filter: none;
+  --art-paper: #f4f1e9;
 }
 
+/* 深色：同一套梯度按深色表面重新取阶（不是自动反色） */
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --surface-2: #232321;
-    --ink: #ffffff;
-    --ink-2: #c3c2b7;
-    --muted: #898781;
-    --grid: #2c2c2a;
-    --axis: #383835;
-    --border: rgba(255, 255, 255, 0.1);
-    --accent: #3987e5;
+    --page: #0e0e0d;
+    --surface: #171716;
+    --surface-2: #1f1f1d;
+    --surface-3: #292927;
+    --ink: #ecebe7;
+    --ink-2: #b8b6ae;
+    --muted: #8e8c85;
+    --faint: #716f6a;
+    --line: rgba(236, 235, 231, 0.075);
+    --line-strong: rgba(236, 235, 231, 0.14);
+    --primary: #ecebe7;
+    --primary-hover: #ffffff;
+    --primary-ink: #0e0e0d;
+    --accent: #6da7ec;
+    --accent-strong: #86b6ef;
+    --accent-ink: #0e0e0d;
+    --accent-wash: rgba(109, 167, 236, 0.12);
+    --accent-line: rgba(109, 167, 236, 0.32);
+    --up: #ec6a61;
+    --down: #3db463;
+    --neg: #3987e5;
+    --warn: #eea531;
+    --warn-bg: #2a2213;
+    --warn-line: rgba(238, 165, 49, 0.22);
+    --danger: #ec6a61;
+    --grid: #262624;
+    --axis: #3a3a37;
+    --bench: #7f7d77;
     --series-1: #3987e5;
     --series-2: #d95926;
     --series-3: #199e70;
     --series-4: #c98500;
     --series-5: #d55181;
     --series-6: #9085e9;
-    --up: #e66767;
-    --down: #0ca30c;
-    --warn: #fab219;
-    --warn-bg: #2e2412;
-    --info-bg: #15233a;
-    --wash: rgba(57, 135, 229, 0.12);
+    --elev-pop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 36px -8px rgba(0, 0, 0, 0.65);
+    --elev-modal: 0 2px 8px rgba(0, 0, 0, 0.4), 0 32px 80px -16px rgba(0, 0, 0, 0.8);
+    --elev-raise: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --edge: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    --scrim: rgba(0, 0, 0, 0.55);
+    --grain-opacity: 0.05;
+    --ink-art-filter: invert(1) hue-rotate(180deg) brightness(0.92);
+    --art-paper: #100f0d;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --surface-2: #232321;
-  --ink: #ffffff;
-  --ink-2: #c3c2b7;
-  --muted: #898781;
-  --grid: #2c2c2a;
-  --axis: #383835;
-  --border: rgba(255, 255, 255, 0.1);
-  --accent: #3987e5;
+  --page: #0e0e0d;
+  --surface: #171716;
+  --surface-2: #1f1f1d;
+  --surface-3: #292927;
+  --ink: #ecebe7;
+  --ink-2: #b8b6ae;
+  --muted: #8e8c85;
+  --faint: #716f6a;
+  --line: rgba(236, 235, 231, 0.075);
+  --line-strong: rgba(236, 235, 231, 0.14);
+  --primary: #ecebe7;
+  --primary-hover: #ffffff;
+  --primary-ink: #0e0e0d;
+  --accent: #6da7ec;
+  --accent-strong: #86b6ef;
+  --accent-ink: #0e0e0d;
+  --accent-wash: rgba(109, 167, 236, 0.12);
+  --accent-line: rgba(109, 167, 236, 0.32);
+  --up: #ec6a61;
+  --down: #3db463;
+  --neg: #3987e5;
+  --warn: #eea531;
+  --warn-bg: #2a2213;
+  --warn-line: rgba(238, 165, 49, 0.22);
+  --danger: #ec6a61;
+  --grid: #262624;
+  --axis: #3a3a37;
+  --bench: #7f7d77;
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-3: #199e70;
   --series-4: #c98500;
   --series-5: #d55181;
   --series-6: #9085e9;
-  --up: #e66767;
-  --down: #0ca30c;
-  --warn: #fab219;
-  --warn-bg: #2e2412;
-  --info-bg: #15233a;
-  --wash: rgba(57, 135, 229, 0.12);
+  --elev-pop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 36px -8px rgba(0, 0, 0, 0.65);
+  --elev-modal: 0 2px 8px rgba(0, 0, 0, 0.4), 0 32px 80px -16px rgba(0, 0, 0, 0.8);
+  --elev-raise: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --grain-opacity: 0.05;
+  --ink-art-filter: invert(1) hue-rotate(180deg) brightness(0.92);
+  --art-paper: #100f0d;
+}
+
+/*
+ * 层级（只用这几档，不随手写 z-50）：页头 30 · 对话栏拖柄 20 · 弹窗 50 · 浮层（菜单/提示）60 · 纸纹 80（不接收点击）
+ */
+:root {
+  --z-rail: 20;
+  --z-header: 30;
+  --z-modal: 50;
+  --z-popover: 60;
+  --z-grain: 80;
+  /* 动效：进场用 out 曲线；悬停 120ms、按压 160ms、浮层 200ms、内容进场 360ms */
+  --ease-ink: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @theme inline {
   --color-page: var(--page);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-ink: var(--ink);
   --color-ink-2: var(--ink-2);
   --color-muted: var(--muted);
+  --color-faint: var(--faint);
   --color-grid: var(--grid);
-  --color-line: var(--border);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-ink: var(--primary-ink);
   --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-wash: var(--accent-wash);
+  --color-accent-line: var(--accent-line);
   --color-up: var(--up);
   --color-down: var(--down);
   --color-warn: var(--warn);
   --color-warn-bg: var(--warn-bg);
-  --color-info-bg: var(--info-bg);
-  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --color-warn-line: var(--warn-line);
+  --color-danger: var(--danger);
+  /* 拉丁字母与数字走 Geist，中文回落到系统黑体；代码、股票代码、坐标轴走 Geist Mono */
+  --font-sans:
+    "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", system-ui, sans-serif;
+  --font-mono:
+    "Geist Mono Variable", "SF Mono", ui-monospace, "PingFang SC", "Microsoft YaHei", monospace;
+  --text-2xs: 11px;
+  --text-2xs--line-height: 16px;
+  --shadow-pop: var(--elev-pop);
+  --shadow-modal: var(--elev-modal);
+  --shadow-raise: var(--elev-raise);
+  --ease-out: var(--ease-ink);
+  --animate-enter: ivan-enter 360ms var(--ease-ink) both;
+  --animate-pop: ivan-pop 200ms var(--ease-ink) both;
+  --animate-fade: ivan-fade 200ms var(--ease-ink) both;
+  --animate-modal: ivan-modal 240ms var(--ease-ink) both;
+  --animate-shimmer: ivan-shimmer 1.6s linear infinite;
+  --animate-live: ivan-live 2.4s var(--ease-ink) infinite;
 }
 
-html,
-body,
-#root {
-  height: 100%;
+@keyframes ivan-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
-body {
-  background: var(--page);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
+@keyframes ivan-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
 }
-.tabular {
-  font-variant-numeric: tabular-nums;
+@keyframes ivan-fade {
+  from {
+    opacity: 0;
+  }
 }
-::selection {
-  background: var(--wash);
+@keyframes ivan-modal {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+@keyframes ivan-shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+@keyframes ivan-live {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+@keyframes ivan-text-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv11";
+  }
+  /* 纸纹：固定在最上层、不接收点击的伪元素，不随内容滚动（不在滚动容器上加，避免重绘） */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-grain);
+    pointer-events: none;
+    opacity: var(--grain-opacity);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .08  0 0 0 0 .08  0 0 0 0 .07  0 0 0 .9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+  :root[data-theme="dark"] body::after {
+    filter: invert(1);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) body::after {
+      filter: invert(1);
+    }
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--accent) 22%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  p,
+  li {
+    text-wrap: pretty;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  code,
+  kbd {
+    font-family: var(--font-mono);
+  }
+  input[type="number"] {
+    font-variant-numeric: tabular-nums;
+  }
+  /* 原生日期框的日历按钮跟随主题 */
+  ::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* 对齐用的等宽数字：表格列、坐标轴、会竖着比的数 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  /* 墨色插画：浅色直接叠在纸上，深色整体反相成「月下的墨」 */
+  .ink-art {
+    filter: var(--ink-art-filter);
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  /* 骨架屏：形状贴合最终布局，一道很淡的光扫过 */
+  .skeleton {
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        color-mix(in oklab, var(--surface) 70%, transparent) 50%,
+        transparent 100%
+      )
+      var(--surface-2);
+    background-size: 200% 100%;
+    animation: ivan-shimmer 1.6s linear infinite;
+    border-radius: 6px;
+  }
+  /* AI 正在做事：状态文字上一道流光（只在进行中出现） */
+  .ai-shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--ink-2) 0%,
+      var(--ink-2) 40%,
+      var(--accent) 50%,
+      var(--ink-2) 60%,
+      var(--ink-2) 100%
+    );
+    background-size: 200% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: ivan-text-shimmer 2.2s linear infinite;
+  }
+  /* 大数字：正负号与单位退后一步，让数本身说话 */
+  .figure-unit {
+    font-size: 0.62em;
+    font-weight: 500;
+    margin-left: 0.08em;
+    opacity: 0.72;
+    letter-spacing: 0;
+  }
+  .figure-sign {
+    margin-right: 0.04em;
+    font-weight: 500;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

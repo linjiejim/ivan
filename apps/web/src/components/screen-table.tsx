@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import type { FactorDef, StrategySpec } from "@ivan/core";
 import { api } from "../lib/api.ts";
-import { fmtFactor } from "../lib/format.ts";
+import { fmtFactor, NA } from "../lib/format.ts";
 import type { ScreenResult } from "../lib/types.ts";
+import { IconScreen } from "./icons.tsx";
+import { DataTable, Empty, Td, Th } from "./ui.tsx";
 
 /** 选股结果表：排名、代码、名称、得分 + 策略用到的因子 */
 export function ScreenTable({ result, spec }: { result: ScreenResult; spec?: StrategySpec }) {
@@ -14,42 +16,46 @@ export function ScreenTable({ result, spec }: { result: ScreenResult; spec?: Str
   const byKey = new Map((factors.data?.factors ?? []).map((f) => [f.key, f]));
   const cols = Object.keys(result.rows[0]?.factors ?? {}).filter((k) => k !== "industry");
   if (!result.rows.length)
-    return <p className="text-sm text-muted">这一天没有股票同时满足所有条件。</p>;
+    return (
+      <Empty icon={IconScreen} title="这一天没有股票同时满足所有条件" className="border-0">
+        可以放宽一两个条件，或者换个数据日再看。
+      </Empty>
+    );
   return (
-    <div className="overflow-x-auto">
-      <table className="tabular w-full min-w-[640px] text-sm">
-        <thead>
-          <tr className="border-b border-line text-left text-xs text-muted">
-            <th className="py-2 pr-2 font-normal">#</th>
-            <th className="py-2 pr-3 font-normal">股票</th>
-            <th className="py-2 pr-3 font-normal">行业</th>
-            <th className="py-2 pr-3 text-right font-normal">得分</th>
+    <DataTable minWidth={640}>
+      <thead>
+        <tr>
+          <Th className="w-8">#</Th>
+          <Th>股票</Th>
+          <Th>行业</Th>
+          <Th align="right">得分</Th>
+          {cols.map((c) => (
+            <Th key={c} align="right">
+              {byKey.get(c)?.label ?? c}
+            </Th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {result.rows.map((r) => (
+          <tr key={r.code} className="transition-colors hover:bg-surface-2/60">
+            <Td className="font-mono text-[11px] text-muted">{r.rank}</Td>
+            <Td className="whitespace-nowrap">
+              <span className="font-medium text-ink">{r.name ?? r.code}</span>
+              <span className="ml-1.5 font-mono text-[11px] text-muted">{r.code}</span>
+            </Td>
+            <Td className="whitespace-nowrap text-ink-2">{String(r.factors.industry ?? NA)}</Td>
+            <Td align="right" className="font-mono text-[12px] text-ink">
+              {r.score.toFixed(3)}
+            </Td>
             {cols.map((c) => (
-              <th key={c} className="py-2 pr-3 text-right font-normal">
-                {byKey.get(c)?.label ?? c}
-              </th>
+              <Td key={c} align="right" className="text-ink-2">
+                {fmtFactor(r.factors[c], byKey.get(c)?.unit)}
+              </Td>
             ))}
           </tr>
-        </thead>
-        <tbody>
-          {result.rows.map((r) => (
-            <tr key={r.code} className="border-b border-line last:border-0">
-              <td className="py-1.5 pr-2 text-muted">{r.rank}</td>
-              <td className="py-1.5 pr-3">
-                <span className="font-medium">{r.name ?? r.code}</span>
-                <span className="ml-1.5 text-xs text-muted">{r.code}</span>
-              </td>
-              <td className="py-1.5 pr-3 text-ink-2">{String(r.factors.industry ?? "—")}</td>
-              <td className="py-1.5 pr-3 text-right">{r.score.toFixed(3)}</td>
-              {cols.map((c) => (
-                <td key={c} className="py-1.5 pr-3 text-right text-ink-2">
-                  {fmtFactor(r.factors[c], byKey.get(c)?.unit)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+        ))}
+      </tbody>
+    </DataTable>
   );
 }

@@ -4,30 +4,58 @@
  * 口径说明、回测成绩这类次要信息收进 ⓘ。全部从库里确定性渲染，只有简报那段是 LLM 写的。
  */
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowRight, ChevronRight, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
+import { AiAvatar } from "../components/brand.tsx";
 import { MAX_LINES, MultiNavChart, SLOT_VARS } from "../components/charts/multi-nav-chart.tsx";
 import { Sparkline } from "../components/charts/small.tsx";
+import {
+  IconAI,
+  IconBacktest,
+  IconBrief,
+  IconChart,
+  IconClock,
+  IconOffline,
+  IconPlan,
+  IconTemplate,
+  IconTracking,
+  IconWarn,
+} from "../components/icons.tsx";
 import { useMe } from "../components/layout.tsx";
 import {
+  ArtCard,
   Badge,
   Button,
+  Callout,
   Card,
   CheckBadges,
   cx,
   Empty,
   ErrorNote,
+  Figure,
   Info,
   InfoRows,
-  Spinner,
+  ListSkeleton,
+  SeriesDot,
+  Skeleton,
+  Tag,
+  TextLink,
   useMediaQuery,
   WIDE_QUERY,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { DEVIATION_INFO, deviationText, MARKET_TEXT, pct, tone } from "../lib/format.ts";
+import {
+  beatPct,
+  DEVIATION_INFO,
+  deviationText,
+  MARKET_TEXT,
+  NA,
+  pct,
+  tone,
+} from "../lib/format.ts";
 import type { StrategyLine } from "../lib/multi-series.ts";
+import { usePageTitle } from "../lib/title.ts";
 import type { Dashboard, DataStatus, PresetView, RunSummary, TrackingChart } from "../lib/types.ts";
 
 /** 只在出问题时出现：worker 没跑、某个市场最近一次更新失败 */
@@ -35,10 +63,9 @@ export function DataBanner({ data }: { data: DataStatus }) {
   const isAdmin = useMe().data?.user.role === "admin";
   if (!data.workerUp) {
     return (
-      <div className="flex items-center gap-2 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
-        <AlertTriangle className="size-4" />
-        行情服务（worker）没有运行：回测、选股、跟踪结算都会暂停。
-      </div>
+      <Callout tone="warn" icon={IconOffline} title="行情服务（worker）没有运行">
+        回测、选股、跟踪结算都会暂停。
+      </Callout>
     );
   }
   const failed = data.markets.filter((m) => m.lastEtl?.status === "failed");
@@ -46,24 +73,23 @@ export function DataBanner({ data }: { data: DataStatus }) {
   return (
     <div className="space-y-2">
       {failed.map((m) => (
-        <div
+        <Callout
           key={m.market}
-          className="flex items-start gap-2 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn"
+          tone="warn"
+          icon={IconWarn}
+          title={`${MARKET_TEXT[m.market]}数据停在 ${m.asOf ?? NA}`}
+          action={<Info label="失败原因">{m.lastEtl?.error ?? "未知"}</Info>}
         >
-          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-          <div className="min-w-0 flex-1">
-            <b className="font-medium">
-              {MARKET_TEXT[m.market]}数据停在 {m.asOf ?? "—"}
-            </b>
-            ：最近一次更新失败，这个市场的跟踪没有结算，简报里的数字也还是旧的。
-            {isAdmin && (
-              <Link to="/admin" className="ml-1 underline underline-offset-2">
-                去管理页重跑
-              </Link>
-            )}
-          </div>
-          <Info label="失败原因">{m.lastEtl?.error ?? "未知"}</Info>
-        </div>
+          最近一次更新失败，这个市场的跟踪没有结算，简报里的数字也还是旧的。
+          {isAdmin && (
+            <Link
+              to="/admin"
+              className="ml-1 font-medium text-warn underline decoration-warn/40 underline-offset-2 hover:decoration-warn"
+            >
+              去管理页重跑
+            </Link>
+          )}
+        </Callout>
       ))}
     </div>
   );
@@ -76,7 +102,7 @@ function asOfText(data: DataStatus): string {
   const same = ds.every((m) => m.asOf === ds[0]!.asOf);
   return same
     ? `数据截至 ${ds[0]!.asOf}`
-    : `数据截至 ${ds.map((m) => `${MARKET_TEXT[m.market]} ${m.asOf}`).join(" · ")}`;
+    : `数据截至 ${ds.map((m) => `${MARKET_TEXT[m.market]} ${m.asOf}`).join("，")}`;
 }
 
 export function PresetGallery({ presets }: { presets: PresetView[] }) {
@@ -97,23 +123,28 @@ export function PresetGallery({ presets }: { presets: PresetView[] }) {
     <div>
       <div className="grid gap-3 @lg:grid-cols-2 @5xl:grid-cols-4">
         {presets.map((p) => (
-          <div key={p.id} className="flex flex-col rounded-xl border border-line bg-surface p-3.5">
+          <div
+            key={p.id}
+            className="group/preset flex flex-col rounded-xl border border-line bg-surface p-4 transition-[border-color,box-shadow] duration-200 hover:border-line-strong hover:shadow-raise"
+          >
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold">{p.title}</span>
-              <Badge>{MARKET_TEXT[p.market]}</Badge>
+              <span className="min-w-0 truncate text-sm font-semibold text-ink">{p.title}</span>
+              <Tag>{MARKET_TEXT[p.market]}</Tag>
               <Info label="具体规则">
-                <ul className="space-y-0.5">
+                <ul className="space-y-1">
                   {p.describe.map((l) => (
                     <li key={l}>{l}</li>
                   ))}
                 </ul>
               </Info>
             </div>
-            <p className="mt-1 flex-1 text-xs text-ink-2">{p.blurb}</p>
+            <p className="mt-1.5 flex-1 text-xs leading-5 text-ink-2">{p.blurb}</p>
             <Button
-              className="mt-3"
+              className="mt-4 w-full"
               size="sm"
+              icon={IconBacktest}
               loading={create.isPending && create.variables === p.id}
+              disabled={create.isPending && create.variables !== p.id}
               onClick={() => create.mutate(p.id)}
             >
               用它建策略并回测
@@ -140,15 +171,8 @@ function toggle(sel: Selection, id: string): Selection {
   return [...sel, id];
 }
 
-/** 策略的颜色圆点：列表、选择按钮、图里的线是同一个颜色 */
-function Dot({ slot }: { slot: number | undefined }) {
-  return (
-    <span
-      aria-hidden
-      className="inline-block size-2.5 shrink-0 rounded-full"
-      style={{ background: slot === undefined ? "var(--muted)" : SLOT_VARS[slot] }}
-    />
-  );
+function slotColor(slot: number | undefined): string | undefined {
+  return slot === undefined ? undefined : SLOT_VARS[slot];
 }
 
 function TrackingsCard({
@@ -165,6 +189,8 @@ function TrackingsCard({
   return (
     <Card
       title="我的跟踪"
+      icon={IconTracking}
+      flush
       info={
         <>
           上线后每个交易日收盘后，按规则从上线日起重放一遍模拟盘。
@@ -176,9 +202,16 @@ function TrackingsCard({
           点一行只看它（再点别的可以一起对照）；点名字打开详情。
         </>
       }
+      action={
+        trackings.length > 0 && (
+          <span className="text-xs text-muted">
+            <span className="tabular font-medium text-ink-2">{trackings.length}</span> 个运行中
+          </span>
+        )
+      }
     >
       {trackings.length ? (
-        <ul className="-mx-2">
+        <ul className="px-2">
           {trackings.map((t) => {
             const slot = slots.get(t.id);
             const on = selection?.includes(t.id) ?? false;
@@ -192,30 +225,30 @@ function TrackingsCard({
                   onClick={() => slot !== undefined && onToggle(t.id)}
                   onKeyDown={(e) => e.key === "Enter" && slot !== undefined && onToggle(t.id)}
                   className={cx(
-                    "flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2.5 hover:bg-surface-2",
-                    on && "bg-surface-2",
-                    dim && "opacity-55",
+                    "grid cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2.5 py-3 transition-[background-color,opacity] duration-150 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto] sm:gap-4",
+                    on ? "bg-surface-2" : "hover:bg-surface-2/70",
+                    dim && "opacity-50 hover:opacity-80",
                   )}
                 >
-                  <Dot slot={slot} />
-                  <div className="min-w-0 flex-1">
+                  <SeriesDot color={slotColor(slot)} className="size-2.5" />
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <Link
                         to={`/trackings/${t.id}`}
                         onClick={(e) => e.stopPropagation()}
-                        className="truncate text-sm font-medium hover:text-accent"
+                        className="truncate text-sm font-medium text-ink transition-colors hover:text-accent"
                       >
                         {t.strategyName}
                       </Link>
-                      <Badge>{MARKET_TEXT[t.market]}</Badge>
+                      <Tag>{MARKET_TEXT[t.market]}</Tag>
                     </div>
-                    <div className="mt-0.5 flex items-center gap-1 text-xs text-muted">
+                    <div className="mt-1 flex items-center gap-1 text-xs text-muted">
                       <span className="truncate">
-                        {t.days ? `跟踪 ${t.days} 天` : `${t.startDate} 开始`} ·{" "}
+                        {t.days ? `跟踪 ${t.days} 天` : `${t.startDate} 开始`}，
                         {deviationText(t.deviationPct, t.days)}
                       </span>
                       <Info label="回测成绩">
-                        <div className="mb-1 font-medium text-ink">上线前的回测成绩</div>
+                        <div className="mb-1.5 font-medium text-ink">上线前的回测成绩</div>
                         {t.baseline ? (
                           <InfoRows
                             rows={[
@@ -232,16 +265,18 @@ function TrackingsCard({
                     </div>
                   </div>
                   <span className="hidden sm:block">
-                    <Sparkline
-                      values={t.spark}
-                      color={slot === undefined ? "var(--muted)" : SLOT_VARS[slot]}
-                    />
+                    <Sparkline values={t.spark} color={slotColor(slot) ?? "var(--faint)"} />
                   </span>
-                  <div className="w-20 shrink-0 text-right">
-                    <div className={cx("tabular text-lg font-semibold", tone(t.excess))}>
-                      {t.days ? pct(t.excess) : "—"}
+                  <div className="w-24 text-right">
+                    <div
+                      className={cx(
+                        "text-lg leading-6 font-semibold tracking-[-0.01em]",
+                        t.days ? tone(t.excess) : "text-muted",
+                      )}
+                    >
+                      <Figure text={t.days ? pct(t.excess) : NA} />
                     </div>
-                    <div className="text-[11px] text-muted">跟踪超额</div>
+                    <div className="text-2xs text-muted">跟踪超额</div>
                   </div>
                 </div>
               </li>
@@ -249,12 +284,13 @@ function TrackingsCard({
           })}
         </ul>
       ) : (
-        <Empty title="还没有上线跟踪的策略">
-          回测满意后让 AI「上线跟踪」，或者在策略页点「上线跟踪」。
+        <Empty art="bamboo" title="还没有上线跟踪的策略">
+          回测满意后，让
+          AI「上线跟踪」，或者在策略页点「上线跟踪」。之后每个交易日收盘，这里会长出一条新的走势。
         </Empty>
       )}
       {trackings.length > MAX_LINES && (
-        <p className="mt-2 text-xs text-muted">
+        <p className="px-4 pt-1 pb-2 text-xs text-muted">
           对照图最多同时画 {MAX_LINES} 个策略，灰点的请点名字打开详情看。
         </p>
       )}
@@ -267,27 +303,26 @@ function DetailStrip({ t }: { t: TrackingRow }) {
   const items: Array<[string, string, string]> = [
     [
       "跟踪收益",
-      t.days && t.nav !== null ? pct(t.nav - 1) : "—",
+      t.days && t.nav !== null ? pct(t.nav - 1) : NA,
       tone(t.nav !== null ? t.nav - 1 : null),
     ],
-    ["跟踪超额", t.days ? pct(t.excess) : "—", tone(t.excess)],
-    ["跑赢回测同期", t.deviationPct === null ? "—" : `${t.deviationPct.toFixed(0)}%`, ""],
+    ["跟踪超额", t.days ? pct(t.excess) : NA, tone(t.excess)],
+    ["跑赢回测同期", beatPct(t.deviationPct), "text-ink"],
     ["回测年化超额", pct(t.baseline?.excessCagr), tone(t.baseline?.excessCagr)],
   ];
   return (
-    <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-2 border-t border-line pt-3">
+    <div className="mt-4 flex flex-wrap items-end gap-x-8 gap-y-3 border-t border-line pt-4">
       {items.map(([label, value, cls]) => (
         <div key={label}>
-          <div className="text-[11px] text-muted">{label}</div>
-          <div className={cx("tabular text-sm font-semibold", cls)}>{value}</div>
+          <div className="text-2xs text-muted">{label}</div>
+          <div className={cx("mt-0.5 text-base font-semibold tracking-[-0.01em]", cls)}>
+            <Figure text={value} />
+          </div>
         </div>
       ))}
-      <Link
-        to={`/trackings/${t.id}`}
-        className="ml-auto inline-flex items-center text-xs text-accent"
-      >
-        打开跟踪详情 <ChevronRight className="size-3.5" />
-      </Link>
+      <TextLink to={`/trackings/${t.id}`} className="ml-auto self-center">
+        打开跟踪详情
+      </TextLink>
     </div>
   );
 }
@@ -295,41 +330,39 @@ function DetailStrip({ t }: { t: TrackingRow }) {
 /** 选了几个策略时：图下面并排比关键数 */
 function CompareTable({ rows, slots }: { rows: TrackingRow[]; slots: Map<string, number> }) {
   return (
-    <div className="mt-3 overflow-x-auto border-t border-line pt-2">
+    <div className="mt-4 overflow-x-auto border-t border-line pt-2">
       <table className="tabular w-full min-w-[560px] text-sm">
         <thead>
           <tr className="text-left text-xs text-muted">
-            <th className="py-1.5 font-normal">策略</th>
-            <th className="py-1.5 text-right font-normal">跟踪天数</th>
-            <th className="py-1.5 text-right font-normal">跟踪超额</th>
-            <th className="py-1.5 text-right font-normal">跑赢回测同期</th>
-            <th className="py-1.5 text-right font-normal">回测年化超额</th>
-            <th className="py-1.5 text-right font-normal">回测最大回撤</th>
+            <th className="h-9 font-normal">策略</th>
+            <th className="h-9 text-right font-normal">跟踪天数</th>
+            <th className="h-9 text-right font-normal">跟踪超额</th>
+            <th className="h-9 text-right font-normal">跑赢回测同期</th>
+            <th className="h-9 text-right font-normal">回测年化超额</th>
+            <th className="h-9 text-right font-normal">回测最大回撤</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((t) => (
             <tr key={t.id} className="border-t border-line">
-              <td className="py-1.5">
+              <td className="h-10">
                 <Link
                   to={`/trackings/${t.id}`}
-                  className="inline-flex items-center gap-2 hover:text-accent"
+                  className="inline-flex items-center gap-2 text-ink transition-colors hover:text-accent"
                 >
-                  <Dot slot={slots.get(t.id)} />
+                  <SeriesDot color={slotColor(slots.get(t.id))} />
                   {t.strategyName}
                 </Link>
               </td>
-              <td className="py-1.5 text-right text-ink-2">{t.days || "—"}</td>
-              <td className={`py-1.5 text-right ${tone(t.excess)}`}>
-                {t.days ? pct(t.excess) : "—"}
+              <td className="h-10 text-right text-ink-2">{t.days || NA}</td>
+              <td className={`h-10 text-right font-medium ${tone(t.excess)}`}>
+                {t.days ? pct(t.excess) : NA}
               </td>
-              <td className="py-1.5 text-right text-ink-2">
-                {t.deviationPct === null ? "—" : `${t.deviationPct.toFixed(0)}%`}
-              </td>
-              <td className={`py-1.5 text-right ${tone(t.baseline?.excessCagr)}`}>
+              <td className="h-10 text-right text-ink-2">{beatPct(t.deviationPct)}</td>
+              <td className={`h-10 text-right ${tone(t.baseline?.excessCagr)}`}>
                 {pct(t.baseline?.excessCagr)}
               </td>
-              <td className="py-1.5 text-right text-ink-2">
+              <td className="h-10 text-right text-ink-2">
                 {pct(t.baseline?.maxDrawdown, 1, false)}
               </td>
             </tr>
@@ -337,6 +370,32 @@ function CompareTable({ rows, slots }: { rows: TrackingRow[]; slots: Map<string,
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** 选策略的小按钮：色点 + 名字，和列表、图里的线同一个颜色 */
+function Chip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-pressed={active}
+      onClick={onClick}
+      className={cx(
+        "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs whitespace-nowrap ring-1 transition-[background-color,color,box-shadow] duration-150 ring-inset",
+        active
+          ? "bg-surface-2 font-medium text-ink ring-line-strong"
+          : "text-ink-2 ring-line hover:text-ink hover:ring-line-strong",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -385,50 +444,39 @@ function CompareCard({
   );
   const loading = charts.some((c) => c.isLoading);
   const single = shown.length === 1 ? shown[0]! : null;
-  const chip = (active: boolean) =>
-    cx(
-      "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs",
-      active ? "border-ink/30 bg-surface-2 text-ink" : "border-line text-ink-2 hover:text-ink",
-    );
   return (
     <Card
       title="净值对照"
+      icon={IconChart}
       info="每个策略一种颜色：淡色是上线前的回测，实色是上线后的模拟盘；灰线是基准（含分红），不同市场各一条。切到「超额」看每个策略相对自己基准的表现；「只看跟踪」从各自上线那天起算。在图上拖动可以框选一段，然后问 AI。"
-      action={
-        single ? (
-          <Link
-            to={`/trackings/${single.id}`}
-            className="inline-flex items-center text-xs text-accent"
-          >
-            详情 <ChevronRight className="size-3.5" />
-          </Link>
-        ) : null
-      }
+      action={single ? <TextLink to={`/trackings/${single.id}`}>详情</TextLink> : null}
     >
       {charted.length > 1 && (
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          <button className={chip(selection === null)} onClick={() => setSelection(null)}>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          <Chip active={selection === null} onClick={() => setSelection(null)}>
             全部
-          </button>
+          </Chip>
           {charted.map((t) => (
-            <button
+            <Chip
               key={t.id}
-              className={chip(selection?.includes(t.id) ?? false)}
-              aria-pressed={selection?.includes(t.id) ?? false}
+              active={selection?.includes(t.id) ?? false}
               onClick={() => setSelection(toggle(selection, t.id))}
             >
-              <Dot slot={slots.get(t.id)} />
+              <SeriesDot color={slotColor(slots.get(t.id))} />
               {t.strategyName}
-            </button>
+            </Chip>
           ))}
         </div>
       )}
       {loading && !lines.length ? (
-        <Spinner />
+        <div className="space-y-3">
+          <Skeleton className="h-6 w-56" />
+          <Skeleton className="h-[260px] w-full rounded-lg" />
+        </div>
       ) : (
         <MultiNavChart
           lines={lines}
-          height={260}
+          height={272}
           onAsk={(range) => {
             if (single) {
               chat.ask(
@@ -458,20 +506,35 @@ function CompareCard({
   );
 }
 
-function PlanCard({ signals }: { signals: Dashboard["signals"] }) {
+function PlanCard({
+  signals,
+  slots,
+}: {
+  signals: Dashboard["signals"];
+  slots: Map<string, number>;
+}) {
   return (
-    <Card title="明日计划" info="各跟踪下一个交易日开盘时的模拟买卖，按规则算出，不是投资建议。">
+    <Card
+      title="明日计划"
+      icon={IconPlan}
+      info="各跟踪下一个交易日开盘时的模拟买卖，按规则算出，不是投资建议。"
+    >
       {signals.length ? (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {signals.map((s) => (
             <div key={s.trackingId}>
-              <div className="mb-1 text-xs text-ink-2">
-                {s.strategyName} · {s.orders[0]?.planDate}
+              <div className="mb-2 flex items-center gap-2 text-xs">
+                <SeriesDot color={slotColor(slots.get(s.trackingId))} />
+                <span className="truncate font-medium text-ink">{s.strategyName}</span>
+                <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">
+                  {s.orders[0]?.planDate} 开盘
+                </span>
               </div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1.5 pl-4">
                 {s.orders.map((o) => (
                   <Badge key={`${o.side}-${o.code}`} tone={o.side === "buy" ? "up" : "down"}>
-                    {o.side === "buy" ? "买" : "卖"} {o.name ?? o.code}
+                    <span className="opacity-70">{o.side === "buy" ? "买" : "卖"}</span>
+                    {o.name ?? o.code}
                   </Badge>
                 ))}
               </div>
@@ -479,7 +542,12 @@ function PlanCard({ signals }: { signals: Dashboard["signals"] }) {
           ))}
         </div>
       ) : (
-        <p className="text-sm text-muted">明天没有计划中的买卖。</p>
+        <div className="flex items-center gap-3 py-2 text-sm text-muted">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-surface-2">
+            <IconPlan size={16} />
+          </span>
+          明天没有计划中的买卖，持仓照旧。
+        </div>
       )}
     </Card>
   );
@@ -491,12 +559,14 @@ function RunStatus({ r }: { r: RunSummary }) {
   if (r.kind === "sweep") return <span className="text-xs text-muted">扫描完成</span>;
   if (!r.headline) return null;
   return (
-    <>
-      <span className={`tabular text-sm ${tone(r.headline.excessCagr)}`}>
+    <span className="flex items-center gap-2">
+      <CheckBadges checks={r.checks} />
+      <span
+        className={cx("tabular w-14 text-right text-sm font-medium", tone(r.headline.excessCagr))}
+      >
         {pct(r.headline.excessCagr)}
       </span>
-      <CheckBadges checks={r.checks} />
-    </>
+    </span>
   );
 }
 
@@ -504,31 +574,36 @@ function RecentRunsCard({ runs }: { runs: RunSummary[] }) {
   return (
     <Card
       title="最近回测"
+      icon={IconBacktest}
       info="右边的数字是年化超额（相对基准）。"
-      action={
-        <Link to="/strategies" className="inline-flex items-center text-xs text-accent">
-          全部策略 <ChevronRight className="size-3.5" />
-        </Link>
-      }
+      action={<TextLink to="/strategies">全部策略</TextLink>}
+      flush
     >
       {runs.length ? (
-        <ul className="divide-y divide-line">
+        <ul className="px-2">
           {runs.slice(0, 4).map((r) => (
-            <li key={r.id} className="flex items-center gap-3 py-2">
-              <Link to={`/runs/${r.id}`} className="min-w-0 flex-1 hover:text-accent">
-                <div className="truncate text-sm">{r.strategyName ?? "回测"}</div>
-                <div className="truncate text-xs text-muted">
-                  {r.kind === "sweep"
-                    ? `参数扫描：${r.label ?? ""}`
-                    : `${r.params.start} ~ ${r.params.end}`}
+            <li key={r.id}>
+              <Link
+                to={`/runs/${r.id}`}
+                className="group/run flex items-center gap-3 rounded-lg px-2.5 py-2.5 transition-colors hover:bg-surface-2/70"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-ink transition-colors group-hover/run:text-accent">
+                    {r.strategyName ?? "回测"}
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
+                    {r.kind === "sweep"
+                      ? `参数扫描：${r.label ?? ""}`
+                      : `${r.params.start} ~ ${r.params.end}`}
+                  </div>
                 </div>
+                <RunStatus r={r} />
               </Link>
-              <RunStatus r={r} />
             </li>
           ))}
         </ul>
       ) : (
-        <p className="text-sm text-muted">还没有回测。</p>
+        <p className="px-4 pb-3 text-sm text-muted">还没有回测。</p>
       )}
     </Card>
   );
@@ -538,31 +613,95 @@ function Welcome({ presets }: { presets: PresetView[] }) {
   const chat = useChatUi();
   const wide = useMediaQuery(WIDE_QUERY);
   return (
+    <div className="space-y-5">
+      <ArtCard
+        art="start"
+        title="从一个选股想法开始"
+        body={
+          wide
+            ? "直接在右边告诉 AI 你的想法，比如「A 股里找低估值、高分红的龙头，每月调一次仓」。它会写成规则、在历史数据上回测，你确认后才生效。"
+            : "告诉 AI 你的想法，它会写成规则并回测；也可以先用下面的模板跑一遍看看。"
+        }
+        action={
+          !wide && (
+            <Button
+              variant="primary"
+              icon={IconAI}
+              onClick={() => chat.ask("我想建一个选股策略，帮我一起想想：", {})}
+            >
+              用对话描述我的策略
+            </Button>
+          )
+        }
+      />
+      <Card
+        title="或者，从模板开始"
+        icon={IconTemplate}
+        info="模板是几种常见的选股思路，点一下会建好策略并马上回测；之后可以直接让 AI 帮你改。"
+      >
+        <PresetGallery presets={presets} />
+      </Card>
+    </div>
+  );
+}
+
+function BriefCard({ d }: { d: Dashboard }) {
+  const asOf = asOfText(d.data);
+  return (
     <Card
-      title="从一个模板开始"
-      info="模板是几种常见的选股思路，点一下会建好策略并马上回测；之后可以直接让 AI 帮你改。"
+      title="今日简报"
+      icon={IconBrief}
+      info={
+        <>
+          每个交易日收盘后生成：引擎先算出各跟踪的事实，AI 只负责写成人话，数字以卡片为准。
+          {d.brief && <div className="mt-1 text-muted">这一期：{d.brief.date}</div>}
+        </>
+      }
+      action={
+        asOf && (
+          <span className="inline-flex items-center gap-1 text-xs text-muted">
+            <IconClock size={13} />
+            {asOf}
+          </span>
+        )
+      }
     >
-      <p className="mb-3 text-sm text-ink-2">
-        {wide
-          ? "也可以直接在右边告诉 AI 你的想法，比如「A 股里找低估值、高分红的龙头，每月调一次仓」。"
-          : "也可以直接告诉 AI 你的想法，它会帮你写成策略并回测。"}
-      </p>
-      <PresetGallery presets={presets} />
-      {!wide && (
-        <Button
-          className="mt-4"
-          variant="primary"
-          onClick={() => chat.ask("我想建一个选股策略，帮我一起想想：", {})}
-        >
-          用对话描述我的策略
-          <ArrowRight className="size-4" />
-        </Button>
+      {d.brief?.content ? (
+        <div className="flex gap-3">
+          <AiAvatar className="mt-0.5" />
+          <p className="max-w-[72ch] text-[14.5px] leading-7 whitespace-pre-wrap text-ink">
+            {d.brief.content}
+          </p>
+        </div>
+      ) : (
+        <p className="text-sm text-muted">有跟踪中的策略后，每天收盘后会在这里写一段简报。</p>
       )}
     </Card>
   );
 }
 
+function DashboardSkeleton() {
+  return (
+    <div role="status" aria-label="加载中" className="space-y-5">
+      <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="h-3.5 w-full" />
+        <Skeleton className="h-3.5 w-4/5" />
+      </div>
+      <div className="rounded-xl border border-line bg-surface p-4">
+        <Skeleton className="mb-4 h-4 w-20" />
+        <ListSkeleton rows={3} />
+      </div>
+      <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-64 w-full rounded-lg" />
+      </div>
+    </div>
+  );
+}
+
 export function DashboardPage() {
+  usePageTitle(null);
   const q = useQuery({
     queryKey: ["dashboard"],
     queryFn: () => api.get<Dashboard>("/api/dashboard"),
@@ -585,39 +724,19 @@ export function DashboardPage() {
   // 选中的跟踪被停掉后，从选择里去掉
   const valid: Selection = selection?.filter((id) => slots.has(id)) ?? null;
   const sel: Selection = valid && valid.length ? valid : null;
-  if (q.isLoading) return <Spinner />;
+  if (q.isLoading) return <DashboardSkeleton />;
   if (!q.data) return <ErrorNote error={q.error} />;
   const d = q.data;
   const empty = !d.trackings.length && !d.recentRuns.length;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <DataBanner data={d.data} />
       {empty ? (
         <Welcome presets={d.presets} />
       ) : (
         <>
-          <Card
-            title={
-              <>
-                <Sparkles className="size-4 text-accent" />
-                今日简报
-              </>
-            }
-            info={
-              <>
-                每个交易日收盘后生成：引擎先算出各跟踪的事实，AI 只负责写成人话，数字以卡片为准。
-                {d.brief && <div className="mt-1 text-muted">这一期：{d.brief.date}</div>}
-              </>
-            }
-            action={<span className="text-xs text-muted">{asOfText(d.data)}</span>}
-          >
-            {d.brief?.content ? (
-              <p className="whitespace-pre-wrap text-sm leading-6 text-ink">{d.brief.content}</p>
-            ) : (
-              <p className="text-sm text-muted">有跟踪中的策略后，每天收盘后会在这里写一段简报。</p>
-            )}
-          </Card>
+          <BriefCard d={d} />
           <TrackingsCard
             trackings={trackings}
             slots={slots}
@@ -632,8 +751,8 @@ export function DashboardPage() {
               setSelection={setSelection}
             />
           )}
-          <div className="grid gap-4 @3xl:grid-cols-2">
-            <PlanCard signals={d.signals} />
+          <div className="grid items-start gap-5 @3xl:grid-cols-2">
+            <PlanCard signals={d.signals} slots={slots} />
             <RecentRunsCard runs={d.recentRuns} />
           </div>
         </>

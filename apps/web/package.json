@@ -12,16 +12,19 @@
   },
   "dependencies": {
     "@ai-sdk/react": "catalog:",
+    "@fontsource-variable/geist": "catalog:",
+    "@fontsource-variable/geist-mono": "catalog:",
     "@ivan/core": "workspace:*",
+    "@phosphor-icons/react": "catalog:",
     "@tanstack/react-query": "catalog:",
     "ai": "catalog:",
     "better-auth": "catalog:",
     "clsx": "catalog:",
     "echarts": "catalog:",
-    "lucide-react": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "react-router": "catalog:"
+    "react-router": "catalog:",
+    "tailwind-merge": "catalog:"
   },
   "devDependencies": {
     "@tailwindcss/vite": "catalog:",
