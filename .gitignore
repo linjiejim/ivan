@@ -11,3 +11,6 @@ logs/
 .env
 .env.*.local
 .DS_Store
+
+# 部署脚本在服务器上记的锁文件哈希（锁文件没变就不重装）
+.deploy-lock-hash
