@@ -1,0 +1,89 @@
+# 持续集成 + 部署到 jim-server（说明见 DEPLOY.md）。
+#   - PR：只跑检查（lint / format / typecheck / test / build）
+#   - push main：检查通过后 SSH 到服务器，等 worker 空闲 → 拉代码 → 锁文件变了才重装 → 构建前端 → 重启 → 健康检查
+# 需要 GitHub environment `jim-server`：DEV_SERVER_HOST / PORT / USERNAME / SSH_KEY（专用 CI 登录 key）。
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  deploy:
+    needs: [check]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: jim-server
+    # 两次部署不并行：后一次排队等前一次做完
+    concurrency:
+      group: deploy-jim-server
+      cancel-in-progress: false
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_SERVER_HOST }}
+          port: ${{ secrets.DEV_SERVER_PORT }}
+          username: ${{ secrets.DEV_SERVER_USERNAME }}
+          key: ${{ secrets.DEV_SERVER_SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            set -e
+            export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; nvm use 22 >/dev/null
+            APP_DIR=/root/ivan/ivan; cd "$APP_DIR"; export CI=true; mkdir -p logs
+
+            # 夜间任务 / 回测 / 回填在跑就先等（最多 15 分钟）；还忙就放弃，什么都不动
+            node --no-warnings scripts/deploy-wait-idle.mjs
+
+            eval "$(ssh-agent -s)" >/dev/null
+            trap 'eval "$(ssh-agent -k)" >/dev/null 2>&1 || true' EXIT
+            ssh-add ~/.ssh/ivan_deploy 2>/dev/null
+            export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o HostName=ssh.github.com -p 443"
+            git fetch origin main && git reset --hard origin/main
+            echo "部署 $(git log -1 --format='%h %s')"
+
+            NEW_HASH=$(md5sum pnpm-lock.yaml | cut -d' ' -f1)
+            OLD_HASH=$(cat .deploy-lock-hash 2>/dev/null || echo "")
+            if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+              pnpm install --frozen-lockfile
+              pnpm rebuild esbuild   # 这台机器会忽略 esbuild 的安装脚本；tsx 运行时要用它
+              echo "$NEW_HASH" > .deploy-lock-hash
+            fi
+            pnpm --filter @ivan/web build
+
+            pm2 startOrRestart ecosystem.config.cjs --update-env && pm2 save
+
+            PORT=$(grep -E '^PORT=' .env | cut -d= -f2)
+            WPORT=$(grep -E '^WORKER_PORT=' .env | cut -d= -f2)
+            SECRET=$(grep -E '^INTERNAL_SECRET=' .env | cut -d= -f2-)
+            for i in 1 2 3 4 5 6 7 8; do
+              sleep 3
+              S=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/setup" || true)
+              W=$(curl -s -o /dev/null -w "%{http_code}" -H "x-internal-secret: $SECRET" "http://127.0.0.1:$WPORT/internal/health" || true)
+              echo "attempt $i: server HTTP $S, worker HTTP $W"
+              [ "$S" = "200" ] && [ "$W" = "200" ] && break
+            done
+            if [ "$S" != "200" ] || [ "$W" != "200" ]; then
+              tail -30 logs/server.error.log 2>/dev/null || true
+              tail -30 logs/worker.error.log 2>/dev/null || true
+              exit 1
+            fi
