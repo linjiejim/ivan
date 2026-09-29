@@ -49,8 +49,10 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
   "rank": {
     "terms": [ { "factor": "pe_ttm", "weight": 2, "better": "low", "neutral": true } ],  // neutral 可选：只和同一行业比
     "top": 15,
-    "maxPerIndustry": 3                         // 可选：同一一级行业最多几只
+    "maxPerIndustry": 3,                        // 可选：同一一级行业最多几只
+    "regime": { "ma": 200, "weak": { "terms": [ … ] } }  // 可选（实验）：沪深300/恒指低于 200 日均线时改用 weak.terms 排序
   },
+  "exposure": { "volTarget": 0.18 },          // 可选：按波动控制仓位，持仓年化波动超过 18% 时按比例减仓（每周评估）
   "rebalance": { "every": "week" | "month" | "quarter", "buffer": 1.5 },  // 掉出前 top×buffer 名才卖
   "sizing": { "method": "equal", "maxWeight": 0.2 },       // 等权；可选单只上限
   "exits": { "takeProfit": 0.3, "stopLoss": 0.15, "maxHoldDays": 120, "dropWhenFiltered": true },

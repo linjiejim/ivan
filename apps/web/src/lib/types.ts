@@ -187,6 +187,8 @@ export interface TrackingChart {
 
 export interface ScreenResult {
   date: string;
+  /** 按大盘状态切换排序的策略：这天用的是哪套排序（D53） */
+  regime?: "strong" | "weak" | null;
   rows: Array<{
     rank: number;
     code: string;

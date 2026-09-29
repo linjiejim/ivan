@@ -76,7 +76,9 @@ export type TradeReason =
   | "max_hold"
   | "signal"
   | "delisted"
-  | "entry";
+  | "entry"
+  /** 仓位控制按比例增减（D52） */
+  | "exposure";
 
 export interface Trade {
   date: DateStr;
@@ -139,6 +141,8 @@ export interface Metrics extends PeriodMetrics {
   costDrag: number;
   buys: number;
   sells: number;
+  /** 平均股票仓位（股票市值 ÷ 总资产的日均值） */
+  avgExposure?: number;
   monthly: Array<{ month: string; ret: number; bench: number }>;
   yearly: Array<{ year: string; ret: number; bench: number }>;
   finalEquity: number;
@@ -174,6 +178,8 @@ export interface OpenPosition {
   entryPrice: number;
   /** 含分红的持仓收益 */
   ret: number;
+  /** 剩余持仓成本（买入金额 + 费用，仓位控制减仓后按比例扣掉） */
+  cost?: number;
 }
 
 export interface PendingOrder {
@@ -199,5 +205,7 @@ export interface SimResult {
     positions: OpenPosition[];
     /** 下一个交易日开盘要执行的单（向前跟踪的「今日信号」） */
     pending: PendingOrder[];
+    /** 仓位控制（D52）：当前的仓位系数，和下一个交易日开盘要调到的系数（相同表示不调） */
+    exposure?: { current: number; next: number };
   };
 }

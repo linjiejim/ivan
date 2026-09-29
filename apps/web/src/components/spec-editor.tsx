@@ -4,7 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import type { Condition, FactorDef, Market, StrategySpec } from "@ivan/core";
+import type { Condition, FactorDef, Market, RankTerm, StrategySpec } from "@ivan/core";
 import { api } from "../lib/api.ts";
 import type { ProposeResult } from "../lib/types.ts";
 import { DiffView } from "./diff-view.tsx";
@@ -148,6 +148,61 @@ export function SpecEditor({
       </optgroup>
     ));
   };
+
+  /** 一组排序项的编辑行（普通排序与「大盘走弱时」的排序共用） */
+  const termRows = (get: (sp: StrategySpec) => RankTerm[]) => (
+    <div className="space-y-2">
+      {get(spec).map((t, i) => (
+        <div
+          key={i}
+          className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-2/70 px-3 py-2.5"
+        >
+          <Select
+            aria-label="排序因子"
+            value={t.factor}
+            onChange={(e) => up((s) => void (get(s)[i]!.factor = e.target.value))}
+            className="w-52"
+          >
+            {factorOptions(numeric)}
+          </Select>
+          <Select
+            aria-label="方向"
+            value={t.better}
+            onChange={(e) => up((s) => void (get(s)[i]!.better = e.target.value as "high" | "low"))}
+          >
+            <option value="high">越高越好</option>
+            <option value="low">越低越好</option>
+          </Select>
+          <Inline>
+            权重
+            <Input
+              className="w-20"
+              type="number"
+              min={0.1}
+              step={0.5}
+              value={t.weight}
+              onChange={(e) => up((s) => void (get(s)[i]!.weight = Number(e.target.value) || 1))}
+            />
+          </Inline>
+          <Checkbox
+            label="行业内比"
+            title="只和同一行业的公司比（比如 PE 跟同行比，不跟银行比）"
+            checked={t.neutral ?? false}
+            onChange={(e) => up((s) => void (get(s)[i]!.neutral = e.target.checked || undefined))}
+          />
+          {get(spec).length > 1 && (
+            <IconButton
+              icon={IconDelete}
+              label="删除排序项"
+              size="sm"
+              className="ml-auto hover:text-danger"
+              onClick={() => up((s) => void get(s).splice(i, 1))}
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  );
 
   const condRow = (c: Condition, i: number) => {
     const f = byKey.get(c.factor);
@@ -399,63 +454,7 @@ export function SpecEditor({
       </Section>
 
       <Section title="排序" hint="按横截面百分位加权打分，取前 N 只">
-        <div className="space-y-2">
-          {spec.rank?.terms.map((t, i) => (
-            <div
-              key={i}
-              className="flex flex-wrap items-center gap-2 rounded-lg bg-surface-2/70 px-3 py-2.5"
-            >
-              <Select
-                aria-label="排序因子"
-                value={t.factor}
-                onChange={(e) => up((s) => void (s.rank!.terms[i]!.factor = e.target.value))}
-                className="w-52"
-              >
-                {factorOptions(numeric)}
-              </Select>
-              <Select
-                aria-label="方向"
-                value={t.better}
-                onChange={(e) =>
-                  up((s) => void (s.rank!.terms[i]!.better = e.target.value as "high" | "low"))
-                }
-              >
-                <option value="high">越高越好</option>
-                <option value="low">越低越好</option>
-              </Select>
-              <Inline>
-                权重
-                <Input
-                  className="w-20"
-                  type="number"
-                  min={0.1}
-                  step={0.5}
-                  value={t.weight}
-                  onChange={(e) =>
-                    up((s) => void (s.rank!.terms[i]!.weight = Number(e.target.value) || 1))
-                  }
-                />
-              </Inline>
-              <Checkbox
-                label="行业内比"
-                title="只和同一行业的公司比（比如 PE 跟同行比，不跟银行比）"
-                checked={t.neutral ?? false}
-                onChange={(e) =>
-                  up((s) => void (s.rank!.terms[i]!.neutral = e.target.checked || undefined))
-                }
-              />
-              {(spec.rank?.terms.length ?? 0) > 1 && (
-                <IconButton
-                  icon={IconDelete}
-                  label="删除排序项"
-                  size="sm"
-                  className="ml-auto hover:text-danger"
-                  onClick={() => up((s) => void s.rank!.terms.splice(i, 1))}
-                />
-              )}
-            </div>
-          ))}
-        </div>
+        {termRows((sp) => sp.rank!.terms)}
         <div className="mt-2 flex flex-wrap items-center gap-4">
           <Button
             size="sm"
@@ -499,6 +498,62 @@ export function SpecEditor({
             />
             只
           </Inline>
+        </div>
+        <div className="mt-4 border-t border-line pt-3">
+          <Checkbox
+            label={`大盘走弱时换一组排序（实验）`}
+            title="决策日沪深300（港股看恒指）收盘在均线下方时，改用下面这组排序"
+            checked={!!spec.rank?.regime}
+            onChange={(e) =>
+              up((s) => {
+                s.rank!.regime = e.target.checked
+                  ? { ma: 200, weak: { terms: structuredClone(s.rank!.terms) } }
+                  : undefined;
+              })
+            }
+          />
+          {spec.rank?.regime && (
+            <div className="mt-3 space-y-2">
+              <Inline title="指数收盘低于最近这么多个交易日的均价，就算走弱">
+                {spec.market === "A" ? "沪深300" : "恒指"}低于
+                <Input
+                  className="w-16"
+                  type="number"
+                  min={20}
+                  max={250}
+                  value={spec.rank.regime.ma}
+                  onChange={(e) =>
+                    up(
+                      (s) =>
+                        void (s.rank!.regime!.ma = Math.min(
+                          250,
+                          Math.max(20, Math.trunc(Number(e.target.value) || 200)),
+                        )),
+                    )
+                  }
+                />
+                日均线时，用这组排序：
+              </Inline>
+              {termRows((sp) => sp.rank!.regime!.weak.terms)}
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={IconAdd}
+                onClick={() =>
+                  up(
+                    (s) =>
+                      void s.rank!.regime!.weak.terms.push({
+                        factor: "roe_ttm",
+                        weight: 1,
+                        better: "high",
+                      }),
+                  )
+                }
+              >
+                加排序项
+              </Button>
+            </div>
+          )}
         </div>
       </Section>
 
@@ -599,6 +654,41 @@ export function SpecEditor({
             />
             %
           </Inline>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3">
+          <Checkbox
+            label="按波动控制仓位"
+            title="每周五收盘看持仓近 60 个交易日的年化波动，超过目标就在下周一开盘按比例减仓，回落再加回；空出来的钱不计利息"
+            checked={!!spec.exposure}
+            onChange={(e) =>
+              up((s) => {
+                s.exposure = e.target.checked ? { volTarget: 0.18, lookback: 60 } : undefined;
+              })
+            }
+          />
+          {spec.exposure && (
+            <Inline title="组合年化波动超过这个值时，仓位按「目标 ÷ 实际波动」缩小，按 10% 取整">
+              目标年化波动
+              <Input
+                className="w-16"
+                type="number"
+                min={5}
+                max={100}
+                step={1}
+                value={Math.round(spec.exposure.volTarget * 100)}
+                onChange={(e) =>
+                  up(
+                    (s) =>
+                      void (s.exposure!.volTarget = Math.min(
+                        1,
+                        Math.max(0.05, (Number(e.target.value) || 18) / 100),
+                      )),
+                  )
+                }
+              />
+              %
+            </Inline>
+          )}
         </div>
       </Section>
 

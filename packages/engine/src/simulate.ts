@@ -6,7 +6,9 @@
  * - 买：停牌或（A 股）开盘价触及涨停 → 当天放弃，空位留到下次调仓（D15）。
  * - 计价：持仓按等比复权因子折算（分红再投入）；止盈止损按含分红的涨跌判断（不含费用）。
  * - 调仓（D15 + 缓冲）：调仓日掉出前 ⌈top × buffer⌉ 名的持仓卖出，空位按名单顺序补足；
- *   新买入每只预算 = min(上一收盘总资产 / top, 现金 / 空位数, 单只上限)。持仓不做再平衡。
+ *   新买入每只预算 = min(上一收盘总资产 × 仓位系数 / top, 现金 / 空位数, 单只上限)。持仓不做再平衡。
+ * - 仓位控制（D52，可选）：每周最后一个交易日收盘，按当前持仓组合近 N 日的年化波动算出下周的仓位系数
+ *   （目标波动 ÷ 实际波动，按 10% 取整，最多 1）；系数变了就在下一交易日开盘把每只持仓按同一比例增减。
  */
 import {
   type BacktestParams,
@@ -14,6 +16,7 @@ import {
   type HoldingSnapshot,
   type OpenPosition,
   type PendingOrder,
+  type PriceSeries,
   periodKey,
   priceLimitPct,
   limitPrices,
@@ -28,7 +31,7 @@ import {
 import { runChecks } from "./checks.ts";
 import { attribution, computeMetrics, periodMetrics } from "./metrics.ts";
 
-export const ENGINE_VERSION = "1.0.0";
+export const ENGINE_VERSION = "1.1.0";
 
 interface Position {
   code: string;
@@ -86,6 +89,8 @@ export function simulate(input: SimInput): SimResult {
   const N = spec.mode === "signals" ? (spec.signals?.maxPositions ?? 10) : (spec.rank?.top ?? 10);
   const band = Math.ceil(N * spec.rebalance.buffer);
   const costs = spec.costs ?? {};
+  const volTarget = spec.exposure?.volTarget;
+  const volLookback = spec.exposure?.lookback ?? 60;
 
   // 调仓日（规则模式）或信号买入日（信号模式）
   const execSet = new Set<number>();
@@ -143,11 +148,60 @@ export function simulate(input: SimInput): SimResult {
   const series: SeriesPoint[] = [];
   const holdings: HoldingSnapshot[] = [];
   let prevEquity = params.capital;
+  /** 仓位系数：持仓规模相对「满仓」的比例（D52）；nextScale = 收盘定下、下一交易日开盘生效 */
+  let scale = 1;
+  let nextScale: number | null = null;
 
   const posValue = (pos: Position, i: number) => {
     const lc = lastClose(pos.code, i);
     if (!lc) return pos.cost;
     return pos.shares * lc.close * (lc.adj / pos.entryAdj);
+  };
+
+  /** 按交易单位向下取整的股数：A 股主板/创业板整百股，科创板按 1 股，港股按每手 */
+  const lotFloor = (code: string, shares: number): number => {
+    const sec = securities.get(code);
+    if (market === "A")
+      return sec?.board === "star" ? Math.floor(shares) : Math.floor(shares / 100) * 100;
+    const lot = sec?.lotSize && sec.lotSize > 0 ? sec.lotSize : 100;
+    return Math.floor(shares / lot) * lot;
+  };
+
+  /**
+   * 当前持仓组合的年化波动（D52）：按当前市值加权，回看 volLookback 个交易日的日收益（含分红），
+   * 再乘上「满仓时股票占总资产的比例」，这样有空仓位时不会高估。数据不够（少于 20 天）返回 null。
+   */
+  const holdingsVol = (i: number, equity: number): number | null => {
+    const items: Array<{ p: PriceSeries; w: number }> = [];
+    let total = 0;
+    for (const pos of positions.values()) {
+      const p = prices.get(pos.code);
+      const v = posValue(pos, i);
+      if (!p || !(v > 0)) continue;
+      items.push({ p, w: v });
+      total += v;
+    }
+    if (!items.length || !(total > 0) || !(equity > 0)) return null;
+    const fullFrac = Math.min(1, total / Math.max(scale, 1e-9) / equity);
+    const rets: number[] = [];
+    for (let t = Math.max(1, i - volLookback + 1); t <= i; t++) {
+      let r = 0;
+      let seen = 0;
+      for (const { p, w } of items) {
+        const k = t - p.from;
+        if (k < 1 || k >= p.close.length) continue;
+        const a = p.close[k]! * p.adj[k]!;
+        const b = p.close[k - 1]! * p.adj[k - 1]!;
+        if (!Number.isFinite(a) || !Number.isFinite(b) || !(b > 0)) continue;
+        r += (w / total) * (a / b - 1);
+        seen += w;
+      }
+      if (seen > 0) rets.push(r * fullFrac);
+    }
+    if (rets.length < 20) return null;
+    const mean = rets.reduce((x, y) => x + y, 0) / rets.length;
+    const sd = Math.sqrt(rets.reduce((x, y) => x + (y - mean) ** 2, 0) / (rets.length - 1));
+    return sd * Math.sqrt(243);
   };
 
   /** A 股：当日开盘是否触及涨/跌停（参考价 = 前收按复权因子折算到除权后） */
@@ -174,6 +228,13 @@ export function simulate(input: SimInput): SimResult {
 
   for (let i = startIdx; i <= endIdx; i++) {
     const date = calendar[i]!;
+    // 仓位控制：昨天收盘定下的系数今天开盘生效，已有持仓在买卖之后按比例增减（见 2.5）
+    let scaleFrom: number | null = null;
+    if (nextScale !== null) {
+      scaleFrom = scale;
+      scale = nextScale;
+      nextScale = null;
+    }
 
     // ── 0. 退市：到退市日还拿着的，按最后收盘价清出（长期停牌但没退市的继续冻结） ──
     for (const pos of [...positions.values()]) {
@@ -244,7 +305,7 @@ export function simulate(input: SimInput): SimResult {
         if (limitHit(code, i, "buy")) continue; // 涨停开盘买不进
         const open = cur.p.open[cur.k]!;
         const sec = securities.get(code);
-        let budget = Math.min(prevEquity / N, cash / vacancies);
+        let budget = Math.min((prevEquity * scale) / N, cash / vacancies);
         if (spec.sizing.maxWeight) budget = Math.min(budget, prevEquity * spec.sizing.maxWeight);
         let shares = sharesForBudget(
           market,
@@ -288,6 +349,71 @@ export function simulate(input: SimInput): SimResult {
           reason: spec.mode === "signals" ? "signal" : "entry",
         });
         vacancies--;
+      }
+    }
+
+    // ── 2.5 开盘：仓位系数变了，已有持仓（今天新买的除外）按同一比例增减 ──
+    if (scaleFrom !== null && scaleFrom > 0 && scale !== scaleFrom) {
+      const f = scale / scaleFrom;
+      const plans: Array<{ pos: Position; open: number; adjNow: number; real: number; q: number }> =
+        [];
+      for (const pos of positions.values()) {
+        if (pos.entryIdx === i || pendingSells.has(pos.code)) continue;
+        const cur = px(pos.code, i);
+        if (!cur || !Number.isFinite(cur.p.open[cur.k]!)) continue; // 停牌：这只不调
+        if (limitHit(pos.code, i, f < 1 ? "sell" : "buy")) continue;
+        const adjNow = cur.p.adj[cur.k]!;
+        const real = pos.shares * (adjNow / pos.entryAdj);
+        const q = lotFloor(pos.code, real * Math.abs(1 - f));
+        if (q > 0) plans.push({ pos, open: cur.p.open[cur.k]!, adjNow, real, q });
+      }
+      if (f > 1) {
+        // 加仓：现金不够时所有加仓同比例缩小
+        const need = plans.reduce((t, x) => t + x.q * x.open * 1.001, 0);
+        if (need > cash && need > 0) {
+          const k = (cash * 0.998) / need;
+          for (const x of plans) x.q = lotFloor(x.pos.code, x.q * k);
+        }
+      }
+      for (const { pos, open, adjNow, real, q } of plans) {
+        if (q <= 0) continue;
+        const amount = q * open;
+        if (f < 1) {
+          const fee = tradeFees(market, "sell", amount, date, costs).total;
+          const costPart = pos.cost * (q / real);
+          cash += amount - fee;
+          pos.cost -= costPart;
+          pos.shares -= q * (pos.entryAdj / adjNow);
+          trades.push({
+            date,
+            code: pos.code,
+            side: "sell",
+            price: open,
+            shares: q,
+            amount,
+            fee,
+            reason: "exposure",
+            pnl: amount - fee - costPart,
+            holdDays: i - pos.entryIdx,
+          });
+          if (pos.shares * (adjNow / pos.entryAdj) < 1e-6) positions.delete(pos.code);
+        } else {
+          const fee = tradeFees(market, "buy", amount, date, costs).total;
+          if (amount + fee > cash) continue;
+          cash -= amount + fee;
+          pos.cost += amount + fee;
+          pos.shares += q * (pos.entryAdj / adjNow);
+          trades.push({
+            date,
+            code: pos.code,
+            side: "buy",
+            price: open,
+            shares: q,
+            amount,
+            fee,
+            reason: "exposure",
+          });
+        }
       }
     }
 
@@ -343,6 +469,18 @@ export function simulate(input: SimInput): SimResult {
         pendingSells.set(pos.code, inList.has(pos.code) ? "rebalance" : "filtered");
       }
     }
+
+    // ── 6. 收盘：仓位控制，每周最后一个交易日定下周的系数（D52） ──
+    if (volTarget) {
+      const next = calendar[i + 1];
+      const weekEnd = next ? periodKey(next, "week") !== periodKey(date, "week") : false;
+      if (weekEnd) {
+        const vol = holdingsVol(i, equity);
+        const target =
+          vol && vol > 0 ? Math.min(1, Math.floor((volTarget / vol) * 10 + 1e-9) / 10) : 1;
+        if (Math.abs(target - scale) >= 0.1 - 1e-9) nextScale = target;
+      }
+    }
   }
 
   // ── 结果 ──
@@ -361,6 +499,7 @@ export function simulate(input: SimInput): SimResult {
       entryDate: calendar[pos.entryIdx]!,
       entryPrice: pos.entryPrice,
       ret: lc ? (lc.close * lc.adj) / (pos.entryPrice * pos.entryAdj) - 1 : 0,
+      cost: pos.cost,
     };
   });
   // 下一个交易日要执行的单：卖单 + （若明天调仓/有信号）买单
@@ -387,6 +526,7 @@ export function simulate(input: SimInput): SimResult {
     }
   }
 
+  const exposure = volTarget ? { current: scale, next: nextScale ?? scale } : undefined;
   const metrics = computeMetrics(series, trades, params.capital);
   const oosStartDate = params.oosMonths > 0 ? oosStart(series, params.oosMonths) : null;
   const segments = oosStartDate
@@ -406,7 +546,14 @@ export function simulate(input: SimInput): SimResult {
     segments,
     attribution: attr,
     checks: runChecks({ input, metrics, segments, attribution: attr, trades }),
-    final: { date: finalDate, cash, equity: finalEquity, positions: openPositions, pending },
+    final: {
+      date: finalDate,
+      cash,
+      equity: finalEquity,
+      positions: openPositions,
+      pending,
+      exposure,
+    },
   };
 }
 

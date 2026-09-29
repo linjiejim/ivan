@@ -30,7 +30,11 @@ export * from "./compute/stock-factors.ts";
 export {
   compileSelection,
   conditionSql,
+  REGIME_INDEX,
+  runRegimeSelection,
   runSelection,
+  specForRegime,
+  weakRegimeDates,
   type ScreenRow,
   screenOn,
   whereSql,

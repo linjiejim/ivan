@@ -72,6 +72,7 @@ const REASON: Record<string, string> = {
   max_hold: "到期",
   signal: "信号",
   delisted: "退市",
+  exposure: "仓位控制",
 };
 
 function Trades({ runId }: { runId: string }) {
@@ -470,6 +471,9 @@ export function RunPage() {
                 ["年化换手", `${m.turnover.toFixed(1)} 倍`],
                 ["费用拖累", `${pct(m.costDrag, 2, false)}/年`],
                 ["年化波动", pct(m.volatility, 1, false)],
+                ...(m.avgExposure !== undefined
+                  ? ([["平均股票仓位", pct(m.avgExposure, 0, false)]] as Array<[string, string]>)
+                  : []),
                 ...(r.segments?.outOfSample
                   ? ([
                       ["样本内年化超额", pct(r.segments.inSample.excessCagr)],

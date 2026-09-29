@@ -133,6 +133,7 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
           equity: result.final.equity,
           cash: result.final.cash,
           positions: result.final.positions,
+          exposure: result.final.exposure ?? null,
           metrics: {
             totalReturn: result.metrics.totalReturn,
             excessTotal: result.metrics.excessTotal,

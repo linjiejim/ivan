@@ -152,7 +152,19 @@ export function computeMetrics(
     monthly,
     yearly,
     finalEquity: (series.at(-1)?.nav ?? 1) * capital,
+    avgExposure: avgExposure(series, capital),
   };
+}
+
+/** 平均股票仓位：每天 1 − 现金 ÷ 总资产 的均值 */
+function avgExposure(series: readonly SeriesPoint[], capital: number): number {
+  if (!series.length) return 0;
+  let s = 0;
+  for (const p of series) {
+    const eq = p.nav * capital;
+    s += eq > 0 ? Math.max(0, Math.min(1, 1 - p.cash / eq)) : 0;
+  }
+  return s / series.length;
 }
 
 export function attribution(
@@ -173,10 +185,10 @@ export function attribution(
     }
     byCode.set(t.code, e);
   }
-  // 未平仓：按市值减去最近一次买入成本计浮动盈亏
+  // 未平仓：按市值减去持仓成本（仓位控制加减过的按剩余成本；没有就用最近一次买入成本）计浮动盈亏
   for (const p of open) {
     const e = byCode.get(p.code) ?? { pnl: 0, trades: 0 };
-    e.pnl += p.value - (buyCost.get(p.code) ?? p.value);
+    e.pnl += p.value - (p.cost ?? buyCost.get(p.code) ?? p.value);
     byCode.set(p.code, e);
   }
   const byStock = [...byCode.entries()]

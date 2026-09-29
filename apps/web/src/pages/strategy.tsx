@@ -564,7 +564,17 @@ export function StrategyPage() {
           <Card
             title="按当前版本在最新数据日选股"
             icon={IconScreen}
-            subtitle={screen.data ? `数据日 ${screen.data.date}` : undefined}
+            subtitle={
+              screen.data
+                ? `数据日 ${screen.data.date}${
+                    screen.data.regime
+                      ? screen.data.regime === "weak"
+                        ? "，大盘在均线下方，用弱势排序"
+                        : "，大盘在均线上方，用强势排序"
+                      : ""
+                  }`
+                : undefined
+            }
           >
             {screen.isLoading ? (
               <div className="space-y-3 py-2">

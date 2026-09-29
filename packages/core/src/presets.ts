@@ -55,6 +55,49 @@ export const PRESETS: Preset[] = [
     },
   },
   {
+    id: "a-quality-value-regime",
+    market: "A",
+    title: "价值组合·质量价值（大势切换·实验）",
+    blurb:
+      "质量价值的实验版：沪深300 在 200 日均线上方时偏重股价强度和业绩增长，下方时偏重便宜、现金流和低波动。建议先模拟跟踪，和原版对照。",
+    spec: {
+      name: "价值组合·质量价值（大势切换·实验）",
+      market: "A",
+      ...VALUE_DISCIPLINE,
+      filters: [
+        { factor: "mcap_rank", op: "<=", value: 800 },
+        ...liquidAndNotFalling,
+        { factor: "roe_min_3y", op: ">=", value: 5 },
+        { factor: "ocf_to_profit", op: ">=", value: 0.5 },
+      ],
+      rank: {
+        terms: [
+          { factor: "pe_ttm", weight: 0.5, better: "low", neutral: true },
+          { factor: "pb", weight: 0.5, better: "low", neutral: true },
+          { factor: "dividend_yield_ttm", weight: 0.5, better: "high", neutral: true },
+          { factor: "ocf_to_profit", weight: 3, better: "high", neutral: true },
+          { factor: "dist_high_250d", weight: 3, better: "high" },
+          { factor: "mom_12_1", weight: 3, better: "high" },
+          { factor: "np_yoy", weight: 1.5, better: "high" },
+        ],
+        top: 30,
+        maxPerIndustry: 3,
+        regime: {
+          ma: 200,
+          weak: {
+            terms: [
+              { factor: "pe_ttm", weight: 2, better: "low", neutral: true },
+              { factor: "pb", weight: 2, better: "low", neutral: true },
+              { factor: "dividend_yield_ttm", weight: 2, better: "high", neutral: true },
+              { factor: "ocf_to_profit", weight: 4.5, better: "high", neutral: true },
+              { factor: "volatility_60d", weight: 1.5, better: "low" },
+            ],
+          },
+        },
+      },
+    },
+  },
+  {
     id: "a-dividend-value",
     market: "A",
     title: "价值组合·红利价值",

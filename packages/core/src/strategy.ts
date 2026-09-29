@@ -49,6 +49,15 @@ export const ConditionSchema = z.union([
 ]);
 export type Condition = z.infer<typeof ConditionSchema>;
 
+const RankTermSchema = z.object({
+  factor: factorKey,
+  weight: z.number().positive().max(100),
+  better: z.enum(["high", "low"]),
+  /** 行业内比较（D48）：在同一一级行业里排百分位，而不是全市场一起排 */
+  neutral: z.boolean().optional(),
+});
+export type RankTerm = z.infer<typeof RankTermSchema>;
+
 export const StrategySpecSchema = z
   .object({
     schema: z.literal(1).default(1),
@@ -72,22 +81,21 @@ export const StrategySpecSchema = z
     filters: z.array(ConditionSchema).max(30).default([]),
     rank: z
       .object({
-        terms: z
-          .array(
-            z.object({
-              factor: factorKey,
-              weight: z.number().positive().max(100),
-              better: z.enum(["high", "low"]),
-              /** 行业内比较（D48）：在同一一级行业里排百分位，而不是全市场一起排 */
-              neutral: z.boolean().optional(),
-            }),
-          )
-          .min(1)
-          .max(10),
+        terms: z.array(RankTermSchema).min(1).max(10),
         /** 目标持仓只数 */
         top: z.number().int().min(1).max(100),
         /** 同一一级行业最多几只（D48），不填 = 不限 */
         maxPerIndustry: z.number().int().min(1).max(50).optional(),
+        /**
+         * 按大盘状态切换排序（D53，实验）：决策日的基准指数（A 股沪深300、港股恒指，不含分红的价格指数）
+         * 收盘在 ma 日均线下方时，改用 weak.terms 排序；上方时用上面的 terms。
+         */
+        regime: z
+          .object({
+            ma: z.number().int().min(20).max(250).default(200),
+            weak: z.object({ terms: z.array(RankTermSchema).min(1).max(10) }),
+          })
+          .optional(),
       })
       .optional(),
     rebalance: z
@@ -116,6 +124,19 @@ export const StrategySpecSchema = z
         dropWhenFiltered: z.boolean().default(true),
       })
       .default({ dropWhenFiltered: true }),
+    /**
+     * 仓位控制（D52）：按波动控制仓位。每周最后一个交易日收盘，看当前持仓组合近 lookback 个交易日的年化波动；
+     * 超过 volTarget 时，下一交易日开盘把每只持仓按同一比例缩到 volTarget ÷ 波动（按 10% 取整）；波动回落再按比例加回，最多满仓。
+     * 空出来的钱不计利息。
+     */
+    exposure: z
+      .object({
+        /** 目标年化波动，如 0.18 */
+        volTarget: z.number().min(0.05).max(1),
+        /** 回看多少个交易日算波动 */
+        lookback: z.number().int().min(20).max(250).default(60),
+      })
+      .optional(),
     signals: z
       .object({
         datasetId: z.string().min(1),
@@ -166,6 +187,14 @@ export const StrategySpecSchema = z
         const f = checkFactor(t.factor, ["rank", "terms", i, "factor"]);
         if (f && f.kind !== "number")
           issue(["rank", "terms", i, "factor"], `排序只能用数值因子，「${f.label}」不是。`);
+      });
+      s.rank?.regime?.weak.terms.forEach((t, i) => {
+        const f = checkFactor(t.factor, ["rank", "regime", "weak", "terms", i, "factor"]);
+        if (f && f.kind !== "number")
+          issue(
+            ["rank", "regime", "weak", "terms", i, "factor"],
+            `排序只能用数值因子，「${f.label}」不是。`,
+          );
       });
     } else if (!s.signals) {
       issue(["signals"], "信号模式必须指定信号集 signals.datasetId。");
@@ -228,6 +257,15 @@ export function describeCondition(c: Condition): string {
 }
 
 const EVERY_TEXT = { week: "每周", month: "每月", quarter: "每季" } as const;
+
+export function describeTerms(terms: readonly RankTerm[]): string {
+  return terms
+    .map(
+      (t) =>
+        `${FACTOR_MAP.get(t.factor)?.label ?? t.factor}${t.neutral ? "（行业内比）" : ""}${t.better === "high" ? "越高越好" : "越低越好"}×${t.weight}`,
+    )
+    .join(" + ");
+}
 const EXCLUDE_TEXT = { st: "ST", new_listing: "次新股", loss: "亏损股" } as const;
 
 export function describeSpec(s: StrategySpec): string[] {
@@ -249,14 +287,18 @@ export function describeSpec(s: StrategySpec): string[] {
   } else {
     if (s.filters.length) lines.push(`条件：${s.filters.map(describeCondition).join("；")}`);
     if (s.rank) {
-      const terms = s.rank.terms
-        .map(
-          (t) =>
-            `${FACTOR_MAP.get(t.factor)?.label ?? t.factor}${t.neutral ? "（行业内比）" : ""}${t.better === "high" ? "越高越好" : "越低越好"}×${t.weight}`,
-        )
-        .join(" + ");
       const cap = s.rank.maxPerIndustry ? `，同一行业最多 ${s.rank.maxPerIndustry} 只` : "";
-      lines.push(`排序：${terms}，取前 ${s.rank.top} 只${cap}`);
+      const idx = s.market === "A" ? "沪深300" : "恒指";
+      if (s.rank.regime) {
+        lines.push(
+          `排序（${idx}在 ${s.rank.regime.ma} 日均线上方）：${describeTerms(s.rank.terms)}，取前 ${s.rank.top} 只${cap}`,
+        );
+        lines.push(
+          `排序（${idx}在 ${s.rank.regime.ma} 日均线下方）：${describeTerms(s.rank.regime.weak.terms)}`,
+        );
+      } else {
+        lines.push(`排序：${describeTerms(s.rank.terms)}，取前 ${s.rank.top} 只${cap}`);
+      }
     }
     lines.push(
       `调仓：${EVERY_TEXT[s.rebalance.every]}第一个交易日开盘，${
@@ -270,8 +312,11 @@ export function describeSpec(s: StrategySpec): string[] {
   if (s.exits.takeProfit) exits.push(`止盈 ${(s.exits.takeProfit * 100).toFixed(0)}%`);
   if (s.exits.stopLoss) exits.push(`止损 ${(s.exits.stopLoss * 100).toFixed(0)}%`);
   if (s.exits.maxHoldDays) exits.push(`最长持有 ${s.exits.maxHoldDays} 个交易日`);
+  const control = s.exposure
+    ? `；按波动控制仓位（目标年化波动 ${(s.exposure.volTarget * 100).toFixed(0)}%，每周评估）`
+    : "";
   lines.push(
-    `仓位：等权${s.sizing.maxWeight ? `，单只 ≤ ${(s.sizing.maxWeight * 100).toFixed(0)}%` : ""}${exits.length ? `；${exits.join("，")}` : ""}`,
+    `仓位：等权${s.sizing.maxWeight ? `，单只 ≤ ${(s.sizing.maxWeight * 100).toFixed(0)}%` : ""}${control}${exits.length ? `；${exits.join("，")}` : ""}`,
   );
   lines.push(`基准：${BENCHMARKS[benchmarkOf(s)].label}`);
   return lines;

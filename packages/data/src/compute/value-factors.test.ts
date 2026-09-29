@@ -237,3 +237,39 @@ describe("A 股成交量单位（D51）", () => {
     rmSync(dir2, { recursive: true, force: true });
   });
 });
+
+describe("按大盘状态切换排序（D53）", () => {
+  it("指数收盘低于 N 日均线的决策日用弱势排序，其余用强势排序；只用当天及以前的指数", async () => {
+    const { runRegimeSelection, weakRegimeDates } = await import("../query/selection.ts");
+    const wh = await Warehouse.open(":memory:");
+    // 沪深300：前 20 个交易日 100，第 21 天跌到 80（低于 20 日均线），第 22 天涨到 130（高于均线）
+    const days: string[] = [];
+    for (let d = new Date("2026-05-04T00:00:00Z"); days.length < 22; d.setUTCDate(d.getUTCDate() + 1)) {
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) days.push(d.toISOString().slice(0, 10));
+    }
+    const closes = days.map((_, i) => (i < 20 ? 100 : i === 20 ? 80 : 130));
+    for (let i = 0; i < days.length; i++) await wh.run(`INSERT INTO index_bars VALUES ('csi300', DATE '${days[i]}', ${closes[i]}, false)`);
+    const [d19, d20, d21] = [days[19]!, days[20]!, days[21]!];
+    const after = "2026-06-30"; // 指数没数据的日子：用之前最近一个交易日（d21，强势）
+    const weak = await weakRegimeDates(wh, "A", [d19, d20, d21, after], 20);
+    expect([...weak]).toEqual([d20]);
+    // 两只股票：甲 PE 低、PB 高；乙 PE 高、PB 低。强势按 PE、弱势按 PB
+    for (const d of [d19, d20]) {
+      await wh.run(`INSERT INTO factors_daily (code, date, market, close, pe_ttm, pb, flag_st, flag_new_listing) VALUES
+        ('600001.SH', DATE '${d}', 'A', 10, 5, 3, false, false), ('600002.SH', DATE '${d}', 'A', 10, 20, 0.5, false, false)`);
+    }
+    const spec = validateSpec({
+      name: "t",
+      market: "A",
+      rank: {
+        terms: [{ factor: "pe_ttm", weight: 1, better: "low" }],
+        top: 1,
+        regime: { ma: 20, weak: { terms: [{ factor: "pb", weight: 1, better: "low" }] } },
+      },
+    }).spec!;
+    const r = await runRegimeSelection(wh, spec, [d19, d20], 1);
+    expect(r.selections.get(d19)).toEqual(["600001.SH"]);
+    expect(r.selections.get(d20)).toEqual(["600002.SH"]);
+    wh.close();
+  });
+});

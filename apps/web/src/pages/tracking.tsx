@@ -101,6 +101,8 @@ export function TrackingPage() {
     waitingForStart?: boolean;
     dataAsOf?: string;
     replay?: { navDrift: number; benchDrift: number; firstDrift: string | null; at: string };
+    /** 仓位控制（D52）：当前仓位系数与下一个交易日要调到的系数 */
+    exposure?: { current: number; next: number } | null;
   };
   const drift =
     summary.replay && summary.replay.navDrift + summary.replay.benchDrift > 0
@@ -179,7 +181,19 @@ export function TrackingPage() {
             note={t.deviationPct === null ? deviationText(null, t.days.length) : "低于 10% 要留意"}
             info={DEVIATION_INFO}
           />
-          <Stat label="总资产" value={money(summary.equity)} note={`现金 ${money(summary.cash)}`} />
+          <Stat
+            label="总资产"
+            value={money(summary.equity)}
+            note={
+              summary.exposure
+                ? `现金 ${money(summary.cash)}；仓位系数 ${Math.round(summary.exposure.current * 100)}%${
+                    summary.exposure.next !== summary.exposure.current
+                      ? `，下个交易日调到 ${Math.round(summary.exposure.next * 100)}%`
+                      : ""
+                  }`
+                : `现金 ${money(summary.cash)}`
+            }
+          />
         </div>
       )}
       <Card

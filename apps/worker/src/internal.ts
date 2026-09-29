@@ -2,7 +2,13 @@
  * worker 内部接口（只监听 127.0.0.1，带共享密钥）：server 所有行情查询都经这里（D3）。
  */
 import { type Market, toCode, validateSpec } from "@ivan/core";
-import { FACTOR_COLUMNS, latestDataVersion, screenOn, sqlCodeList } from "@ivan/data";
+import {
+  FACTOR_COLUMNS,
+  latestDataVersion,
+  screenOn,
+  sqlCodeList,
+  weakRegimeDates,
+} from "@ivan/data";
 import { jobs } from "@ivan/db";
 import { and, desc, eq, like } from "drizzle-orm";
 import { Hono } from "hono";
@@ -58,7 +64,13 @@ export function createInternalApp() {
       }));
     if (!date) return c.json({ error: "行情仓还没有数据" }, 400);
     const rows = await screenOn(wh, v.spec, date, Math.min(Math.max(b.limit ?? 30, 1), 100));
-    return c.json({ date, rows });
+    // 按大盘状态切换排序的策略（D53）：告诉前端这天用的是哪套排序
+    const regime = v.spec.rank?.regime
+      ? (await weakRegimeDates(wh, v.spec.market, [date], v.spec.rank.regime.ma)).has(date)
+        ? "weak"
+        : "strong"
+      : null;
+    return c.json({ date, rows, regime });
   });
 
   app.get("/internal/securities/search", async (c) => {

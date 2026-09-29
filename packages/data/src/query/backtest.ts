@@ -17,7 +17,7 @@ import {
 } from "@ivan/core";
 import { rebalanceDays } from "@ivan/engine";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
-import { runSelection } from "./selection.ts";
+import { REGIME_INDEX, runRegimeSelection } from "./selection.ts";
 
 export interface DataVersionInfo {
   id: number | null;
@@ -65,10 +65,12 @@ export async function buildSimInput(
   if (!lastDay) throw new Error(`${market} 行情仓还没有数据，先运行回填`);
   const params = { ...paramsIn, end: paramsIn.end > lastDay ? lastDay : paramsIn.end };
 
+  // 起点前多带一段日历与价格：仓位控制（D52）要回看持仓近 N 个交易日的波动
+  const lead = spec.exposure ? Math.ceil(spec.exposure.lookback * 1.6) + 15 : 15;
   const calRows = await wh.all<{ d: string }>(
     `SELECT DISTINCT date::VARCHAR AS d FROM trade_calendar
      WHERE market = $m AND date >= $a::DATE AND date <= $b::DATE ORDER BY d`,
-    { m: market, a: addDays(params.start, -15), b: params.end },
+    { m: market, a: addDays(params.start, -lead), b: params.end },
   );
   const calendar = calRows.map((r) => r.d);
   if (opts.appendNextDay && calendar.at(-1) === lastDay) {
@@ -80,12 +82,15 @@ export async function buildSimInput(
   // 选股
   let selections = new Map<DateStr, string[]>();
   let decisionDates: DateStr[] = [];
+  let weakDates = new Set<DateStr>();
   if (spec.mode === "rules" && spec.rank) {
     decisionDates = rebalanceDays(calendar, params, spec.rebalance.every).decisionDates.filter(
       (d) => d <= lastDay,
     );
     const limit = Math.ceil(spec.rank.top * spec.rebalance.buffer) + spec.rank.top;
-    selections = await runSelection(wh, spec, decisionDates, limit);
+    const r = await runRegimeSelection(wh, spec, decisionDates, limit);
+    selections = r.selections;
+    weakDates = r.weak;
   }
   const codes = new Set<string>();
   for (const list of selections.values()) for (const c of list) codes.add(c);
@@ -192,8 +197,16 @@ export async function buildSimInput(
   const benchMap = new Map(benchRows.map((r) => [r.d, r.close]));
   const bench = Float64Array.from(calendar, (d) => benchMap.get(d) ?? NaN);
 
-  // 数据局限（D21、D25）
+  // 数据局限（D21、D25）与策略设置的说明
   const caveats: NonNullable<SimInput["dataCaveats"]> = [];
+  if (spec.rank?.regime && decisionDates.length) {
+    caveats.push({
+      id: "regime",
+      level: "info",
+      title: "按大盘状态切换了排序",
+      detail: `共 ${decisionDates.length} 次调仓，其中 ${weakDates.size} 次决策日${REGIME_INDEX[market].label}在 ${spec.rank.regime.ma} 日均线下方，用的是弱势排序。`,
+    });
+  }
   if (market === "HK") {
     caveats.push({
       id: "survivorship",
