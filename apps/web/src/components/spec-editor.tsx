@@ -436,6 +436,14 @@ export function SpecEditor({
                   }
                 />
               </Inline>
+              <Checkbox
+                label="行业内比"
+                title="只和同一行业的公司比（比如 PE 跟同行比，不跟银行比）"
+                checked={t.neutral ?? false}
+                onChange={(e) =>
+                  up((s) => void (s.rank!.terms[i]!.neutral = e.target.checked || undefined))
+                }
+              />
               {(spec.rank?.terms.length ?? 0) > 1 && (
                 <IconButton
                   icon={IconDelete}
@@ -469,6 +477,24 @@ export function SpecEditor({
               value={spec.rank?.top ?? 10}
               onChange={(e) =>
                 up((s) => void (s.rank!.top = Math.max(1, Math.trunc(Number(e.target.value) || 1))))
+              }
+            />
+            只
+          </Inline>
+          <Inline title="每个一级行业最多入选几只，不填就不限">
+            同一行业最多
+            <Input
+              className="w-16"
+              type="number"
+              min={1}
+              max={50}
+              placeholder="不限"
+              value={spec.rank?.maxPerIndustry ?? ""}
+              onChange={(e) =>
+                up((s) => {
+                  const n = numOrUndef(e.target.value);
+                  s.rank!.maxPerIndustry = n ? Math.max(1, Math.trunc(n)) : undefined;
+                })
               }
             />
             只

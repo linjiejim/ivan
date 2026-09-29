@@ -1,7 +1,8 @@
 /**
  * 选股：把策略编译成对 factors_daily 的一条 SQL（spec §4）。
  * 因子名只来自注册表白名单，数值经 zod 校验后内联，字符串转义单引号，没有注入面。
- * 排序：每个排序项取当日横截面百分位（越好越接近 1），按权重加权。
+ * 排序：每个排序项取当日横截面百分位（越好越接近 1；「行业内比较」的项只在同一一级行业里排），按权重加权；
+ * 设了「同一行业最多 N 只」时，每个一级行业只留得分最高的 N 只。
  */
 import { type Condition, type DateStr, FACTOR_MAP, type StrategySpec } from "@ivan/core";
 import { sqlDateList, type Warehouse } from "../warehouse/db.ts";
@@ -61,22 +62,31 @@ export function compileSelection(spec: StrategySpec, dates: readonly DateStr[], 
   const where = [...whereSql(spec), `date IN (${sqlDateList(dates)})`];
   for (const t of terms) where.push(`${col(t.factor)} IS NOT NULL`);
   const totalW = terms.reduce((s, t) => s + t.weight, 0);
+  // 行业内比较（D48）：百分位在同日同一一级行业里算
   const score = terms
     .map(
       (t) =>
-        `${lit(t.weight)} * percent_rank() OVER (PARTITION BY date ORDER BY ${col(t.factor)} ${
-          t.better === "high" ? "ASC" : "DESC"
-        })`,
+        `${lit(t.weight)} * percent_rank() OVER (PARTITION BY date${t.neutral ? ", industry_l1" : ""} ORDER BY ${col(
+          t.factor,
+        )} ${t.better === "high" ? "ASC" : "DESC"})`,
     )
     .join(" + ");
+  // 同一行业最多 N 只（D48）：先在行业内按得分截断，再取全市场前 limit 名
+  const cap = spec.rank.maxPerIndustry;
+  const capped = cap
+    ? `, capped AS (
+  SELECT * FROM scored
+  QUALIFY row_number() OVER (PARTITION BY date, coalesce(industry_l1, code) ORDER BY score DESC, code) <= ${Math.trunc(cap)}
+)`
+    : "";
   return `WITH base AS (
-  SELECT date, code, ${[...new Set(terms.map((t) => col(t.factor)))].join(", ")}
+  SELECT date, code, industry_l1, ${[...new Set(terms.map((t) => col(t.factor)))].join(", ")}
   FROM factors_daily
   WHERE ${where.join("\n    AND ")}
 ), scored AS (
-  SELECT date, code, (${score}) / ${lit(totalW)} AS score FROM base
-)
-SELECT date::VARCHAR AS date, code, score FROM scored
+  SELECT date, code, industry_l1, (${score}) / ${lit(totalW)} AS score FROM base
+)${capped}
+SELECT date::VARCHAR AS date, code, score FROM ${cap ? "capped" : "scored"}
 QUALIFY row_number() OVER (PARTITION BY date ORDER BY score DESC, code) <= ${Math.trunc(limit)}
 ORDER BY date, score DESC, code`;
 }

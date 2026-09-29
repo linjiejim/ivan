@@ -51,6 +51,7 @@ export function fmtFactor(value: unknown, unit?: string): string {
     if (unit === "%") return `${value.toFixed(1)}%`;
     if (unit === "亿") return `${value.toFixed(value >= 100 ? 0 : 1)} 亿`;
     if (unit === "名") return `${value.toFixed(0)}`;
+    if (unit === "年") return `${value.toFixed(0)} 年`;
     return value.toFixed(2);
   }
   return String(value);

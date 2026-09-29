@@ -12,7 +12,112 @@ export interface Preset {
   spec: StrategySpecInput;
 }
 
+/** 价值组合三条策略共用的纪律（D50）：当时市值前 N、流动性、不接飞刀、每季调仓、缓冲 2 倍、同一行业最多 3 只 */
+const VALUE_DISCIPLINE = {
+  universe: { exclude: ["st", "new_listing", "loss"] as Array<"st" | "new_listing" | "loss"> },
+  rebalance: { every: "quarter" as const, buffer: 2 },
+  exits: { dropWhenFiltered: true },
+};
+const liquidAndNotFalling = [
+  { factor: "turnover_20d", op: ">=" as const, value: 0.5 },
+  { factor: "chg_250d", op: ">=" as const, value: -30 },
+];
+
 export const PRESETS: Preset[] = [
+  {
+    id: "a-quality-value",
+    market: "A",
+    title: "价值组合·质量价值",
+    blurb:
+      "当时市值前 800 里，同行中最便宜、利润含金量最高、股价已企稳的 30 家；每季调仓。价值组合里占 40%。",
+    spec: {
+      name: "价值组合·质量价值",
+      market: "A",
+      ...VALUE_DISCIPLINE,
+      filters: [
+        { factor: "mcap_rank", op: "<=", value: 800 },
+        ...liquidAndNotFalling,
+        { factor: "roe_min_3y", op: ">=", value: 5 },
+        { factor: "ocf_to_profit", op: ">=", value: 0.5 },
+      ],
+      rank: {
+        terms: [
+          { factor: "pe_ttm", weight: 1, better: "low", neutral: true },
+          { factor: "pb", weight: 1, better: "low", neutral: true },
+          { factor: "dividend_yield_ttm", weight: 1, better: "high", neutral: true },
+          { factor: "ocf_to_profit", weight: 3, better: "high", neutral: true },
+          { factor: "dist_high_250d", weight: 1.5, better: "high" },
+          { factor: "mom_12_1", weight: 1.5, better: "high" },
+        ],
+        top: 30,
+        maxPerIndustry: 3,
+      },
+    },
+  },
+  {
+    id: "a-dividend-value",
+    market: "A",
+    title: "价值组合·红利价值",
+    blurb:
+      "当时市值前 300 的大公司里，分红可持续（派息率 ≤ 80%、有现金流、市盈率 ≤ 20）的 20 家；每季调仓。价值组合里占 30%。",
+    spec: {
+      name: "价值组合·红利价值",
+      market: "A",
+      ...VALUE_DISCIPLINE,
+      filters: [
+        { factor: "mcap_rank", op: "<=", value: 300 },
+        ...liquidAndNotFalling,
+        { factor: "dividend_yield_ttm", op: ">=", value: 2 },
+        { factor: "payout_ratio", op: "<=", value: 80 },
+        { factor: "dividend_years_3y", op: ">=", value: 2 },
+        { factor: "ocf_to_profit", op: ">=", value: 0.5 },
+        { factor: "pe_ttm", op: "<=", value: 20 },
+      ],
+      rank: {
+        terms: [
+          { factor: "dividend_yield_ttm", weight: 3, better: "high" },
+          { factor: "ocf_to_profit", weight: 1, better: "high", neutral: true },
+          { factor: "dist_high_250d", weight: 0.75, better: "high" },
+          { factor: "mom_12_1", weight: 0.75, better: "high" },
+        ],
+        top: 20,
+        maxPerIndustry: 3,
+      },
+    },
+  },
+  {
+    id: "a-garp-value",
+    market: "A",
+    title: "价值组合·合理价格成长",
+    blurb:
+      "当时市值前 800 里，还在增长（两年复合 ≥ 10%）、按增速看不贵（PEG ≤ 1.5）、连续三年 ROE ≥ 10% 的 30 家；每季调仓。价值组合里占 30%。",
+    spec: {
+      name: "价值组合·合理价格成长",
+      market: "A",
+      ...VALUE_DISCIPLINE,
+      filters: [
+        { factor: "mcap_rank", op: "<=", value: 800 },
+        ...liquidAndNotFalling,
+        { factor: "rev_cagr_2y", op: ">=", value: 10 },
+        { factor: "np_cagr_2y", op: ">=", value: 10 },
+        { factor: "peg", op: "<=", value: 1.5 },
+        { factor: "roe_ttm", op: ">=", value: 10 },
+        { factor: "roe_min_3y", op: ">=", value: 10 },
+        { factor: "ocf_to_profit", op: ">=", value: 0.5 },
+      ],
+      rank: {
+        terms: [
+          { factor: "pe_ttm", weight: 1, better: "low", neutral: true },
+          { factor: "pb", weight: 1, better: "low", neutral: true },
+          { factor: "ocf_to_profit", weight: 2, better: "high", neutral: true },
+          { factor: "dist_high_250d", weight: 1.5, better: "high" },
+          { factor: "mom_12_1", weight: 1.5, better: "high" },
+        ],
+        top: 30,
+        maxPerIndustry: 3,
+      },
+    },
+  },
   {
     id: "a-value-leaders",
     market: "A",

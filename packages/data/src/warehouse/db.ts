@@ -5,7 +5,7 @@
 import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.ts";
+import { DATA_FIXES, SCHEMA_SQL, SCHEMA_VERSION } from "./schema.ts";
 
 export interface WarehouseOptions {
   memoryLimit?: string;
@@ -51,9 +51,16 @@ export class Warehouse {
   private async migrate(): Promise<void> {
     await this.conn.run(`CREATE TABLE IF NOT EXISTS meta (key VARCHAR PRIMARY KEY, value VARCHAR)`);
     const cur = await this.meta("schema_version");
-    if (cur === String(SCHEMA_VERSION)) return;
-    for (const stmt of SCHEMA_SQL) await this.conn.run(stmt);
-    await this.setMeta("schema_version", String(SCHEMA_VERSION));
+    if (cur !== String(SCHEMA_VERSION)) {
+      for (const stmt of SCHEMA_SQL) await this.conn.run(stmt);
+      await this.setMeta("schema_version", String(SCHEMA_VERSION));
+    }
+    // 一次性数据修正（按 meta 键只跑一次）
+    for (const fix of DATA_FIXES) {
+      if (await this.meta(`fix:${fix.id}`)) continue;
+      for (const stmt of fix.sql) await this.conn.run(stmt);
+      await this.setMeta(`fix:${fix.id}`, new Date().toISOString());
+    }
   }
 
   async run(sql: string, params?: Params): Promise<void> {

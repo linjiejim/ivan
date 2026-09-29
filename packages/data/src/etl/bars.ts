@@ -16,6 +16,7 @@ import {
   decomposeHfq,
   type RefAction,
 } from "../compute/adjust.ts";
+import { volumeMultiplier } from "../compute/volume-unit.ts";
 import { BlockedError, mapLimit, sleep } from "../http.ts";
 import { emKline } from "../sources/emkline.ts";
 import { type KBar, klineRange, quotes } from "../sources/tencent.ts";
@@ -31,10 +32,6 @@ import {
 
 type BarRow = [string, DateStr, number, number, number, number, number, number | null, number];
 
-/** 两家成交量单位都是「A 股手、港股股」 */
-function volumeMultiplier(code: string): number {
-  return marketOf(code) === "A" ? 100 : 1;
-}
 
 const KLINE_HOSTS = ["push2his.eastmoney.com", "web.ifzq.gtimg.cn"];
 
@@ -133,7 +130,8 @@ export async function fetchBars(
     const i = raw.findIndex((b) => b.date === anchor.date);
     if (i >= 0) scale = anchor.adj / adj[i]!;
   }
-  const mult = volumeMultiplier(code);
+  // 成交量统一成「股」（D51）：有成交额（东财）就按成交额判断单位，没有（腾讯）按板块
+  const mult = volumeMultiplier(code, raw);
   const rows: BarRow[] = raw.map((b, i) => [
     code,
     b.date,
@@ -287,7 +285,7 @@ export async function updateBars(
         Math.max(q.high, q.open, q.price),
         Math.min(q.low > 0 ? q.low : q.price, q.open, q.price),
         q.price,
-        q.volume * volumeMultiplier(q.code),
+        q.volume * volumeMultiplier(q.code, [{ close: q.price, volume: q.volume, amount: q.amount }]),
         q.amount > 0 ? q.amount : null,
         l.adj,
       ]);

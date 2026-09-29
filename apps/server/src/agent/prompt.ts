@@ -46,14 +46,19 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
     { "factor": "flag_value_trap", "op": "not" },         // 布尔因子用 is / not
     { "factor": "industry", "op": "not_in", "value": ["银行"] }  // 分类因子用 in / not_in
   ],
-  "rank": { "terms": [ { "factor": "pe_pct_5y", "weight": 2, "better": "low" } ], "top": 15 },
+  "rank": {
+    "terms": [ { "factor": "pe_ttm", "weight": 2, "better": "low", "neutral": true } ],  // neutral 可选：只和同一行业比
+    "top": 15,
+    "maxPerIndustry": 3                         // 可选：同一一级行业最多几只
+  },
   "rebalance": { "every": "week" | "month" | "quarter", "buffer": 1.5 },  // 掉出前 top×buffer 名才卖
   "sizing": { "method": "equal", "maxWeight": 0.2 },       // 等权；可选单只上限
   "exits": { "takeProfit": 0.3, "stopLoss": 0.15, "maxHoldDays": 120, "dropWhenFiltered": true },
   "benchmark": "csi300" | "sse" | "hsi" | "hscei",          // 可选；A 默认 csi300（全收益），港股默认 hsi
   "signals": { "datasetId": "sig_xxx", "maxPositions": 10 }  // 仅信号模式
 }
-排序：每个排序项取当日横截面百分位，按权重加权，取前 top 只。
+排序：每个排序项取当日横截面百分位（neutral 的项只在同一一级行业里比），按权重加权，取前 top 只；设了 maxPerIndustry 时每个一级行业最多留这么多只。
+「当时市值前 N 大」的股票池用条件 { "factor": "mcap_rank", "op": "<=", "value": N }，不要用今天的市值去筛历史。
 改已有策略时，优先用 patch（JSON Patch：[{ "op": "replace", "path": "/exits/stopLoss", "value": 0.1 }]），只改用户要求的部分。
 回测规则：收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率。`;
 
@@ -69,7 +74,7 @@ function factorList(): string {
 }
 
 export function systemPrompt(contextSummary: string | null): string {
-  const example = PRESETS.find((p) => p.id === "a-value-leaders")!;
+  const example = PRESETS.find((p) => p.id === "a-quality-value")!;
   return [
     RULES,
     DSL,

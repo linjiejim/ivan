@@ -1,6 +1,6 @@
 /**
- * 因子物化（D8）：逐股算时间序列因子写入暂存表，再用 SQL 补行业内横截面因子，替换 factors_daily
- * 里 fromDate 之后的行。全量重建与夜间增量走同一条路（增量只是 fromDate 近一些）。
+ * 因子物化（D8）：逐股算时间序列因子写入暂存表，再用 SQL 补横截面因子（行业内比较、全市场市值排名），
+ * 替换 factors_daily 里 fromDate 之后的行。全量重建与夜间增量走同一条路（增量只是 fromDate 近一些）。
  */
 import { addYears, type DateStr, FACTOR_REGISTRY_VERSION, type Market } from "@ivan/core";
 import { resolveActions } from "../compute/adjust.ts";
@@ -58,6 +58,31 @@ async function loadBars(ctx: EtlContext, code: string, from: DateStr): Promise<S
     amount: f64("amount"),
     adj: f64("adj"),
   };
+}
+
+/**
+ * 从暂存表 s 取出 factors_daily 全部列：时间序列因子原样带过来，横截面因子在这里补算
+ * （PE / 行业中位数、行业市值排名、全市场市值排名 D49）。列顺序 = 表的列顺序。
+ */
+export function crossSectionSelect(): string {
+  const cols = ["code", "date", "market", "close", ...FACTOR_COLUMNS];
+  return cols
+    .map((c) => {
+      if (c === "pe_rel_industry")
+        return `CASE WHEN s.pe_ttm > 0 AND s.industry IS NOT NULL
+                  THEN s.pe_ttm / median(s.pe_ttm) FILTER (WHERE s.pe_ttm > 0)
+                       OVER (PARTITION BY s.date, s.industry) END AS pe_rel_industry`;
+      if (c === "industry_mcap_rank")
+        return `CASE WHEN s.mcap IS NOT NULL AND s.industry IS NOT NULL
+                  THEN rank() OVER (PARTITION BY s.date, s.industry ORDER BY s.mcap DESC NULLS LAST) END
+                  AS industry_mcap_rank`;
+      if (c === "mcap_rank")
+        return `CASE WHEN s.mcap IS NOT NULL
+                  THEN rank() OVER (PARTITION BY s.date, s.market ORDER BY s.mcap DESC NULLS LAST) END
+                  AS mcap_rank`;
+      return `s.${c}`;
+    })
+    .join(",\n  ");
 }
 
 export async function computeFactors(
@@ -163,21 +188,8 @@ export async function computeFactors(
   }
   await flush();
 
-  // 行业内横截面因子，然后替换正式表
-  const cols = ["code", "date", "market", "close", ...FACTOR_COLUMNS];
-  const select = cols
-    .map((c) => {
-      if (c === "pe_rel_industry")
-        return `CASE WHEN s.pe_ttm > 0 AND s.industry IS NOT NULL
-                  THEN s.pe_ttm / median(s.pe_ttm) FILTER (WHERE s.pe_ttm > 0)
-                       OVER (PARTITION BY s.date, s.industry) END AS pe_rel_industry`;
-      if (c === "industry_mcap_rank")
-        return `CASE WHEN s.mcap IS NOT NULL AND s.industry IS NOT NULL
-                  THEN rank() OVER (PARTITION BY s.date, s.industry ORDER BY s.mcap DESC NULLS LAST) END
-                  AS industry_mcap_rank`;
-      return `s.${c}`;
-    })
-    .join(",\n  ");
+  // 横截面因子（行业内比较、全市场市值排名），然后替换正式表
+  const select = crossSectionSelect();
   await ctx.wh.exclusive(async () => {
     const codeFilter = opts.codes
       ? `AND code IN (${opts.codes.map((c) => `'${c.replace(/'/g, "")}'`).join(",")})`

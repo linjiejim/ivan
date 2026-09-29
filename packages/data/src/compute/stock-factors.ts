@@ -156,6 +156,28 @@ export function computeStockFactors(input: StockInput): unknown[][] {
   // ── 分红（股息率）：每股现金分红按之后（含当天）的送转折算到当前股本口径 ──
   const dividends = input.actions.filter((a) => a.cash > 0);
   const isFinancial = FINANCIAL_INDUSTRY_RE.test(`${meta.industry_l1 ?? ""}${meta.industry ?? ""}`);
+  // 先把全段的股息率、ROE 算出来：「三年」类因子要回看约 250、500 个交易日前的值
+  const dyAll = new Float64Array(n).fill(NaN);
+  const roeAll = new Float64Array(n).fill(NaN);
+  for (let i = 0; i < n; i++) {
+    const d = date[i]!;
+    if (dividends.length) {
+      let sum = 0;
+      for (const dv of dividends) {
+        if (dv.date > d) break;
+        if (diffDays(d, dv.date) >= 365) continue;
+        let mult = 1;
+        for (const sp of splitEvents) if (sp.date >= dv.date && sp.date <= d) mult *= 1 + sp.split;
+        sum += dv.cash / mult;
+      }
+      dyAll[i] = (sum / close[i]!) * 100;
+    }
+    if (!Number.isFinite(dyAll[i]!) && i >= 250) dyAll[i] = 0;
+    const roe = finAt[i]?.roe_ttm;
+    if (roe !== null && roe !== undefined) roeAll[i] = roe;
+  }
+  /** 当前、约一年前、约两年前（按交易日回看 250、500 天）三个时点 */
+  const threePoints = (i: number) => [i, i - 250, i - 500].filter((k) => k >= 0);
 
   const rows: unknown[][] = [];
   for (let i = 0; i < n; i++) {
@@ -176,18 +198,8 @@ export function computeStockFactors(input: StockInput): unknown[][] {
     row[idx("pb_pct_5y")] = finite(pbPct[i]!);
     row[idx("turnover_20d")] = Number.isFinite(amt20[i]!) ? amt20[i]! / 1e8 : null;
 
-    if (dividends.length) {
-      let sum = 0;
-      for (const dv of dividends) {
-        if (dv.date > d) break;
-        if (diffDays(d, dv.date) >= 365) continue;
-        let mult = 1;
-        for (const sp of splitEvents) if (sp.date >= dv.date && sp.date <= d) mult *= 1 + sp.split;
-        sum += dv.cash / mult;
-      }
-      row[idx("dividend_yield_ttm")] = (sum / close[i]!) * 100;
-    }
-    if (row[idx("dividend_yield_ttm")] === null && i >= 250) row[idx("dividend_yield_ttm")] = 0;
+    const dy = finite(dyAll[i]!);
+    row[idx("dividend_yield_ttm")] = dy;
 
     // 质量与成长
     if (f) {
@@ -249,6 +261,17 @@ export function computeStockFactors(input: StockInput): unknown[][] {
     row[idx("flag_chasing")] = chg20 === null ? null : chg20 > 15;
     row[idx("flag_downtrend")] =
       Number.isFinite(ma60[i]!) && s60 !== null ? hfq[i]! < ma60[i]! && s60 < 0 : null;
+
+    // 注册表第 2 版（D47）：ROE 三年最低、派息率、近三年分红年数、PEG、12-1 月动量
+    // （市值排名是横截面因子，和行业排名一样由 SQL 补算）
+    const roes = threePoints(i).map((k) => roeAll[k]!).filter((v) => Number.isFinite(v));
+    row[idx("roe_min_3y")] = roes.length ? Math.min(...roes) : null;
+    row[idx("dividend_years_3y")] = threePoints(i).filter((k) => dyAll[k]! > 0).length;
+    const peNow = finite(pe[i]!);
+    row[idx("payout_ratio")] = peNow !== null && dy !== null ? dy * peNow : null;
+    const g2 = f?.np_cagr_2y;
+    row[idx("peg")] = peNow !== null && g2 !== null && g2 !== undefined && g2 > 0 ? peNow / g2 : null;
+    row[idx("mom_12_1")] = i >= 250 ? (hfq[i - 20]! / hfq[i - 250]! - 1) * 100 : null;
 
     rows.push(row);
   }

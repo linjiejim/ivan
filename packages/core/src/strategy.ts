@@ -78,12 +78,16 @@ export const StrategySpecSchema = z
               factor: factorKey,
               weight: z.number().positive().max(100),
               better: z.enum(["high", "low"]),
+              /** 行业内比较（D48）：在同一一级行业里排百分位，而不是全市场一起排 */
+              neutral: z.boolean().optional(),
             }),
           )
           .min(1)
           .max(10),
         /** 目标持仓只数 */
         top: z.number().int().min(1).max(100),
+        /** 同一一级行业最多几只（D48），不填 = 不限 */
+        maxPerIndustry: z.number().int().min(1).max(50).optional(),
       })
       .optional(),
     rebalance: z
@@ -248,10 +252,11 @@ export function describeSpec(s: StrategySpec): string[] {
       const terms = s.rank.terms
         .map(
           (t) =>
-            `${FACTOR_MAP.get(t.factor)?.label ?? t.factor}${t.better === "high" ? "越高越好" : "越低越好"}×${t.weight}`,
+            `${FACTOR_MAP.get(t.factor)?.label ?? t.factor}${t.neutral ? "（行业内比）" : ""}${t.better === "high" ? "越高越好" : "越低越好"}×${t.weight}`,
         )
         .join(" + ");
-      lines.push(`排序：${terms}，取前 ${s.rank.top} 只`);
+      const cap = s.rank.maxPerIndustry ? `，同一行业最多 ${s.rank.maxPerIndustry} 只` : "";
+      lines.push(`排序：${terms}，取前 ${s.rank.top} 只${cap}`);
     }
     lines.push(
       `调仓：${EVERY_TEXT[s.rebalance.every]}第一个交易日开盘，${

@@ -1,10 +1,11 @@
 /**
  * 因子注册表：策略 DSL 只能引用这里的 key（白名单），行情仓 `factors_daily` 的列也由它生成。
- * 改任何因子的口径都要把 FACTOR_REGISTRY_VERSION 加 1，worker 会全量重算。
+ * 改任何因子的口径都要把 FACTOR_REGISTRY_VERSION 加 1，夜间更新会全量重算。
+ * 新因子只能加在数组末尾：已有行情仓靠 ALTER TABLE 在表尾补列，列顺序必须和注册表一致。
  */
 import type { Market } from "./market.ts";
 
-export const FACTOR_REGISTRY_VERSION = 1;
+export const FACTOR_REGISTRY_VERSION = 2;
 
 export type FactorGroup =
   "valuation" | "quality" | "growth" | "size" | "technical" | "category" | "flag";
@@ -15,7 +16,7 @@ export interface FactorDef {
   label: string;
   group: FactorGroup;
   kind: FactorKind;
-  unit?: "%" | "亿" | "x" | "天" | "名";
+  unit?: "%" | "亿" | "x" | "天" | "名" | "年";
   markets: readonly Market[];
   describe: string;
 }
@@ -382,6 +383,66 @@ export const FACTORS = [
     kind: "bool",
     markets: BOTH,
     describe: "收盘价在 60 日均线下方且 60 日均线向下。",
+  },
+  // ── 以下为注册表第 2 版新增（D47–D49）。只能往末尾加，见文件头 ──
+  {
+    key: "mcap_rank",
+    label: "市值排名（全市场）",
+    group: "size",
+    kind: "number",
+    unit: "名",
+    markets: BOTH,
+    describe:
+      "同日同市场按总市值从大到小的排名，1 = 最大。「市值排名 ≤ 800」就是当时的大中盘股票池，不会拿今天的大公司去回测过去。行情仓只回填了部分股票时排名偏高（只在已回填的股票里排）。",
+  },
+  {
+    key: "roe_min_3y",
+    label: "ROE 三年最低",
+    group: "quality",
+    kind: "number",
+    unit: "%",
+    markets: BOTH,
+    describe:
+      "当前、约一年前、约两年前三个时点的 ROE（TTM）里最低的一个（缺的时点跳过）。只有连续几年都赚钱的公司才高，能筛掉周期顶点「一年暴利」的假便宜。",
+  },
+  {
+    key: "payout_ratio",
+    label: "派息率",
+    group: "quality",
+    kind: "number",
+    unit: "%",
+    markets: BOTH,
+    describe:
+      "近 12 个月现金分红 ÷ 近四季归母净利（= 股息率 × 市盈率）。超过 100% 表示分得比赚得多，分红难以持续；亏损时为空。",
+  },
+  {
+    key: "dividend_years_3y",
+    label: "近三年分红年数",
+    group: "quality",
+    kind: "number",
+    unit: "年",
+    markets: BOTH,
+    describe: "当前、约一年前、约两年前三个时点，近 12 个月里有没有现金分红，数一数有几个（0–3）。",
+  },
+  {
+    key: "peg",
+    label: "PEG",
+    group: "valuation",
+    kind: "number",
+    unit: "x",
+    markets: BOTH,
+    describe:
+      "市盈率 TTM ÷ 净利两年复合增速（%）；两者都为正才有值。< 1 表示按增速看不贵，常用来找「估值不高的成长股」。",
+  },
+  {
+    key: "mom_12_1",
+    label: "12-1 月动量",
+    group: "technical",
+    kind: "number",
+    unit: "%",
+    markets: BOTH,
+    describe:
+      "约一年前到约一个月前（第 250 到第 20 个交易日前）的涨幅（后复权，含分红）；跳过最近一个月，避开短期反转。",
   },
 ] as const satisfies readonly FactorDef[];
 

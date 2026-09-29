@@ -3,17 +3,19 @@
  * 需要改列的变更写成显式的 ALTER 语句追加在末尾。
  */
 import { FACTORS } from "@ivan/core";
+import { FIX_A_VOLUME_SQL } from "../compute/volume-unit.ts";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** factors_daily 的列：键列 + 注册表里的全部因子（分类因子 VARCHAR，布尔 BOOLEAN，其余 DOUBLE）。 */
 export const FACTOR_COLUMNS = FACTORS.map((f) => f.key);
 
+function factorType(kind: string): string {
+  return kind === "category" ? "VARCHAR" : kind === "bool" ? "BOOLEAN" : "DOUBLE";
+}
+
 function factorColumnDdl(): string {
-  return FACTORS.map((f) => {
-    const t = f.kind === "category" ? "VARCHAR" : f.kind === "bool" ? "BOOLEAN" : "DOUBLE";
-    return `${f.key} ${t}`;
-  }).join(",\n  ");
+  return FACTORS.map((f) => `${f.key} ${factorType(f.kind)}`).join(",\n  ");
 }
 
 export const SCHEMA_SQL: string[] = [
@@ -133,4 +135,15 @@ export const SCHEMA_SQL: string[] = [
   updated_at TIMESTAMP DEFAULT current_timestamp,
   PRIMARY KEY (task, key)
 )`,
+  // 第 2 版（注册表第 2 版新增因子）：已有的行情仓在表尾补列，顺序与注册表一致；新建的库这些语句是空操作
+  ...FACTORS.map((f) => `ALTER TABLE factors_daily ADD COLUMN IF NOT EXISTS ${f.key} ${factorType(f.kind)}`),
+];
+
+/**
+ * 一次性数据修正：每条按 meta 键 `fix:<id>` 只跑一次（新建的库跑在空表上，等于只打个标记）。
+ * 和 SCHEMA_SQL 分开，是因为 SCHEMA_SQL 在以后每次升表结构时都会整体重跑，而数据修正不能跑两遍。
+ */
+export const DATA_FIXES: Array<{ id: string; sql: string[] }> = [
+  // D51：科创板等被多乘了 100 的成交量
+  { id: "a_volume_units_2026_09", sql: FIX_A_VOLUME_SQL },
 ];
