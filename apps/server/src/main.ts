@@ -13,6 +13,6 @@ await migrateAuth(deps);
 const auth = createAuth(deps);
 const app = createApp(auth, registerChat);
 
-serve({ fetch: app.fetch, port: cfg.port, hostname: "0.0.0.0" }, (info) => {
+serve({ fetch: app.fetch, port: cfg.port, hostname: cfg.host }, (info) => {
   console.log(`ivan-server 已启动：http://localhost:${info.port}（数据目录 ${cfg.dataDir}）`);
 });

@@ -11,6 +11,8 @@ export const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.u
 export interface Config {
   root: string;
   port: number;
+  /** server 监听的地址：自部署默认所有网卡；放在反向代理后面时设 127.0.0.1，只让代理访问 */
+  host: string;
   workerPort: number;
   internalSecret: string;
   publicUrl: string;
@@ -45,6 +47,7 @@ export function loadConfig(): Config {
   cached = {
     root: REPO_ROOT,
     port,
+    host: e.HOST || "0.0.0.0",
     workerPort: int("WORKER_PORT", 18915),
     internalSecret: e.INTERNAL_SECRET ?? "dev-internal-secret",
     publicUrl: e.PUBLIC_URL ?? `http://localhost:${port}`,
