@@ -64,8 +64,11 @@ jobs:
             NEW_HASH=$(md5sum pnpm-lock.yaml | cut -d' ' -f1)
             OLD_HASH=$(cat .deploy-lock-hash 2>/dev/null || echo "")
             if [ "$NEW_HASH" != "$OLD_HASH" ]; then
+              # 系统 Python 是 3.6，node-gyp 要 ≥ 3.8（服务器装了并存的 python3.11）
+              export npm_config_python="$(command -v python3.11 || command -v python3)"
               pnpm install --frozen-lockfile
               pnpm rebuild esbuild   # 这台机器会忽略 esbuild 的安装脚本；tsx 运行时要用它
+              bash scripts/ensure-native.sh   # glibc 2.28 跑不了 better-sqlite3 自带的预编译，就地编译（约 2 分钟）
               echo "$NEW_HASH" > .deploy-lock-hash
             fi
             pnpm --filter @ivan/web build
