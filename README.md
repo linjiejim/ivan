@@ -27,7 +27,8 @@ packages/db       应用库 schema（SQLite + Drizzle）
 packages/ai       LLM provider 配置（对话与夜间简报共用）
 ```
 
-设计与全部决策记录见 [docs/specs/20260928-ivan-mvp.md](docs/specs/20260928-ivan-mvp.md)，数据源覆盖见 [docs/probe-report.md](docs/probe-report.md)。
+设计与全部决策记录见 [docs/specs/20260928-ivan-mvp.md](docs/specs/20260928-ivan-mvp.md)，数据源覆盖见 [docs/probe-report.md](docs/probe-report.md)，
+界面设计系统（颜色、字体、组件、图标、插画）见 [docs/design-system.md](docs/design-system.md)。
 
 ## 自部署
 

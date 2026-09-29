@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 22" fill="none">
+  <!-- Ivan 完整标志：竖笔 = 「I」= 上线日；左边渐细的发丝线 = 回测；右边上扬的实线 = 跟踪。颜色用 currentColor -->
+  <path d="M.5 12.4 18 11.75v1.3z" fill="currentColor"/>
+  <g stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 1.5v19"/>
+    <path d="M18 12.4h3.5c6.9 0 6.9-5.4 13.8-5.4h3.2"/>
+  </g>
+</svg>

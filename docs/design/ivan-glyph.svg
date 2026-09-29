@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Ivan 紧凑图形：放进方形位置（图标、头像）。颜色用 currentColor -->
+  <path d="M2.25 13.1 9 12.4v1.4z" fill="currentColor"/>
+  <g stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 5v14"/>
+    <path d="M9 13.1h2.1c4 0 4-3.9 8-3.9h1.3"/>
+  </g>
+</svg>
