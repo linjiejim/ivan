@@ -133,7 +133,9 @@ export interface LockupRow {
   type: string;
   unlockShares: number | null;
   ableShares: number | null;
+  /** 解禁后的流通股 */
   floatAfter: number | null;
+  /** 解禁股数 ÷ 解禁前的流通股（floatAfter − unlockShares），不管解禁日过没过都是这一个口径 */
   ratioFloat: number | null;
   ratioTotal: number | null;
 }

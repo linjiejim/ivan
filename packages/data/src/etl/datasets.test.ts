@@ -159,11 +159,11 @@ describe("限售解禁可得日", () => {
     expect(row.slice(10, 13)).toEqual(["2026-10-09", "2026-11-09", null]);
   });
 
-  it("夜间 [今天 − 7, 今天 + 180]，周检 [−30, +365]，回填按年到明年", () => {
+  it("夜间 [今天 − 7, 今天 + 180]，周检 [−30, +365]，回填按整年到明年", () => {
     expect(LOCKUPS.nightly(env)[0]).toMatchObject({ from: "2026-10-02", to: "2027-04-07" });
     expect(LOCKUPS.check(env)[0]).toMatchObject({ from: "2026-09-09", to: "2027-10-09" });
     expect(LOCKUPS.backfill(env, "2024-06-01").map((c) => [c.id, c.from, c.to])).toEqual([
-      ["2024", "2024-06-01", "2024-12-31"],
+      ["2024", "2024-01-01", "2024-12-31"],
       ["2025", "2025-01-01", "2025-12-31"],
       ["2026", "2026-01-01", "2026-12-31"],
       ["2027", "2027-01-01", "2027-12-31"],
@@ -218,5 +218,39 @@ describe("大宗交易", () => {
       { id: "2026-10", from: "2026-10-01", to: "2026-10-09" },
     ]);
     expect(yearChunks(2013, 2014).map((c) => c.id)).toEqual(["2013", "2014"]);
+  });
+});
+
+describe("回填的块总是整月、整年", () => {
+  const ranges = (cs: { id: string; from: string; to: string }[]) => cs.map((c) => [c.id, c.from, c.to]);
+
+  it("起点往前取到月初；带 to 往后取到月末，但不过今天；含今天的那块截到今天", () => {
+    expect(ranges(BLOCKS.backfill(env, "2026-08-15"))).toEqual([
+      ["2026-08", "2026-08-01", "2026-08-31"],
+      ["2026-09", "2026-09-01", "2026-09-30"],
+      ["2026-10", "2026-10-01", "2026-10-09"],
+    ]);
+    expect(ranges(HOLDERS.backfill(env, "2026-08-15", "2026-09-10"))).toEqual([
+      ["2026-08", "2026-08-01", "2026-08-31"],
+      ["2026-09", "2026-09-01", "2026-09-30"],
+    ]);
+    expect(ranges(BLOCKS.backfill(env, "2026-09-20", "2026-12-31"))).toEqual([
+      ["2026-09", "2026-09-01", "2026-09-30"],
+      ["2026-10", "2026-10-01", "2026-10-09"],
+    ]);
+  });
+
+  it("换起点、终点再回填，同一个块 id 总是同一段（否则做过的半块会被当成整块跳过，缺的那段再也补不上）", () => {
+    const calls: [string, string?][] = [["2026-09-01"], ["2026-05-06"], ["2024-06-01", "2026-09-10"], ["2026-09-15", "2026-09-20"]];
+    for (const spec of [HOLDERS, LOCKUPS, BLOCKS]) {
+      const seen = new Map<string, string>();
+      for (const [from, to] of calls) {
+        for (const c of spec.backfill(env, from, to)) {
+          const range = `${c.from}~${c.to}`;
+          expect(seen.get(c.id) ?? range, `${spec.id} ${c.id}`).toBe(range);
+          seen.set(c.id, range);
+        }
+      }
+    }
   });
 });

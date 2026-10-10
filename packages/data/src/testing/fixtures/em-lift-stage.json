@@ -32,9 +32,19 @@
     "FREE_SHARES": 84581.5647,
     "FREE_RATIO": 0.108135536917,
     "TOTAL_RATIO": 0.097582
+   },
+   {
+    "SECUCODE": "300465.SZ",
+    "FREE_DATE": "2016-06-01 00:00:00",
+    "FREE_SHARES_TYPE": "首发原股东限售股份",
+    "CURRENT_FREE_SHARES": 4656.5,
+    "ABLE_FREE_SHARES": 4656.5,
+    "FREE_SHARES": 7990.5,
+    "FREE_RATIO": 0.582754520994,
+    "TOTAL_RATIO": null
    }
   ],
-  "count": 3
+  "count": 4
  },
  "success": true,
  "message": "ok",

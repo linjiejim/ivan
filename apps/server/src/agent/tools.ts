@@ -279,7 +279,7 @@ export function eventsForModel(e: SecurityEventsView) {
       })),
     },
     caveats: e.caveats.map((c) => c.title),
-    note: "只含 asOf 当时已公布、没撤下的数据（两融与大宗 T+1、户数按公告日、解禁按规则推算的可得日）；卡片已展示全部明细。不是投资建议。",
+    note: "只含 asOf 当时已公布、没撤下的数据（两融与大宗 T+1、户数按公告日、解禁按规则推算的可得日）；解禁的 ratioFloatPct 是解禁股数占解禁前流通股的百分比；卡片已展示全部明细。不是投资建议。",
   };
 }
 

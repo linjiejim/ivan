@@ -394,3 +394,16 @@ export function nearestValueText(
   if (n.kind === "count") return num(n.value, 0);
   return n.value.toLocaleString("zh-CN", { maximumSignificantDigits: 4 });
 }
+
+// ── 回测对话框的成交假设（S05） ──
+
+/** 单边滑点输入框的值 → bp：清空时是「没填」（NaN），不悄悄当成 0 bp */
+export function slippageFromInput(raw: string): number {
+  return raw.trim() === "" ? Number.NaN : Number(raw);
+}
+
+/** 单边滑点没填或不在 0–200 bp 时的提示，填对了是 null；有提示时「开始回测」不能点 */
+export function slippageError(bps: number): string | null {
+  if (Number.isNaN(bps)) return "请填单边滑点（不计滑点填 0）";
+  return bps >= 0 && bps <= 200 ? null : "单边滑点要在 0–200 bp 之间";
+}

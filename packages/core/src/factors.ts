@@ -529,7 +529,7 @@ export const FACTORS = [
   },
   {
     key: "unlock_ratio_30d",
-    label: "30 天内解禁占流通股",
+    label: "30 天内解禁占解禁前流通股",
     group: "event",
     kind: "number",
     unit: "%",
@@ -537,7 +537,7 @@ export const FACTORS = [
     dataset: "lockups",
     warmupDays: 0,
     describe:
-      "未来 30 个自然日内已知解禁的股数占流通股比例之和（%）；没有已知解禁为 0，有已知解禁但缺比例时为空（不知道）。可得日规则同「距下次解禁」；解禁数据同步落后 3 天以上时为空。",
+      "未来 30 个自然日内每次已知解禁的「解禁股数 ÷ 解禁前的流通股」之和（%）；没有已知解禁为 0，有已知解禁但缺比例时为空（不知道）。可得日规则同「距下次解禁」；解禁数据同步落后 3 天以上时为空。",
   },
   {
     key: "block_premium_20d",

@@ -229,12 +229,16 @@ async function prevCompleteMargin(ctx: EtlContext, d: DateStr): Promise<number |
   }
 }
 
-/** 两融这一天到齐了没有：沪深都有、且不少于上一个完整交易日的 80%；没到齐返回说明 */
+/**
+ * 两融这一天到齐了没有：沪深都有、且不少于上一个完整交易日的 80%；没到齐返回说明。
+ * 两市都是空的多半是还没公布（T 日的两融下一个交易日早上才有，周末、开盘前补齐时最后一天是空的）：
+ * 和只到一个交易所一样记 partial——不算失败、数据窗口停在前一天、之后的夜里再取。
+ */
 function marginGap(res: PitFetchResult<unknown>, prev: number | null): string | null {
   const ex = res.byExchange ?? { sh: 0, sz: 0 };
   if (ex.sh > 0 && ex.sz === 0) return `只拿到沪市 ${ex.sh} 行`;
   if (ex.sz > 0 && ex.sh === 0) return `只拿到深市 ${ex.sz} 行`;
-  if (ex.sh === 0 && ex.sz === 0) return "沪深两市都没有数据";
+  if (ex.sh === 0 && ex.sz === 0) return "沪深两市都还没有数据";
   if (prev !== null && res.rawCount < MARGIN_COMPLETE_RATIO * prev) {
     return `只拿到 ${res.rawCount} 行，不到上一个完整交易日（${prev} 行）的 ${MARGIN_COMPLETE_RATIO * 100}%`;
   }
@@ -707,9 +711,11 @@ export const PIT_SECONDS_PER_REQUEST = 0.6;
 const rowsText = (n: number) =>
   n >= 1e4 ? `约 ${Math.round(n / 1e4).toLocaleString("en-US")} 万行` : `约 ${n.toLocaleString("en-US")} 行`;
 
+/** 「约 9-10 分钟」「约 2.1-2.5 小时」；两头一样时只写一个（「约 1 分钟」） */
 function durationText(lo: number, hi: number): string {
-  if (hi < 60) return `约 ${Math.max(1, Math.round(lo))}-${Math.max(1, Math.round(hi))} 分钟`;
-  return `约 ${(lo / 60).toFixed(1)}-${(hi / 60).toFixed(1)} 小时`;
+  const range = (a: string, b: string) => (a === b ? a : `${a}-${b}`);
+  if (hi < 60) return `约 ${range(String(Math.max(1, Math.round(lo))), String(Math.max(1, Math.round(hi))))} 分钟`;
+  return `约 ${range((lo / 60).toFixed(1), (hi / 60).toFixed(1))} 小时`;
 }
 
 /**
@@ -748,7 +754,7 @@ export async function estimatePitBackfill(
       requestsHigh,
       minutesLow,
       minutesHigh,
-      line: `${label}：${rowsText(rows)}，${requestsLow.toLocaleString("en-US")}-${requestsHigh.toLocaleString("en-US")} 次请求，按 ${PIT_SECONDS_PER_REQUEST} 秒 / 次${durationText(minutesLow, minutesHigh)}`,
+      line: `${label}：${rowsText(rows)}，${requestsLow.toLocaleString("en-US")}-${requestsHigh.toLocaleString("en-US")} 次请求，按 ${PIT_SECONDS_PER_REQUEST} 秒 / 次，${durationText(minutesLow, minutesHigh)}`,
     });
   }
   const lo = out.reduce((a, e) => a + e.requestsLow, 0);

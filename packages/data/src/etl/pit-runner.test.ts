@@ -150,6 +150,35 @@ describe("两融（整窗替换）", () => {
     expect(await progressKeys()).toEqual([]);
   });
 
+  it("周六补齐：上一个交易日（10-09）的两融还没公布（9201）→ 金丝雀照样过，这一天记没到齐、不算失败，窗口停在 10-08，公布后夜里补上", async () => {
+    data.RPTA_WEB_RZRQ_GGMX!.splice(0, Infinity, ...marginOn("2026-09-30"), ...marginOn("2026-10-08"));
+    const b = await openPitBatch({ wh }, "backfill", ["margin"], null);
+    // 2026-10-10 是周六：10-09 的两融下周一早上才公布
+    const r = await syncPitDataset(ctxOn("2026-10-10"), "margin", { mode: "backfill", from: "2026-09-30", batch: b });
+    expect(r.canary).toMatchObject({ status: "ok" });
+    expect(r).toMatchObject({
+      ok: true,
+      chunks: 3,
+      done: 2,
+      partial: ["2026-10-09"],
+      failed: [],
+      remaining: 0,
+      status: "partial",
+    });
+    let sync = (await readPitSync(wh)).get("margin")!;
+    expect(sync).toMatchObject({ window_through: "2026-10-08", covered_from: "2026-09-30", last_status: "partial" });
+    expect(sync.last_detail).toBe("2026-10-09 沪深两市都还没有数据，之后的夜里再取");
+    // 没到齐的块不算 done：下次回填照样重取
+    expect(await progressKeys()).toContainEqual({ task: "pit:margin", key: "2026-10-09", status: "partial" });
+    // 周一早上公布了：周一晚上的夜间重取 10-09，两市都到了就算完成，数据窗口到 10-09
+    data.RPTA_WEB_RZRQ_GGMX!.push(...marginOn("2026-10-09"));
+    const n = await syncPitDataset(ctxOn("2026-10-12", 3), "margin", { mode: "nightly", batch: await batch() });
+    expect(n).toMatchObject({ ok: true, partial: [], status: "ok" });
+    sync = (await readPitSync(wh)).get("margin")!;
+    expect(sync).toMatchObject({ window_through: "2026-10-09", covered_from: "2026-09-30", last_status: "ok" });
+    expect(Number(await wh.scalar(`SELECT count(*) FROM margin_daily WHERE date = DATE '2026-10-09'`))).toBe(4);
+  });
+
   it("20 个交易日后仍没到齐：记一次 partial_exchange，不再重取", async () => {
     await wh.run(
       `INSERT INTO etl_progress (task, key, status, detail) VALUES
@@ -235,7 +264,7 @@ describe("回填：续跑、覆盖起点", () => {
   });
 });
 
-describe("回填：有界回填（--to）", () => {
+describe("回填：有界回填（--to）、换更早的起点再补", () => {
   it("带 to 的回填全部做完也不设 covered_from（to 之后还没补）；之后补完到今天才设", async () => {
     const b = await openPitBatch({ wh }, "backfill", ["blocks"], null);
     const bounded = await syncPitDataset(ctxOn("2026-10-08"), "blocks", {
@@ -250,6 +279,20 @@ describe("回填：有界回填（--to）", () => {
     const rest = await syncPitDataset(ctxOn("2026-10-08"), "blocks", { mode: "backfill", from: "2026-08-01", batch: b });
     expect(rest).toMatchObject({ ok: true, chunks: 2, remaining: 0 });
     expect((await readPitSync(wh)).get("blocks")!.covered_from).toBe("2026-08-01");
+  });
+
+  it("先从 9 月、再从 5 月回填解禁：块总是整年，第二次跳过的 2026 块里没有缺口，覆盖起点前移到 5 月", async () => {
+    // 本地端到端测试发现的：块 id 只认年份而第一次只取了 9 月起，第二次把 2026 当成做完跳过，5–8 月的解禁一直缺着
+    const may = { ...data.RPT_LIFT_STAGE![1]!, FREE_DATE: "2026-05-20 00:00:00" };
+    data.RPT_LIFT_STAGE!.push(may);
+    const b = await openPitBatch({ wh }, "backfill", ["lockups"], null);
+    await syncPitDataset(ctxOn("2026-10-08"), "lockups", { mode: "backfill", from: "2026-09-01", batch: b });
+    const again = await syncPitDataset(ctxOn("2026-10-08"), "lockups", { mode: "backfill", from: "2026-05-06", batch: b });
+    expect(again).toMatchObject({ ok: true, chunks: 0, remaining: 0 });
+    expect((await readPitSync(wh)).get("lockups")!.covered_from).toBe("2026-05-06");
+    expect(
+      await wh.all(`SELECT code, free_date::VARCHAR AS d FROM lockups WHERE free_date < DATE '2026-09-01'`),
+    ).toEqual([{ code: "002150.SZ", d: "2026-05-20" }]);
   });
 });
 

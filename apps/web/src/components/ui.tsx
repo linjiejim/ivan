@@ -1026,6 +1026,23 @@ export function Figure({ text }: { text: ReactNode }) {
   );
 }
 
+/** 一行字里的日期（YYYY-MM-DD）用等宽字（§10），其余原样输出：管理页数据卡这类由函数拼好的整行文字 */
+export function MonoDates({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(\d{4}-\d{2}-\d{2})/).map((part, i) =>
+        i % 2 ? (
+          <span key={i} className="font-mono">
+            {part}
+          </span>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
 /** 指标卡：标签 · 大数字 · 注释（dataviz stat tile：大数字用比例数字，不用 tabular） */
 export function Stat({
   label,

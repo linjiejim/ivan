@@ -1,9 +1,9 @@
 /**
- * 东财的点时事件数据实现（D80–D82）：入库单位（万股 × 1e4、比例存小数、RZYEZB 原样 %）、缺键算结构变了、
- * 列清单断言（禁用列、ALL）、金丝雀的单位自检与失败分类、两融按交易所计数。
+ * 东财的点时事件数据实现（D80–D82）：入库单位（万股 × 1e4、比例存小数、RZYEZB 原样 %）、解禁比例按股数算成解禁前口径、
+ * 缺键算结构变了、列清单断言（禁用列、ALL）、金丝雀的单位自检与失败分类（两融取最近一条已公布的）、两融按交易所计数。
  */
 import { describe, expect, it } from "vitest";
-import { emPage, emReportRoute, eventColumnViolations } from "../testing/events.ts";
+import { emEventsServer, emPage, emReportRoute, eventColumnViolations } from "../testing/events.ts";
 import { FakeHttp, loadFixture } from "../testing/fake-http.ts";
 import type { HolderRow, LockupRow, MarginRow, BlockRow, SourceCtx } from "./types.ts";
 import {
@@ -13,7 +13,7 @@ import {
   LOCKUPS_DEF,
   MARGIN_DEF,
 } from "./adapters/eastmoney-events.ts";
-import { SchemaDriftError } from "./eastmoney.ts";
+import { type EmRow, SchemaDriftError } from "./eastmoney.ts";
 
 const fx = (name: string) => JSON.parse(loadFixture(name)) as { result: { data: Record<string, unknown>[] } };
 const sctx = (http: FakeHttp): SourceCtx => ({ http, today: "2026-10-09", log: () => {} });
@@ -74,7 +74,7 @@ describe("东财事件数据：规范化与单位", () => {
     expect(r).toMatchObject({ rawCount: 2, rows: [] });
   });
 
-  it("限售解禁：万股 × 1e4，FREE_RATIO 是比例；类型为空记「未知」", async () => {
+  it("限售解禁：万股 × 1e4；占流通比例按股数算成解禁前口径（解禁日过了的行也一样）；类型为空记「未知」", async () => {
     const rows = fx("em-lift-stage.json").result.data;
     const http = new FakeHttp([
       emReportRoute("RPT_LIFT_STAGE", emPage([...rows, { ...rows[1], SECUCODE: "002151.SZ", FREE_SHARES_TYPE: null }])),
@@ -85,11 +85,41 @@ describe("东财事件数据：规范化与单位", () => {
     expect(x.unlockShares).toBeCloseTo(82_537_493, 3);
     expect(x.ableShares).toBeCloseTo(82_537_493, 3);
     expect(x.floatAfter).toBeCloseTo(845_815_647, 3);
-    expect(x.ratioFloat).toBe(0.108135536917);
+    // 本次 ÷（FREE_SHARES − 本次）= 8253.7493 ÷ 76327.8154，和解禁日没到时东财给的 FREE_RATIO 一致
+    expect(x.ratioFloat).toBeCloseTo(0.108135536917, 12);
     expect(x.ratioTotal).toBe(0.097582);
     expect(x.type).toBe("定向增发机构配售股份");
     expect(r.find((l) => l.code === "002151.SZ")!.type).toBe("未知");
     expect(r.find((l) => l.code === "300005.SZ")).toMatchObject({ freeDate: "2013-01-04", type: "首发原股东限售股份" });
+    // 2016 年已过解禁日的实测行：FREE_RATIO 0.5828 = 本次 ÷ FREE_SHARES（解禁后口径），入库的仍是 4656.5 ÷ 3334
+    const past = r.find((l) => l.code === "300465.SZ")!;
+    expect(past).toMatchObject({ freeDate: "2016-06-01", unlockShares: 46_565_000, floatAfter: 79_905_000, ratioTotal: null });
+    expect(past.ratioFloat).toBeCloseTo(4656.5 / 3334, 12);
+    expect(past.ratioFloat).not.toBeCloseTo(0.582754520994, 2);
+  });
+
+  it("同一笔解禁过了解禁日被东财改写（FREE_RATIO 换成解禁后口径）：入库的比例不变", async () => {
+    const before = fx("em-lift-stage.json").result.data[2]!;
+    // 2026-10-10 实测：301358.SZ 解禁日（2026-10-09）过后同一行的 FREE_RATIO 从 0.108135536917 变成 0.097583312975 = 本次 ÷ FREE_SHARES
+    const after = { ...before, FREE_RATIO: 0.097583312975 };
+    const ratio = async (row: object) => {
+      const http = new FakeHttp([emReportRoute(LOCKUPS_DEF.report, emPage([row]))]);
+      const r = await EASTMONEY_EVENTS.lockups.fetchChunk(sctx(http), chunk("2026-01-01", "2026-12-31"));
+      return (r.rows as LockupRow[])[0]!.ratioFloat;
+    };
+    expect(await ratio(after)).toBe(await ratio(before));
+    expect(await ratio(after)).toBeCloseTo(8253.7493 / (84581.5647 - 8253.7493), 12);
+  });
+
+  it("解禁股数或解禁后流通股缺了、或解禁后流通股不大于本次：比例为空，不退回用 FREE_RATIO", () => {
+    const row = fx("em-lift-stage.json").result.data[2] as EmRow;
+    const bad: EmRow[] = [
+      { CURRENT_FREE_SHARES: null },
+      { FREE_SHARES: null },
+      { FREE_SHARES: row.CURRENT_FREE_SHARES! },
+      { FREE_SHARES: 100 },
+    ];
+    for (const b of bad) expect(LOCKUPS_DEF.mapRow({ ...row, ...b })!.ratioFloat).toBeNull();
   });
 
   it("大宗交易：折溢价是比例、成交额元、买方机构专用", async () => {
@@ -166,7 +196,10 @@ describe("金丝雀（D82）", () => {
   const routesOk = () => [
     emReportRoute("RPTA_WEB_RZRQ_GGMX", ({ url }) => {
       const rows = fx("em-rzrq-2026-09-29.json").result.data.filter((r) => r.SECUCODE === "600519.SH");
-      expect(new URL(url).searchParams.get("filter")).toBe(`(DATE='2026-10-08')(SECUCODE="600519.SH")`);
+      // 上一个交易日（10-08）往前 15 天起、600519.SH 最近一条
+      expect(new URL(url).searchParams.get("filter")).toBe(
+        `(DATE>='2026-09-23')(DATE<='2026-10-09')(SECUCODE="600519.SH")`,
+      );
       return emPage(rows);
     }),
     emReportRoute("RPT_HOLDERNUM_DET", loadFixture("em-holdernum.json")),
@@ -187,10 +220,37 @@ describe("金丝雀（D82）", () => {
       const def = Object.values(EM_EVENT_DEFS).find((d) => d.report === q.get("reportName"))!;
       expect(q.get("columns")).toBe(def.columns.join(","));
     }
-    // 户数样本按截至日倒序
+    // 两融样本按日期倒序、户数样本按截至日倒序
+    const m = new URL(http.calls[0]!.url).searchParams;
+    expect([m.get("sortColumns"), m.get("sortTypes")]).toEqual(["DATE", "-1"]);
     const h = new URL(http.calls[1]!.url).searchParams;
     expect([h.get("sortColumns"), h.get("sortTypes")]).toEqual(["END_DATE", "-1"]);
     expect(eventColumnViolations(http.calls)).toEqual([]);
+  });
+
+  it("两融：上一个交易日还没公布（周六取 10-09 回 9201）→ 取 600519.SH 最近一条已公布的，照样 ok；窗口里一条都没有才出错", async () => {
+    // 2026-10-10（周六）实测：DATE='2026-10-09' 回 9201；600519.SH 最近两条是 10-08 与 09-30（SZ 没记，按 RZYE ÷ RZYEZB 反推）
+    const base = fx("em-rzrq-2026-09-29.json").result.data.find((r) => r.SECUCODE === "600519.SH")!;
+    const latest = { ...base, DATE: "2026-10-08 00:00:00", RZYE: 17229986025, SZ: 1569839975321, RZYEZB: 1.09756321 };
+    const rows = [{ ...base, DATE: "2026-09-30 00:00:00" }, latest];
+    const http = new FakeHttp([emEventsServer({ RPTA_WEB_RZRQ_GGMX: rows })]);
+    expect(await EASTMONEY_EVENTS.margin.canary(sctx(http), "2026-10-10", "2026-10-09")).toMatchObject({
+      status: "ok",
+      detail: "字段与单位正常",
+    });
+    const q = new URL(http.calls[0]!.url).searchParams;
+    expect(q.get("filter")).toBe(`(DATE>='2026-09-24')(DATE<='2026-10-10')(SECUCODE="600519.SH")`);
+    expect([q.get("sortColumns"), q.get("sortTypes")]).toEqual(["DATE", "-1"]);
+    // 核对的是最新那条（10-08）：只把它的 RZYEZB 改成两倍就报单位异常
+    const drifted = new FakeHttp([
+      emEventsServer({ RPTA_WEB_RZRQ_GGMX: [rows[0]!, { ...latest, RZYEZB: latest.RZYEZB * 2 }] }),
+    ]);
+    expect((await EASTMONEY_EVENTS.margin.canary(sctx(drifted), "2026-10-10", "2026-10-09")).status).toBe("unit_drift");
+    const old = new FakeHttp([emEventsServer({ RPTA_WEB_RZRQ_GGMX: [{ ...base, DATE: "2026-09-01 00:00:00" }] })]);
+    expect(await EASTMONEY_EVENTS.margin.canary(sctx(old), "2026-10-10", "2026-10-09")).toMatchObject({
+      status: "error",
+      detail: "样本没有返回数据",
+    });
   });
 
   it("RZYEZB 被改成两倍 → unit_drift", async () => {
@@ -209,6 +269,28 @@ describe("金丝雀（D82）", () => {
     ]);
     const c = await EASTMONEY_EVENTS.lockups.canary(sctx(http), "2026-10-09", "2026-10-08");
     expect(c.status).toBe("unit_drift");
+  });
+
+  it("解禁 FREE_RATIO 两种分母都认：解禁日过了的（本次 ÷ FREE_SHARES）与还没到的（本次 ÷（FREE_SHARES − 本次））；两种都对不上才 unit_drift", async () => {
+    const rows = fx("em-lift-stage.json").result.data;
+    const canary = (row: object) =>
+      EASTMONEY_EVENTS.lockups.canary(
+        sctx(new FakeHttp([emReportRoute(LOCKUPS_DEF.report, emPage([row]))])),
+        "2026-10-10",
+        "2026-10-09",
+      );
+    // 2016-06-01 已过解禁日的实测行：0.582754520994 = 4656.5 ÷ 7990.5（2026-10-10 线上的金丝雀就是在这种行上报了单位异常）
+    expect(await canary(rows[3]!)).toMatchObject({ status: "ok", detail: "字段与单位正常" });
+    // 还没到的：0.108135536917 = 8253.7493 ÷（84581.5647 − 8253.7493）；同一行过了解禁日改写成 0.097583312975 也认
+    expect((await canary(rows[2]!)).status).toBe("ok");
+    expect((await canary({ ...rows[2]!, FREE_RATIO: 0.097583312975 })).status).toBe("ok");
+    // 比例变成 %（× 100）：两种分母都对不上
+    for (const row of [rows[2]!, rows[3]!]) {
+      expect(await canary({ ...row, FREE_RATIO: (row.FREE_RATIO as number) * 100 })).toMatchObject({
+        status: "unit_drift",
+        detail: "解禁占流通比例对不上（单位可能变了）",
+      });
+    }
   });
 
   it("第一行缺比例（最新的解禁常缺 FREE_RATIO）：换下一行核对；都缺时只说没能核对，不算单位变了", async () => {

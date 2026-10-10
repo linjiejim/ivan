@@ -89,6 +89,23 @@ export function yearChunks(fromYear: number, toYear: number): PitChunk[] {
   return out;
 }
 
+/** 日期所在自然月的最后一天 */
+function monthEndOf(d: DateStr): DateStr {
+  const y = Number(d.slice(0, 4));
+  const m = Number(d.slice(5, 7));
+  return addDays(`${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, "0")}-01`, -1);
+}
+
+/**
+ * 按月回填的块总是整月：起点往前取到月初，带 to 时往后取到月末；只有含今天的那一块截到今天（之后的日子归夜间与周检）。
+ * 块 id 只认月份，同一个 id 必须总是同一段：截短的块记成 done 之后，再从更早的起点（或不带 to）回填会把它当成做完跳过，
+ * 缺的那段永远补不上，覆盖起点却照样前移。
+ */
+export function backfillMonths(env: AvailEnv, from: DateStr, to?: DateStr): PitChunk[] {
+  const end = to && monthEndOf(to) < env.today ? monthEndOf(to) : env.today;
+  return monthChunks(`${from.slice(0, 7)}-01`, end);
+}
+
 export const MARGIN: PitDataset<MarginRow> = {
   id: "margin",
   table: "margin_daily",
@@ -140,7 +157,7 @@ export const HOLDERS: PitDataset<HolderRow> = {
   hasWindowThrough: false,
   nightly: (env) => [chunkOf("", addDays(env.today, -14), env.today)],
   check: (env) => [chunkOf("", addDays(env.today, -120), env.today)],
-  backfill: (env, from, to) => monthChunks(from, to ?? env.today),
+  backfill: backfillMonths,
   // 可得日 = 公告日，绝不用截至日（截至 6 月 30 日、8 月 1 日公告的户数，7 月 31 日看不到）
   avail: (r) => ({ date: r.noticeDate, rule: "notice" }),
   dateOf: (r) => r.noticeDate,
@@ -184,10 +201,9 @@ export const LOCKUPS: PitDataset<LockupRow> = {
   hasWindowThrough: false,
   nightly: (env) => [chunkOf("", addDays(env.today, -7), addDays(env.today, 180))],
   check: (env) => [chunkOf("", addDays(env.today, -30), addDays(env.today, 365))],
+  // 整年（起点往前取到年初，理由同 backfillMonths）；不带 to 时多补明年（已排定的解禁）
   backfill: (env, from, to) =>
-    yearChunks(Number(from.slice(0, 4)), Number((to ?? env.today).slice(0, 4)) + (to ? 0 : 1)).map((c) =>
-      c.from < from ? { ...c, from } : c,
-    ),
+    yearChunks(Number(from.slice(0, 4)), Number((to ?? env.today).slice(0, 4)) + (to ? 0 : 1)),
   avail(r, env, existing) {
     const rule = lockupRuleDate(r, env);
     const firstSeen = existing?.first_seen ?? env.today;
@@ -257,7 +273,7 @@ export const BLOCKS: PitDataset<SeqBlockRow> = {
   hasWindowThrough: true,
   nightly: (env) => [chunkOf("", addDays(env.today, -7), env.today)],
   check: (env) => [chunkOf("", addDays(env.today, -30), env.today)],
-  backfill: (env, from, to) => monthChunks(from, to ?? env.today),
+  backfill: backfillMonths,
   prepare: (rows) => sequenceBlocks(rows as BlockRow[]),
   avail: (r, env) => ({ date: env.nextTd(r.tradeDate), rule: "td+1" }),
   dateOf: (r) => r.tradeDate,

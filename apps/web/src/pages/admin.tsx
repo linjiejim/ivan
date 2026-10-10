@@ -33,6 +33,7 @@ import {
   Input,
   LiveDot,
   Modal,
+  MonoDates,
   PageHeader,
   PageSkeleton,
   Td,
@@ -423,7 +424,9 @@ function EventsSection({
           const badge = canaryBadge(d.canary);
           return (
             <li key={id} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-              <span>{eventDatasetLine(d)} · 接口</span>
+              <span>
+                <MonoDates text={eventDatasetLine(d)} /> · 接口
+              </span>
               {badge ? <Badge tone={badge.tone}>{badge.text}</Badge> : <span>--</span>}
               <Info label={`${d.label}接口自检：说明`}>{canaryInfoText(d)}</Info>
             </li>
@@ -607,7 +610,7 @@ export function AdminPage() {
                   <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-2xs">
                     {sourcesLines(m.sources, todayCN()).map((l) => (
                       <li key={l.text} className={l.tone === "warn" ? "text-warn" : "text-ink-2"}>
-                        {l.text}
+                        <MonoDates text={l.text} />
                       </li>
                     ))}
                   </ul>
@@ -616,7 +619,7 @@ export function AdminPage() {
                   <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-2xs">
                     {captureLines(m.capture, todayCN()).map((l) => (
                       <li key={l.text} className={l.tone === "warn" ? "text-warn" : "text-ink-2"}>
-                        {l.text}
+                        <MonoDates text={l.text} />
                       </li>
                     ))}
                   </ul>

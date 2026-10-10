@@ -7,7 +7,8 @@
  *   两次取到一模一样的重复行算真有重复（大宗可能有几笔完全相同的成交）；
  * - 请求过的键在返回行里缺了 → SchemaDriftError（和 9501「字段不存在」一样算结构变了）；
  * - 金丝雀：每个报表一次请求、取前 CANARY_SAMPLE_ROWS 行、同一份列常量，用第一行字段齐全的做单位自检
- *   （样本行缺值不算单位变了，不关掉数据集）。
+ *   （样本行缺值不算单位变了，不关掉数据集）；两融取 600519.SH 最近一条已公布的（T 日的两融下一个交易日早上才公布）；
+ * - 解禁的占流通比例按股数自己算（本次 ÷ 解禁前的流通股），不用 FREE_RATIO（它的分母过了解禁日会变）。
  */
 import { addDays, type DateStr, type PitDatasetId } from "@ivan/core";
 import { BlockedError } from "../../http.ts";
@@ -92,6 +93,12 @@ function requireKeys(def: Pick<EmEventDef<unknown>, "label" | "columns">, r: EmR
 const range = (col: string) => (from: DateStr, to: DateStr) =>
   `(${col}>='${checkDate(from)}')(${col}<='${checkDate(to)}')`;
 
+/**
+ * 两融金丝雀从上一个交易日往前找多少个自然日：交易所 T 日的两融下一个交易日早上才公布，周末、长假里与开盘前
+ * 上一个交易日还是空的（2026-10-10 周六实测 10-09 回 9201），所以取窗口里最近一条已公布的；15 天长假前后也够
+ */
+const MARGIN_CANARY_LOOKBACK_DAYS = 15;
+
 export const MARGIN_DEF: EmEventDef<MarginRow> = {
   id: "margin",
   label: "两融明细",
@@ -118,10 +125,11 @@ export const MARGIN_DEF: EmEventDef<MarginRow> = {
       rzyezb: num(r.RZYEZB),
     };
   },
-  canary: (_today, prevTd) => ({
-    filter: `(DATE='${checkDate(prevTd)}')(SECUCODE="600519.SH")`,
-    sort: ["SECUCODE"],
-    asc: true,
+  // 600519.SH 最近一条已公布的（上一个交易日还没公布不算出错）
+  canary: (today, prevTd) => ({
+    filter: `${range("DATE")(addDays(checkDate(prevTd), -MARGIN_CANARY_LOOKBACK_DAYS), today)}(SECUCODE="600519.SH")`,
+    sort: ["DATE"],
+    asc: false,
   }),
   emptyOk: false,
   unitCheck(r) {
@@ -204,6 +212,8 @@ export const LOCKUPS_DEF: EmEventDef<LockupRow> = {
       const n = num(v);
       return n === null ? null : n * 1e4;
     };
+    const cur = num(r.CURRENT_FREE_SHARES);
+    const after = num(r.FREE_SHARES);
     return {
       code,
       freeDate,
@@ -211,7 +221,10 @@ export const LOCKUPS_DEF: EmEventDef<LockupRow> = {
       unlockShares: shares(r.CURRENT_FREE_SHARES),
       ableShares: shares(r.ABLE_FREE_SHARES),
       floatAfter: shares(r.FREE_SHARES),
-      ratioFloat: num(r.FREE_RATIO),
+      // 占流通比例按股数自己算、只用一个口径：本次解禁 ÷ 解禁前的流通股（FREE_SHARES 是解禁后的流通股）。
+      // 不用 FREE_RATIO：解禁日过了东财改用解禁后的流通股当分母（同一行会被改写），照搬的话
+      // 回填的历史与每晚记下的新解禁口径不一样（2026-10-10 实测，spec §16 实现备注）。股数缺了就为空
+      ratioFloat: cur === null || after === null || after <= cur ? null : cur / (after - cur),
       ratioTotal: num(r.TOTAL_RATIO),
     };
   },
@@ -228,9 +241,10 @@ export const LOCKUPS_DEF: EmEventDef<LockupRow> = {
     if (cur === null || after === null || ratio === null || after === cur) {
       return { missing: "样本行缺少解禁股数或比例" };
     }
-    return Math.abs(cur / (after - cur) - ratio) > 0.01 * Math.abs(ratio)
-      ? { drift: "解禁占流通比例对不上（单位可能变了）" }
-      : null;
+    // FREE_RATIO 有两种分母：解禁日还没到是解禁前的流通股，= 本次 ÷（FREE_SHARES − 本次）；
+    // 过了是解禁后的，= 本次 ÷ FREE_SHARES。和哪一种相差 ≤ 1% 都算对得上，两种都对不上才是单位变了
+    const near = (den: number) => den > 0 && Math.abs(cur / den - ratio) <= 0.01 * Math.abs(ratio);
+    return near(after) || near(after - cur) ? null : { drift: "解禁占流通比例对不上（单位可能变了）" };
   },
 };
 

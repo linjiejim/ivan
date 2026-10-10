@@ -20,6 +20,8 @@ import {
   planDateNote,
   REASON_DETAIL_TEXT,
   REASON_TEXT,
+  slippageError,
+  slippageFromInput,
   VERDICT_TEXT,
   VERDICT_TONE,
   verdictInfoRows,
@@ -255,5 +257,20 @@ describe("数字核对 ⓘ 的最接近的工具数", () => {
     expect(nearestValueText({ value: 1.7233e10, kind: "money" }, "money")).toBe("172.33 亿");
     expect(nearestValueText({ value: 48212, kind: "count" }, "count")).toBe("48,212");
     expect(nearestValueText({ value: 0.081234567 }, "percent")).toBe("0.08123");
+  });
+});
+
+describe("回测对话框的单边滑点", () => {
+  it("清空输入框是「没填」，不当成 0 bp；没填或超出 0–200 bp 都给提示（「开始回测」不能点）", () => {
+    expect(slippageFromInput("")).toBeNaN();
+    expect(slippageFromInput("  ")).toBeNaN();
+    expect(slippageFromInput("0")).toBe(0);
+    expect(slippageFromInput("12.5")).toBe(12.5);
+    expect(slippageError(slippageFromInput(""))).toBe("请填单边滑点（不计滑点填 0）");
+    expect(slippageError(0)).toBeNull();
+    expect(slippageError(200)).toBeNull();
+    expect(slippageError(200.5)).toBe("单边滑点要在 0–200 bp 之间");
+    expect(slippageError(-1)).toBe("单边滑点要在 0–200 bp 之间");
+    expect(slippageError(Number.POSITIVE_INFINITY)).toBe("单边滑点要在 0–200 bp 之间");
   });
 });

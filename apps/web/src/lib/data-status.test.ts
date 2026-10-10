@@ -1,4 +1,7 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { MonoDates } from "../components/ui.tsx";
 import {
   canaryBadge,
   canaryInfoText,
@@ -102,6 +105,18 @@ describe("sourcesLines", () => {
     ]);
     expect(sourcesLines(null, "2026-10-21")).toEqual([]);
     expect(sourcesLines(undefined, "2026-10-21")).toEqual([]);
+  });
+
+  it("数据卡上整行文字里的日期用等宽字（§10），别的字原样", () => {
+    const html = renderToStaticMarkup(
+      createElement(MonoDates, { text: "2026-10-20 那晚东财 3 只、腾讯 0 只（回退 0 次）" }),
+    );
+    expect(html).toBe(
+      '<span class="font-mono">2026-10-20</span> 那晚东财 3 只、腾讯 0 只（回退 0 次）',
+    );
+    expect(renderToStaticMarkup(createElement(MonoDates, { text: "今晚东财 120 只" }))).toBe(
+      "今晚东财 120 只",
+    );
   });
 });
 

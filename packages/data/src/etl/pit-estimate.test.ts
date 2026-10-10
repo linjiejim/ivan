@@ -48,18 +48,18 @@ describe("estimatePitBackfill", () => {
     const margin = r.datasets.find((d) => d.id === "margin")!;
     // 两融按天分块：9-21 ~ 10-01 共 9 个交易日
     expect(margin).toMatchObject({ rows: 6_000_000, chunks: 9, requestsLow: 12_000, requestsHigh: 12_009 });
-    expect(margin.line).toBe("两融明细：约 600 万行，12,000-12,009 次请求，按 0.6 秒 / 次约 2.0-2.0 小时");
+    expect(margin.line).toBe("两融明细：约 600 万行，12,000-12,009 次请求，按 0.6 秒 / 次，约 2.0 小时");
     const holders = r.datasets.find((d) => d.id === "holders")!;
     expect(holders).toMatchObject({ requestsLow: 883, chunks: 2, requestsHigh: 885 });
-    expect(holders.line).toBe("股东户数：约 44 万行，883-885 次请求，按 0.6 秒 / 次约 9-9 分钟");
+    expect(holders.line).toBe("股东户数：约 44 万行，883-885 次请求，按 0.6 秒 / 次，约 9 分钟");
     expect(r.datasets.find((d) => d.id === "lockups")!.line).toBe(
-      "限售解禁：约 3 万行，57-59 次请求，按 0.6 秒 / 次约 1-1 分钟",
+      "限售解禁：约 3 万行，57-59 次请求，按 0.6 秒 / 次，约 1 分钟",
     );
-    expect(r.lines.at(-1)).toBe("合计：14,240-14,255 次请求，约 2.4-2.4 小时");
-    // 计数请求的窗口就是回填的范围
+    expect(r.lines.at(-1)).toBe("合计：14,240-14,255 次请求，约 2.4 小时");
+    // 计数请求的窗口就是回填的范围（解禁按整年回填，从年初算）
     const f = (report: string) =>
       new URL(http.calls.find((c) => c.url.includes(report))!.url).searchParams.get("filter");
     expect(f("RPTA_WEB_RZRQ_GGMX")).toBe("(DATE>='2026-09-21')(DATE<='2026-10-01')");
-    expect(f("RPT_LIFT_STAGE")).toBe("(FREE_DATE>='2026-09-21')(FREE_DATE<='2027-12-31')");
+    expect(f("RPT_LIFT_STAGE")).toBe("(FREE_DATE>='2026-01-01')(FREE_DATE<='2027-12-31')");
   });
 });

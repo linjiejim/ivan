@@ -2539,7 +2539,7 @@ describe("点时事件数据回填（S15）", () => {
         return reply({
           since: url.searchParams.get("since") ?? "2013-01-01",
           requests: 4,
-          lines: ["两融明细：约 600 万行，12,000-15,330 次请求，按 0.6 秒 / 次约 2.0-2.6 小时"],
+          lines: ["两融明细：约 600 万行，12,000-15,330 次请求，按 0.6 秒 / 次，约 2.0-2.6 小时"],
           datasets: [],
         });
       if (url.pathname === "/internal/events/backfill") {

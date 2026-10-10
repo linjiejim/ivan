@@ -53,7 +53,16 @@ import {
   Th,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { dateTime, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
+import {
+  dateTime,
+  MARKET_TEXT,
+  money,
+  NA,
+  pct,
+  slippageError,
+  slippageFromInput,
+  tone,
+} from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
 import type { RunDetail, RunSummary, ScreenResult, StrategyDetail } from "../lib/types.ts";
 
@@ -73,11 +82,6 @@ export interface BacktestPreset {
 /** 单笔上限的可选值（不限 / 5% / 10% / 20%）；预填了别的值时也列出来 */
 const PARTICIPATION_CHOICES = [null, 0.05, 0.1, 0.2] as const;
 
-/** 成交假设里用户能填的数在范围内（单边滑点 0–200 bp）；不在时「开始回测」不能点 */
-function slipValid(exec: ExecConfig): boolean {
-  return Number.isFinite(exec.slippageBps) && exec.slippageBps >= 0 && exec.slippageBps <= 200;
-}
-
 /**
  * 成交假设（D64）：默认收起，展开后可改单边滑点、半个最小价位、冲击成本与单笔上限；
  * 默认值直接取 @ivan/core 的 defaultExec（纯函数，不另开接口）；「恢复默认」连规则表与指标版本一起恢复。
@@ -93,21 +97,17 @@ function ExecFields({
 }) {
   const choices: Array<number | null> = [...PARTICIPATION_CHOICES];
   if (!choices.includes(exec.participation)) choices.push(exec.participation);
-  const slipOk = slipValid(exec);
+  const slipErr = slippageError(exec.slippageBps);
   return (
     <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-4">
-      <Field
-        label="单边滑点（bp）"
-        hint="买价加、卖价减；1bp = 0.01%"
-        error={slipOk ? undefined : "单边滑点要在 0–200 bp 之间"}
-      >
+      <Field label="单边滑点（bp）" hint="买价加、卖价减；1bp = 0.01%" error={slipErr ?? undefined}>
         <Input
           type="number"
-          value={exec.slippageBps}
+          value={Number.isNaN(exec.slippageBps) ? "" : exec.slippageBps}
           min={0}
           max={200}
           step={1}
-          onChange={(e) => onChange({ ...exec, slippageBps: Number(e.target.value) })}
+          onChange={(e) => onChange({ ...exec, slippageBps: slippageFromInput(e.target.value) })}
         />
       </Field>
       <Field label="单笔不超过日均成交额" hint="按决策日的 20 日均成交额；没有成交额数据的股票不买">
@@ -177,6 +177,9 @@ export function BacktestDialog({
   const [oos, setOos] = useState(preset?.oosMonths ?? 12);
   const [exec, setExec] = useState<ExecConfig>(preset?.exec ?? defaultExec(market));
   const [execOpen, setExecOpen] = useState(false);
+  // 单边滑点没填或超出范围：「开始回测」不能点，成交假设一直展开（看得到为什么）
+  const slipErr = slippageError(exec.slippageBps);
+  const showExec = execOpen || slipErr !== null;
   const navigate = useNavigate();
   const qc = useQueryClient();
   const run = useMutation({
@@ -208,7 +211,7 @@ export function BacktestDialog({
             variant="primary"
             icon={IconRun}
             loading={run.isPending}
-            disabled={!slipValid(exec)}
+            disabled={slipErr !== null}
             onClick={() => run.mutate()}
           >
             开始回测
@@ -249,19 +252,19 @@ export function BacktestDialog({
       </div>
       <Callout tone="neutral" className="mt-5 text-xs leading-5">
         收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
-        <div className="mt-1">成交假设：{describeExec(exec)}</div>
+        <div className="mt-1">成交假设：{slipErr ? NA : describeExec(exec)}</div>
       </Callout>
       <div className="mt-4">
         <button
           type="button"
-          aria-expanded={execOpen}
+          aria-expanded={showExec}
           onClick={() => setExecOpen(!execOpen)}
           className="inline-flex items-center gap-1 text-xs font-medium text-ink-2 transition-colors hover:text-ink"
         >
-          {execOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+          {showExec ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
           成交假设
         </button>
-        {execOpen && <ExecFields market={market} exec={exec} onChange={setExec} />}
+        {showExec && <ExecFields market={market} exec={exec} onChange={setExec} />}
       </div>
       <ErrorNote error={run.error} />
     </Modal>

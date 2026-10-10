@@ -45,7 +45,7 @@ export interface LockupRowView {
   type: string;
   /** 解禁股数（股） */
   unlockShares: number | null;
-  /** 占流通股（%） */
+  /** 解禁股数占解禁前流通股（%） */
   ratioFloatPct: number | null;
   availDate: DateStr;
   availRule: LockupAvailRule | string;

@@ -111,7 +111,7 @@ export function EventsBody({ e }: { e: SecurityEvents }) {
               <Th>解禁日</Th>
               <Th>类型</Th>
               <Th align="right">股数</Th>
-              <Th align="right">占流通股</Th>
+              <Th align="right">占解禁前流通股</Th>
               <Th>可得日依据</Th>
             </tr>
           </thead>
