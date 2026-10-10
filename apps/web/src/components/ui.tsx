@@ -454,7 +454,8 @@ const TEXT_LINK =
   "group/link inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-medium text-accent transition-colors hover:text-accent-strong";
 
 /**
- * 文字链接。站内跳转用 `to`；下载文件（如运行卡）用 `href` + `download`，不带箭头、前面可放图标。
+ * 文字链接。站内跳转用 `to`；下载文件（如运行卡）用 `href` + `download`，不带箭头、前面可放图标；
+ * 就地的小操作（「恢复默认」）用 `onClick`，渲染成按钮。
  */
 export function TextLink(
   props:
@@ -465,8 +466,17 @@ export function TextLink(
         icon?: Icon;
         children: ReactNode;
         className?: string;
-      },
+      }
+    | { onClick: () => void; children: ReactNode; className?: string },
 ) {
+  if ("onClick" in props) {
+    // 就地操作（「恢复默认」这类）：同样的花青文字，不带去别处的箭头
+    return (
+      <button type="button" onClick={props.onClick} className={cx(TEXT_LINK, props.className)}>
+        {props.children}
+      </button>
+    );
+  }
   if ("href" in props) {
     const Icon = props.icon;
     return (

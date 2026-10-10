@@ -232,6 +232,18 @@ export function benchmarkOf(spec: StrategySpec): BenchmarkKey {
   return spec.benchmark ?? DEFAULT_BENCHMARK[spec.market];
 }
 
+/**
+ * 策略用到的因子（筛选、排序与弱势时的排序），按出现顺序去重：选股解释与个股证据取因子值用（D67）。
+ */
+export function specFactorKeys(s: StrategySpec): string[] {
+  const keys = [
+    ...s.filters.map((c) => c.factor),
+    ...(s.rank?.terms ?? []).map((t) => t.factor),
+    ...(s.rank?.regime?.weak.terms ?? []).map((t) => t.factor),
+  ];
+  return [...new Set(keys)];
+}
+
 // ── 人话描述（卡片、LLM 上下文共用） ──
 
 const OP_TEXT: Record<string, string> = { ">": ">", ">=": "≥", "<": "<", "<=": "≤" };

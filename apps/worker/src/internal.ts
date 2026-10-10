@@ -1,18 +1,26 @@
 /**
  * worker 内部接口（只监听 127.0.0.1，带共享密钥）：server 所有行情查询都经这里（D3）。
  */
-import { type Market, toCode, validateSpec } from "@ivan/core";
+import { BENCHMARKS, isDateStr, type Market, toCode, validateSpec } from "@ivan/core";
+import { sha256Canonical } from "@ivan/core/node";
 import {
   captureStatus,
   committedAsOf,
   dataVersionState,
+  EvidenceError,
+  type EvidenceItem,
+  explainSelection,
   FACTOR_COLUMNS,
+  lastTradingDay,
   latestDataVersion,
   screenOn,
+  securityDossier,
   sqlCodeList,
+  verifyDossier,
   weakRegimeDates,
 } from "@ivan/data";
 import { computeBlocked, jobs } from "@ivan/db";
+import { evaluatePlanItem } from "@ivan/engine";
 import { and, desc, eq, like } from "drizzle-orm";
 import { Hono } from "hono";
 import { env, todayOf } from "./env.ts";
@@ -29,6 +37,8 @@ export function createInternalApp() {
     return next();
   });
   app.onError((err, c) => {
+    // 证据读不到（没这只股票、那天还没有数据）：给调用方中文原因与 4xx，不算 worker 出错
+    if (err instanceof EvidenceError) return c.json({ error: err.message }, err.status);
     console.error(err);
     return c.json({ error: err.message }, 500);
   });
@@ -98,7 +108,168 @@ export function createInternalApp() {
         ? "weak"
         : "strong"
       : null;
-    return c.json({ date, rows, regime });
+    // 今日选股可追溯（D67）：读的是哪个数据版本、名单的指纹
+    const dataVersion = await latestDataVersion(wh, v.spec.market);
+    return c.json({ date, rows, regime, dataVersion, listHash: sha256Canonical(rows) });
+  });
+
+  /**
+   * 选股解释（D67）：和回测同一条 SQL。date 默认并截到已提交的截至日，再落到交易日；limit 默认回测用的名单长度
+   * （前 top × buffer 名 + top），最多 200。
+   */
+  app.post("/internal/explain", async (c) => {
+    const b = (await c.req.json()) as {
+      spec: unknown;
+      date?: string;
+      codes?: string[];
+      limit?: number;
+    };
+    const v = validateSpec(b.spec);
+    if (!v.spec) return c.json({ error: v.errors.join("；") }, 400);
+    if (v.spec.mode !== "rules" || !v.spec.rank) {
+      return c.json({ error: "信号模式的策略没有选股排名" }, 400);
+    }
+    if (b.date && !isDateStr(b.date)) return c.json({ error: "日期格式要是 YYYY-MM-DD" }, 400);
+    const { wh } = env();
+    const committed = await committedAsOf(wh, v.spec.market);
+    if (!committed) return c.json({ error: "行情仓还没有数据" }, 400);
+    // 落到交易日：周末、节假日按前一个交易日解释（回测只在交易日决策）
+    const date = await lastTradingDay(wh, v.spec.market, b.date && b.date < committed ? b.date : committed);
+    const rank = v.spec.rank;
+    const limit = Math.min(
+      Math.max(b.limit ?? Math.ceil(rank.top * v.spec.rebalance.buffer) + rank.top, 1),
+      200,
+    );
+    let codes: string[];
+    try {
+      codes = (b.codes ?? []).slice(0, 50).map((x) => toCode(x, v.spec!.market));
+    } catch {
+      return c.json({ error: "代码不对" }, 400);
+    }
+    return c.json(await explainSelection(wh, v.spec, date, { limit, codes }));
+  });
+
+  /** 个股证据（D67）：唯一的点时读取器；asOf 是决策日，默认并截到已提交的截至日，再落到交易日 */
+  app.get("/internal/securities/:code/dossier", async (c) => {
+    let code: string;
+    try {
+      code = toCode(c.req.param("code"));
+    } catch {
+      return c.json({ error: "代码不对" }, 400);
+    }
+    const asOf = c.req.query("asOf") || undefined;
+    const factors = (c.req.query("factors") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return c.json(
+      await securityDossier(env().wh, code, asOf, factors.length ? { factorKeys: factors } : {}),
+    );
+  });
+
+  /** 复核个股证据：按同样的代码、决策日、因子集重新生成，比校验值；带上原来的条目时列出变了的项 */
+  app.post("/internal/dossier/verify", async (c) => {
+    const b = (await c.req.json()) as {
+      code: string;
+      asOf: string;
+      hash: string;
+      factorKeys?: string[];
+      items?: EvidenceItem[];
+    };
+    if (!b.code || !b.asOf || !b.hash) return c.json({ error: "需要 code、asOf 与 hash" }, 400);
+    let code: string;
+    try {
+      code = toCode(b.code);
+    } catch {
+      return c.json({ error: "代码不对" }, 400);
+    }
+    return c.json(
+      await verifyDossier(env().wh, code, b.asOf, b.hash, {
+        factorKeys: b.factorKeys,
+        items: b.items,
+      }),
+    );
+  });
+
+  /**
+   * 计划结果回看（D79）：每条计划项的次日开盘成交、与估算价之差、之后 5 / 20 个交易日的收益与超额。
+   * 只用已提交的数据；最多 50 条（只有跟踪的主人能看，量有上限，不计额度）。
+   */
+  app.post("/internal/plan-outcomes", async (c) => {
+    const b = (await c.req.json()) as {
+      market?: string;
+      benchSym?: string;
+      items?: Array<{
+        code: string;
+        side: string;
+        estPrice: number | null;
+        decisionDate: string;
+        benchClose: number | null;
+      }>;
+    };
+    const market: Market = b.market === "HK" ? "HK" : "A";
+    const items = b.items ?? [];
+    if (items.length > 50) return c.json({ error: "一次最多 50 条" }, 400);
+    const syms = new Set<string>(Object.values(BENCHMARKS).map((x) => x.sym));
+    if (!b.benchSym || !syms.has(b.benchSym)) return c.json({ error: "基准不对" }, 400);
+    let codes: string[];
+    try {
+      codes = items.map((i) => toCode(i.code, market));
+    } catch {
+      return c.json({ error: "代码不对" }, 400);
+    }
+    if (items.some((i) => !isDateStr(i.decisionDate))) {
+      return c.json({ error: "日期格式要是 YYYY-MM-DD" }, 400);
+    }
+    const { wh } = env();
+    const asOf = await committedAsOf(wh, market);
+    if (!asOf || !items.length) return c.json({ asOf, outcomes: [] });
+    const from = items.map((i) => i.decisionDate).sort()[0]!;
+    const bars = await wh.all<{ code: string; d: string; open: number; close: number; adj: number }>(
+      `SELECT code, date::VARCHAR AS d, open, close, adj FROM bars_daily
+       WHERE code IN (${sqlCodeList([...new Set(codes)])}) AND date > $a::DATE AND date <= $b::DATE
+       ORDER BY code, date`,
+      { a: from, b: asOf },
+    );
+    const bench = await wh.all<{ d: string; close: number }>(
+      `SELECT date::VARCHAR AS d, close FROM index_bars
+       WHERE sym = $s AND date > $a::DATE AND date <= $b::DATE ORDER BY date`,
+      { s: b.benchSym, a: from, b: asOf },
+    );
+    const benchSeries = { dates: bench.map((r) => r.d), close: bench.map((r) => r.close) };
+    const byCode = new Map<string, typeof bars>();
+    for (const r of bars) {
+      const list = byCode.get(r.code) ?? [];
+      list.push(r);
+      byCode.set(r.code, list);
+    }
+    const outcomes = items.map((it, k) => {
+      const rows = (byCode.get(codes[k]!) ?? []).filter((r) => r.d > it.decisionDate);
+      return evaluatePlanItem(
+        { code: codes[k]!, side: it.side, estPrice: it.estPrice ?? null },
+        { decisionDate: it.decisionDate, benchClose: it.benchClose ?? null },
+        {
+          dates: rows.map((r) => r.d),
+          open: rows.map((r) => r.open),
+          close: rows.map((r) => r.close),
+          adj: rows.map((r) => r.adj),
+        },
+        benchSeries,
+      );
+    });
+    return c.json({ asOf, outcomes });
+  });
+
+  /** 交易日历上 date 之前的最后一个交易日（成交日 → 决策日）；没有时为 null */
+  app.get("/internal/calendar/prev", async (c) => {
+    const market = c.req.query("market") === "HK" ? "HK" : "A";
+    const date = c.req.query("date") ?? "";
+    if (!isDateStr(date)) return c.json({ error: "日期格式要是 YYYY-MM-DD" }, 400);
+    const prev = await env().wh.scalar<string>(
+      `SELECT max(date)::VARCHAR FROM trade_calendar WHERE market = $m AND date < $d::DATE`,
+      { m: market, d: date },
+    );
+    return c.json({ market, date, prev: prev ?? null });
   });
 
   app.get("/internal/securities/search", async (c) => {

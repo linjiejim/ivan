@@ -18,10 +18,12 @@ export const TOOL_ACTIVITY: Record<string, string> = {
   screen_today: "按策略选股",
   screen_rules: "按条件选股",
   lookup_security: "查个股",
+  get_security_evidence: "查个股证据",
   propose_tracking: "准备上线跟踪",
   get_tracking: "读取跟踪",
   get_overview: "查看看板",
   propose_stop_tracking: "准备停止跟踪",
+  get_plan: "查计划依据",
 };
 
 /**

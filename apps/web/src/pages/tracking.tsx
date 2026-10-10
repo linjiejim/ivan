@@ -7,6 +7,8 @@ import { useParams } from "react-router";
 import type { OpenPosition } from "@ivan/core";
 import { useChatUi } from "../chat/chat-context.tsx";
 import { NavChart } from "../components/charts/nav-chart.tsx";
+import { EvidenceButton } from "../components/evidence-modal.tsx";
+import { PlanItems, PlanMeta } from "../components/plan-list.tsx";
 import {
   IconAI,
   IconChart,
@@ -32,6 +34,7 @@ import {
   Stat,
   Tag,
   Td,
+  Textarea,
   TextLink,
   Th,
 } from "../components/ui.tsx";
@@ -42,11 +45,18 @@ import {
   deviationText,
   MARKET_TEXT,
   money,
+  navFanText,
   pct,
   tone,
 } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { Check, TrackingChart, TrackingSummary, TrackingView } from "../lib/types.ts";
+import type {
+  Check,
+  PlanSnapshot,
+  TrackingChart,
+  TrackingSummary,
+  TrackingView,
+} from "../lib/types.ts";
 
 type TrackingDetail = TrackingView & {
   days: Array<{ date: string; nav: number; bench: number; cash: number; positions: number }>;
@@ -57,6 +67,8 @@ type TrackingDetail = TrackingView & {
     side: string;
     reason: string;
   }>;
+  /** 最近一晚的最新一版计划快照（D68）；早于账本的跟踪没有 */
+  plan: PlanSnapshot | null;
 };
 
 export function TrackingPage() {
@@ -72,8 +84,9 @@ export function TrackingPage() {
   const chat = useChatUi();
   const qc = useQueryClient();
   const [stopping, setStopping] = useState(false);
+  const [stopReason, setStopReason] = useState("");
   const stop = useMutation({
-    mutationFn: () => api.post(`/api/trackings/${id}/stop`),
+    mutationFn: () => api.post(`/api/trackings/${id}/stop`, { reason: stopReason.trim() || null }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["tracking", id] });
       await qc.invalidateQueries({ queryKey: ["dashboard"] });
@@ -104,6 +117,7 @@ export function TrackingPage() {
     /** 仓位控制（D52）：当前仓位系数与下一个交易日要调到的系数 */
     exposure?: { current: number; next: number } | null;
   };
+  const navFan = navFanText(t.summary?.navFanPercentile, t.summary?.navFanBand);
   const drift =
     summary.replay && summary.replay.navDrift + summary.replay.benchDrift > 0
       ? summary.replay
@@ -180,7 +194,12 @@ export function TrackingPage() {
             label="跑赢回测同期"
             value={beatPct(t.deviationPct)}
             note={t.deviationPct === null ? deviationText(null, t.days.length) : "低于 10% 要留意"}
-            info={DEVIATION_INFO}
+            info={
+              <>
+                {DEVIATION_INFO}
+                {navFan && <div className="mt-1.5 border-t border-line pt-1.5">{navFan}</div>}
+              </>
+            }
           />
           <Stat
             label="总资产"
@@ -246,9 +265,18 @@ export function TrackingPage() {
         <Card
           title="明日计划"
           icon={IconPlan}
-          subtitle={t.orders[0] ? `${t.orders[0].planDate} 开盘` : undefined}
+          subtitle={
+            t.plan ? (
+              <PlanMeta plan={t.plan} />
+            ) : t.orders[0] ? (
+              `${t.orders[0].planDate} 开盘`
+            ) : undefined
+          }
         >
-          {t.orders.length ? (
+          {t.plan && t.plan.items.length ? (
+            <PlanItems plan={t.plan} trackingId={t.id} market={t.market} />
+          ) : t.orders.length ? (
+            // 早于计划快照的跟踪：只有方向与名称
             <div className="flex flex-wrap gap-1.5">
               {t.orders.map((o) => (
                 <Badge key={`${o.side}-${o.code}`} tone={o.side === "buy" ? "up" : "down"}>
@@ -260,6 +288,9 @@ export function TrackingPage() {
           ) : (
             <p className="text-sm text-muted">没有计划中的买卖，持仓照旧。</p>
           )}
+          <p className="mt-2 text-2xs text-muted">
+            按规则算出的模拟计划，仅供研究，不构成投资建议。
+          </p>
         </Card>
         <Card
           title="当前持仓"
@@ -281,6 +312,9 @@ export function TrackingPage() {
                   <Th align="right">仓位</Th>
                   <Th align="right">浮动盈亏</Th>
                   <Th align="right">买入日</Th>
+                  <Th className="w-8">
+                    <span className="sr-only">证据</span>
+                  </Th>
                 </tr>
               </thead>
               <tbody>
@@ -298,6 +332,10 @@ export function TrackingPage() {
                     </Td>
                     <Td align="right" className="font-mono text-[12px] text-muted">
                       {p.entryDate}
+                    </Td>
+                    <Td className="py-0">
+                      {/* 买入日是成交日，证据看它前一个交易日收盘后的数据（D67） */}
+                      <EvidenceButton code={p.code} tradeDate={p.entryDate} trackingId={t.id} />
                     </Td>
                   </tr>
                 ))}
@@ -336,6 +374,19 @@ export function TrackingPage() {
           「{t.strategyName}
           」停止后不再每日结算，已有的历史记录、曲线和持仓都会保留。想继续跟踪需要重新上线。
         </p>
+        <label className="mt-3 block">
+          <span className="mb-1.5 block text-xs font-medium text-ink-2">停止原因（选填）</span>
+          <Textarea
+            rows={2}
+            maxLength={500}
+            value={stopReason}
+            onChange={(e) => setStopReason(e.target.value)}
+            placeholder="比如：换成新版本、回撤超出预期"
+          />
+          <span className="mt-1.5 block text-xs text-muted">
+            会记进决策账本，以后回看时能看到。
+          </span>
+        </label>
         <ErrorNote error={stop.error} />
       </Modal>
     </div>

@@ -210,7 +210,7 @@ export async function fetchShareChanges(ctx: EtlContext, code: string): Promise<
 }
 
 /** financials 的列（键 code 之后，按表的列序；表尾的 src、ver 由写入时补） */
-const FIN_FIELDS = [
+export const FIN_FIELDS = [
   "report_date",
   "period",
   "fy_start",

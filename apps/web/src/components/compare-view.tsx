@@ -1,5 +1,6 @@
 /**
  * 回测对比（2–4 个）：指标表 + 净值叠加图（分类色按固定顺序 1–4，直接在线尾标名）。
+ * 口径不同不直接比（D64）：表里多「成交假设」「指标口径」两行，不同时顶部给 warn 提示。
  */
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
@@ -15,9 +16,28 @@ import {
   tooltipStyle,
   useThemeVersion,
 } from "./charts/echart.tsx";
-import { cx, DataTable, ErrorNote, SeriesDot, Skeleton, Td, Th } from "./ui.tsx";
+import { Callout, cx, DataTable, ErrorNote, SeriesDot, Skeleton, Td, Th } from "./ui.tsx";
 
-type CompareRow = RunSummary & { versionN: number | null; series: SeriesPoint[] };
+type CompareRow = RunSummary & {
+  versionN: number | null;
+  series: SeriesPoint[];
+  /** 成交假设的一行摘要 */
+  execText: string;
+  rulesVersion: number | null;
+  /** 指标口径（1 = 从首日收盘算起，2 = 从投入第一笔资金算起） */
+  metricsVersion: number | null;
+};
+
+interface CompareResult {
+  runs: CompareRow[];
+  /** 成交假设逐项相同且指标口径相同 */
+  comparable: boolean;
+}
+
+const METRICS_TEXT: Record<number, string> = {
+  1: "旧口径：从首日收盘算起",
+  2: "从投入第一笔资金算起",
+};
 
 const SLOTS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)"];
 
@@ -147,6 +167,24 @@ export function CompareTable({ rows }: { rows: CompareRow[] }) {
           ))}
         </tr>
         <tr>
+          <Td className="text-ink-2">成交假设</Td>
+          {rows.map((r) => (
+            <Td key={r.id} align="right" className="text-xs whitespace-normal text-ink-2">
+              {r.execText}
+            </Td>
+          ))}
+        </tr>
+        <tr>
+          <Td className="text-ink-2">指标口径</Td>
+          {rows.map((r) => (
+            <Td key={r.id} align="right" className="text-xs text-ink-2">
+              {r.metricsVersion === null
+                ? NA
+                : (METRICS_TEXT[r.metricsVersion] ?? `第 ${r.metricsVersion} 版`)}
+            </Td>
+          ))}
+        </tr>
+        <tr>
           <Td className="text-ink-2">提示</Td>
           {rows.map((r) => {
             const warns = r.checks.filter((c) => c.level === "warn").map((c) => c.title);
@@ -169,7 +207,7 @@ export function CompareTable({ rows }: { rows: CompareRow[] }) {
 export function CompareView({ ids }: { ids: string[] }) {
   const q = useQuery({
     queryKey: ["compare", ...ids],
-    queryFn: () => api.post<CompareRow[]>("/api/runs/compare", { ids }),
+    queryFn: () => api.post<CompareResult>("/api/runs/compare", { ids }),
   });
   if (q.isLoading)
     return (
@@ -182,8 +220,11 @@ export function CompareView({ ids }: { ids: string[] }) {
   if (!q.data) return <ErrorNote error={q.error} />;
   return (
     <div className="space-y-5">
-      <CompareChart rows={q.data} />
-      <CompareTable rows={q.data} />
+      {!q.data.comparable && (
+        <Callout tone="warn">这几次回测的成交假设或指标口径不同，数字不能直接比</Callout>
+      )}
+      <CompareChart rows={q.data.runs} />
+      <CompareTable rows={q.data.runs} />
     </div>
   );
 }

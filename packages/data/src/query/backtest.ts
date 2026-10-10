@@ -8,12 +8,15 @@ import {
   benchmarkOf,
   BENCHMARKS,
   type DateStr,
+  type ExecConfig,
   type PriceSeries,
+  resolveExec,
   type SecurityInfo,
   type Signal,
   type SimInput,
   type StrategySpec,
-  weekday,
+  nextTradingDay,
+  type TradingDayBasis,
 } from "@ivan/core";
 import { rebalanceDays } from "@ivan/engine";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
@@ -44,6 +47,18 @@ export async function committedAsOf(wh: Warehouse, market: string): Promise<Date
   return (await latestDataVersion(wh, market)).asOf;
 }
 
+/**
+ * 决策日落到交易日：取该市场交易日历上不晚于 date 的最后一个交易日（周末、节假日退到前一个交易日）。
+ * 回测只在交易日决策，问「3 月 3 日（周日）为什么」时按前一个交易日回答；日历里没有更早的交易日时原样返回。
+ */
+export async function lastTradingDay(wh: Warehouse, market: string, date: DateStr): Promise<DateStr> {
+  const d = await wh.scalar<string>(
+    `SELECT max(date)::VARCHAR FROM trade_calendar WHERE market = $m AND date <= $d::DATE`,
+    { m: market, d: date },
+  );
+  return d ?? date;
+}
+
 /** 正在写的版本与上一个版本的结果（管理页「正在更新」、版本状态徽标用） */
 export async function dataVersionState(
   wh: Warehouse,
@@ -69,11 +84,18 @@ export async function dataVersionState(
   };
 }
 
+/** 成交假设要不要日均成交额与波动率（D64）：设了单笔上限或计冲击成本时才把这两列装进价格面板 */
+export function needsLiquidity(exec: ExecConfig): boolean {
+  return exec.participation !== null || exec.impact !== "none";
+}
+
 export interface BuildOptions {
   signals?: Signal[];
   priorVersionsOnPeriod?: number;
   /**
-   * 向前跟踪：在日历末尾补一个「下一个工作日」，让引擎给出明日计划（节假日可能不准，只影响计划日期标注）。
+   * 向前跟踪：在日历末尾补「下一个交易日」，让引擎给出明日计划。按交易所休市日表推算（D68），
+   * 表里没有那一年时退回下一个工作日（nextDayBasis = weekday）。只影响今晚补的这一天：计划日，以及长假前最后一个交易日
+   * 是不是周度策略的决策日；过去的重放与回测不受影响（前缀指纹按「执行日 ≤ cut」算，不含补的这天）。
    */
   appendNextDay?: boolean;
 }
@@ -83,6 +105,8 @@ export interface BuiltInput {
   dataVersion: DataVersionInfo;
   /** 实际使用的区间（end 会被截到数据截至日） */
   params: BacktestParams;
+  /** 补的「下一个交易日」按什么推算；没补时为 null */
+  nextDayBasis: TradingDayBasis | null;
   stats: { decisionDates: number; codes: number; priceRows: number; ms: number };
 }
 
@@ -108,10 +132,11 @@ export async function buildSimInput(
     { m: market, a: addDays(params.start, -lead), b: params.end },
   );
   const calendar = calRows.map((r) => r.d);
+  let nextDayBasis: TradingDayBasis | null = null;
   if (opts.appendNextDay && calendar.at(-1) === lastDay) {
-    let next = addDays(lastDay, 1);
-    while (weekday(next) === 0 || weekday(next) === 6) next = addDays(next, 1);
-    calendar.push(next);
+    const next = nextTradingDay(market, lastDay);
+    calendar.push(next.date);
+    nextDayBasis = next.basis;
   }
 
   // 选股
@@ -138,9 +163,10 @@ export async function buildSimInput(
   let priceRows = 0;
   if (codeList.length) {
     const calIdx = new Map(calendar.map((d, i) => [d, i]));
+    const liquidity = needsLiquidity(resolveExec(params.exec));
     const cols = await wh.columns(
       `SELECT b.code, b.date::VARCHAR AS d, b.open, b.high, b.low, b.close, b.adj,
-              coalesce(f.flag_st, false) AS st
+              coalesce(f.flag_st, false) AS st${liquidity ? ", f.turnover_20d AS t20, f.volatility_60d AS v60" : ""}
        FROM bars_daily b
        LEFT JOIN factors_daily f ON f.code = b.code AND f.date = b.date
        WHERE b.code IN (${sqlCodeList(codeList)})
@@ -178,6 +204,11 @@ export async function buildSimInput(
         adj: new Float64Array(len).fill(NaN),
         st: new Uint8Array(len),
       };
+      // 日均成交额（元）与日波动（D64）：第 x 格是第 x 天的值，引擎只用决策日及以前的
+      if (liquidity) {
+        s.adv = new Float32Array(len).fill(NaN);
+        s.sigma = new Float32Array(len).fill(NaN);
+      }
       for (let k = i; k < j; k++) {
         const ci = calIdx.get(d[k]!);
         if (ci === undefined || ci < from) continue;
@@ -188,6 +219,12 @@ export async function buildSimInput(
         s.close[x] = cols.close![k] as number;
         s.adj[x] = cols.adj![k] as number;
         s.st[x] = cols.st![k] ? 1 : 0;
+        if (s.adv && s.sigma) {
+          const t20 = cols.t20![k] as number | null;
+          const v60 = cols.v60![k] as number | null;
+          s.adv[x] = t20 === null || t20 === undefined ? NaN : t20 * 1e8;
+          s.sigma[x] = v60 === null || v60 === undefined ? NaN : v60 / 100 / Math.sqrt(250);
+        }
       }
       // 缺行情的日子因子沿用前值（停牌期间除权的极少数情况由下一根 K 线的因子体现）
       let lastAdj = NaN;
@@ -207,8 +244,10 @@ export async function buildSimInput(
       lot_size: number;
       industry: string;
       delist_date: string | null;
+      list_date: string | null;
     }>(
-      `SELECT code, name, board, lot_size, industry, delist_date::VARCHAR AS delist_date
+      `SELECT code, name, board, lot_size, industry, delist_date::VARCHAR AS delist_date,
+              list_date::VARCHAR AS list_date
        FROM securities WHERE code IN (${sqlCodeList(codeList)})`,
     );
     for (const s of secs) {
@@ -219,6 +258,7 @@ export async function buildSimInput(
         lotSize: s.lot_size ?? null,
         industry: s.industry ?? null,
         delistDate: s.delist_date ?? null,
+        listDate: s.list_date ?? null,
       });
     }
   }
@@ -277,6 +317,7 @@ export async function buildSimInput(
     },
     dataVersion,
     params,
+    nextDayBasis,
     stats: { decisionDates: decisionDates.length, codes: codeList.length, priceRows, ms: Date.now() - t0 },
   };
 }

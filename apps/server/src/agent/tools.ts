@@ -2,16 +2,8 @@
  * 对话工具（spec §9，D16）：execute 返回给界面画卡片的完整数据，toModelOutput 只给模型精简摘要。
  * 所有写操作只写草稿；回测与扫描直接跑（受额度限制），用异步生成器先吐出 runId 让卡片显示进度。
  */
-import {
-  describeExec,
-  describeSpec,
-  factorsForMarket,
-  getFactor,
-  type Market,
-  type Metrics,
-  validateSpec,
-} from "@ivan/core";
-import { COMPUTE_PAUSED_TEXT } from "@ivan/db";
+import { planForModel, r2, runForModel } from "@ivan/ai";
+import { describeSpec, factorsForMarket, getFactor, type Market, validateSpec } from "@ivan/core";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { worker } from "../lib/worker-client.ts";
@@ -32,7 +24,9 @@ import {
   versionNOf,
 } from "../services/strategies.ts";
 import { overview } from "../services/dashboard.ts";
-import { getTracking, proposeTracking } from "../services/trackings.ts";
+import { type SecurityEvidence, securityEvidence } from "../services/evidence.ts";
+import { findSnapshot } from "../services/plans.ts";
+import { getTracking, proposeStopTracking, proposeTracking } from "../services/trackings.ts";
 
 export interface PageRef {
   strategyId?: string;
@@ -52,8 +46,8 @@ const json = (value: unknown) => ({
   type: "json" as const,
   value: JSON.parse(JSON.stringify(value ?? null)),
 });
-const r2 = (x: number | null | undefined, d = 4) =>
-  x === null || x === undefined || !Number.isFinite(x) ? null : Math.round(x * 10 ** d) / 10 ** d;
+// 回测摘要与计划摘要在 @ivan/ai（worker 的场景测试也用）；这里再导出，老的引用不用改
+export { runForModel };
 
 function resolveVersionId(ctx: AgentContext, versionId?: string, strategyId?: string): string {
   if (versionId) return versionId;
@@ -76,62 +70,126 @@ async function waitRun(userId: string, runId: string, timeoutMs: number) {
   }
 }
 
-/** 给模型看的回测摘要（数字全部来自存档结果） */
-export function runForModel(r: ReturnType<typeof getRun>) {
-  const m = r.metrics as Metrics | null;
-  if (r.status !== "done" || !m) {
-    return {
-      runId: r.id,
-      status: r.status,
-      error: r.error,
-      // 夜间更新写库期间回测暂停（D60）：告诉模型在等什么，别让它说「卡住了」
-      ...(r.status === "queued" && r.computePaused ? { note: COMPUTE_PAUSED_TEXT } : {}),
-    };
+/** 对话里的成交假设覆盖项 → 回测参数的 exec 覆盖项（冲击成本只有开关，开 = 平方根、系数 0.5） */
+export function execOverrides(
+  e:
+    | {
+        slippageBps?: number;
+        tickSpread?: boolean;
+        impact?: boolean;
+        participation?: number | null;
+      }
+    | undefined,
+): Record<string, unknown> | undefined {
+  if (!e) return undefined;
+  const out: Record<string, unknown> = {};
+  if (e.slippageBps !== undefined) out.slippageBps = e.slippageBps;
+  if (e.tickSpread !== undefined) out.tickSpread = e.tickSpread;
+  if (e.participation !== undefined) out.participation = e.participation;
+  if (e.impact !== undefined) {
+    out.impact = e.impact ? "sqrt" : "none";
+    out.impactEta = e.impact ? 0.5 : 0;
   }
+  return out;
+}
+
+/** 跟踪摘要里按绝对净值的扇形分位（D65）；基准回测没有扇形时都是 null */
+function navFanOf(summary: unknown): { percentile: number | null; band: string | null } {
+  const s = (summary ?? {}) as { navFanPercentile?: number | null; navFanBand?: string | null };
+  return { percentile: s.navFanPercentile ?? null, band: s.navFanBand ?? null };
+}
+
+/** 证据给模型的分组顺序：估值、质量、价格、财报、数据状态 */
+const EVIDENCE_GROUP_ORDER = ["valuation", "quality", "price", "financial", "status"] as const;
+
+/** 给模型看的个股证据摘要：最多 12 项、数值四舍五入（卡片已展示全部条目与出处） */
+export function evidenceForModel(e: SecurityEvidence) {
+  const d = e.dossier;
+  const items = d.items
+    .filter((i) => i.value !== null && i.key !== "adj")
+    .map((i, n) => ({ i, n, g: EVIDENCE_GROUP_ORDER.indexOf(i.group) }))
+    .sort((a, b) => a.g - b.g || a.n - b.n)
+    .slice(0, 12)
+    .map(({ i }) => ({
+      label: i.label,
+      value: typeof i.value === "number" ? r2(i.value, 2) : i.value,
+      unit: i.unit ?? null,
+      availDate: i.availDate,
+      ...(i.note ? { note: i.note } : {}),
+    }));
+  const p = e.planRecord;
   return {
-    runId: r.id,
-    status: r.status,
-    period: `${m.start} ~ ${m.end}`,
-    dataAsOf: r.dataAsOf,
-    totalReturn: r2(m.totalReturn),
-    cagr: r2(m.cagr),
-    benchCagr: r2(m.benchCagr),
-    excessCagr: r2(m.excessCagr),
-    excessTotal: r2(m.excessTotal),
-    maxDrawdown: r2(m.maxDrawdown),
-    drawdown: m.drawdownPeak
-      ? `${m.drawdownPeak} → ${m.drawdownTrough}${m.drawdownRecovery ? `，${m.drawdownRecovery} 修复` : "，尚未修复"}`
-      : null,
-    sharpe: r2(m.sharpe, 2),
-    volatility: r2(m.volatility),
-    winRate: r2(m.winRate),
-    avgHoldDays: r2(m.avgHoldDays, 0),
-    turnover: r2(m.turnover, 2),
-    costDragPerYear: r2(m.costDrag),
-    buys: m.buys,
-    yearly: m.yearly.map((y) => ({ year: y.year, ret: r2(y.ret), bench: r2(y.bench) })),
-    inSample: r.segments?.inSample
+    // 那晚第 1 版计划里的记录（D68）先给：当晚用户看到的、存的是当时的因子值；下面的证据是补充
+    planRecord: p
       ? {
-          period: `${r.segments.inSample.start} ~ ${r.segments.inSample.end}`,
-          excessCagr: r2(r.segments.inSample.excessCagr),
+          snapshotId: p.snapshotId,
+          decisionDate: p.decisionDate,
+          planDate: p.planDate,
+          dataAsOf: p.dataAsOf,
+          edition: p.edition,
+          inPlan: p.inPlan,
+          side: p.side,
+          reasonDetail: p.reasonDetail,
+          reasonText: p.reasonText,
+          rank: p.rank,
+          score: r2(p.score, 2),
+          termPct: p.termPct
+            ? Object.fromEntries(Object.entries(p.termPct).map(([k, v]) => [k, r2(v * 100, 0)]))
+            : null,
+          failedConditions: p.failedConditions ?? [],
+          factors: p.factors
+            ? Object.fromEntries(
+                Object.entries(p.factors).map(([k, v]) => [
+                  k,
+                  typeof v === "number" ? r2(v, 2) : v,
+                ]),
+              )
+            : null,
+          estWeight: r2(p.estWeight, 2),
         }
       : null,
-    outOfSample: r.segments?.outOfSample
+    code: d.code,
+    name: d.name,
+    decisionDate: e.decision.decisionDate,
+    tradeDate: e.decision.tradeDate,
+    dataDate: d.dataDate,
+    dataVersion: d.dataVersion.id,
+    items,
+    strategy: e.strategy
       ? {
-          period: `${r.segments.outOfSample.start} ~ ${r.segments.outOfSample.end}`,
-          excessCagr: r2(r.segments.outOfSample.excessCagr),
+          name: e.strategy.name,
+          passed: e.strategy.passed,
+          rank: e.strategy.rank,
+          score: r2(e.strategy.score, 2),
+          band: e.strategy.band,
+          failed: e.strategy.failed,
         }
       : null,
-    checks: r.checks.map((c) => ({ level: c.level, title: c.title, detail: c.detail })),
-    // 复现信息（D57）：口径不同的回测先说口径
-    card: {
-      hash: r.cardHash ? r.cardHash.slice(0, 8) : null,
-      engine: r.engineVersion,
-      dataAsOf: r.dataAsOf,
-      exec: r.exec ? describeExec(r.exec) : null,
-    },
-    note: "百分比字段都是小数（0.123 = 12.3%）。卡片已展示完整报告。",
+    caveats: e.caveats.map((c) => c.title),
+    note:
+      (p
+        ? "planRecord 是那晚计划快照第 1 版里的记录（termPct 是分位 0–100），先说它；下面的证据是补充。"
+        : "") + "只用决策日当时可得的数据；卡片已展示全部条目与出处。不是投资建议。",
   };
+}
+
+/** 名称或代码 → 唯一的证券代码；对不上或有多只时把候选写进错误，让模型问清楚 */
+async function resolveSecurity(query: string): Promise<string> {
+  const q = query.trim();
+  const hits = await worker.get<Array<{ code: string; name: string }>>(
+    `/internal/securities/search?q=${encodeURIComponent(q)}`,
+  );
+  const exact = hits.filter(
+    (h) => h.code === q.toUpperCase() || h.code.split(".")[0] === q || h.name === q,
+  );
+  if (exact.length === 1) return exact[0]!.code;
+  if (hits.length === 1) return hits[0]!.code;
+  if (!hits.length) throw new Error(`没找到「${q}」这只股票`);
+  const list = (exact.length > 1 ? exact : hits)
+    .slice(0, 8)
+    .map((h) => `${h.name}（${h.code}）`)
+    .join("、");
+  throw new Error(`「${q}」对应多只股票：${list}。请用具体代码再查`);
 }
 
 const PatchOp = z.object({
@@ -249,10 +307,26 @@ export function buildTools(ctx: AgentContext): ToolSet {
         end: z.string().optional().describe("YYYY-MM-DD"),
         capital: z.number().optional(),
         oosMonths: z.number().int().optional().describe("样本外月数，0 = 不分"),
+        exec: z
+          .object({
+            slippageBps: z.number().optional().describe("单边滑点（bp，0–200）"),
+            tickSpread: z.boolean().optional().describe("是否再加半个最小价位"),
+            impact: z.boolean().optional().describe("是否计冲击成本（平方根，系数 0.5）"),
+            participation: z
+              .number()
+              .nullable()
+              .optional()
+              .describe("单笔不超过日均成交额的比例（0.01–1），null = 不限"),
+          })
+          .optional()
+          .describe("成交假设的覆盖项；不写 = 当前市场的默认成交假设"),
       }),
       execute: async function* (input) {
         const versionId = resolveVersionId(ctx, input.versionId, input.strategyId);
-        const { runId } = enqueueBacktest(userId, versionId, input);
+        const { runId } = enqueueBacktest(userId, versionId, {
+          ...input,
+          exec: execOverrides(input.exec),
+        });
         yield { runId, status: "queued" as const };
         const r = await waitRun(userId, runId, 120_000);
         yield { runId, status: r.status };
@@ -299,7 +373,8 @@ export function buildTools(ctx: AgentContext): ToolSet {
     query_run: tool({
       description:
         "下钻一次回测：drawdowns 最大几次回撤；period 某区间（from/to）的表现与盈亏最多的股票；holdings_on 某天（date）的持仓；" +
-        "trades 交易明细（可按 code、from、to 过滤）；contributors 贡献最多/最少的股票；industry 行业盈亏与仓位；monthly 月度与年度收益。",
+        "trades 交易明细（可按 code、from、to 过滤）；contributors 贡献最多/最少的股票；industry 行业盈亏与仓位；monthly 月度与年度收益；" +
+        "execution 成交与容量（成交假设、拒单统计、买入参与率、容量估计、滑点与费用）。",
       inputSchema: z.object({
         runId: z.string().optional(),
         what: z.enum([
@@ -310,6 +385,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
           "contributors",
           "industry",
           "monthly",
+          "execution",
         ]),
         from: z.string().optional(),
         to: z.string().optional(),
@@ -332,15 +408,23 @@ export function buildTools(ctx: AgentContext): ToolSet {
     }),
 
     compare_runs: tool({
-      description: "对比 2–4 个回测的关键指标与净值曲线。",
+      description:
+        "对比 2–4 个回测的关键指标与净值曲线。comparable 为 false 时成交假设或指标口径不同，数字不能直接比。",
       inputSchema: z.object({ runIds: z.array(z.string()).min(2).max(4) }),
       execute: async ({ runIds }) => ({ runIds }),
-      toModelOutput: ({ output }) =>
-        json(
-          compareRuns(userId, output.runIds).map((r) => ({
+      toModelOutput: ({ output }) => {
+        const { runs, comparable } = compareRuns(userId, output.runIds);
+        return json({
+          comparable,
+          ...(comparable
+            ? {}
+            : { note: "这几次回测的成交假设或指标口径不同，先说明口径差别，不直接比数字" }),
+          runs: runs.map((r) => ({
             runId: r.id,
             versionN: r.versionN,
             period: `${r.params.start} ~ ${r.params.end}`,
+            execText: r.execText,
+            metricsVersion: r.metricsVersion,
             cagr: r2(r.headline?.cagr),
             excessCagr: r2(r.headline?.excessCagr),
             maxDrawdown: r2(r.headline?.maxDrawdown),
@@ -351,7 +435,8 @@ export function buildTools(ctx: AgentContext): ToolSet {
             ),
             warnings: r.checks.filter((c) => c.level === "warn").map((c) => c.title),
           })),
-        ),
+        });
+      },
     }),
 
     run_sensitivity: tool({
@@ -408,6 +493,9 @@ export function buildTools(ctx: AgentContext): ToolSet {
             score: number;
             factors: Record<string, unknown>;
           }>;
+          /** 今日选股可追溯（D67）：数据版本与名单指纹，卡片底部显示 */
+          dataVersion: { id: number | null; asOf: string | null };
+          listHash: string;
         }>("/internal/screen", { spec: version.spec, date: input.date, limit: input.limit ?? 20 });
         return { versionId, market: version.spec.market, ...res };
       },
@@ -466,6 +554,27 @@ export function buildTools(ctx: AgentContext): ToolSet {
       },
     }),
 
+    get_security_evidence: tool({
+      description:
+        "查看个股在某个决策日的证据（只用当时可得的数据，带出处）；给成交日时按前一个交易日取数；带上回测或策略时说明它在策略里排第几、没满足哪条",
+      inputSchema: z.object({
+        query: z.string().describe("名称或代码，如 贵州茅台、600519、00700"),
+        decisionDate: z.string().optional().describe("决策日 YYYY-MM-DD（收盘后决策的那天）"),
+        tradeDate: z
+          .string()
+          .optional()
+          .describe("成交日 YYYY-MM-DD（成交记录上的日期）；给了就按它的前一个交易日取数"),
+        runId: z.string().optional().describe("回测 id：按这次回测的策略内容解释名次"),
+        versionId: z.string().optional().describe("策略版本 id"),
+        trackingId: z.string().optional().describe("跟踪 id：按跟踪的策略版本解释"),
+      }),
+      execute: async (input) => {
+        const code = await resolveSecurity(input.query);
+        return securityEvidence(userId, code, input);
+      },
+      toModelOutput: ({ output }) => json(evidenceForModel(output)),
+    }),
+
     propose_tracking: tool({
       description:
         "提议把一个策略版本上线向前跟踪（模拟盘，每个交易日收盘后结算）。只生成待确认卡片，用户确认后才上线。",
@@ -488,7 +597,8 @@ export function buildTools(ctx: AgentContext): ToolSet {
 
     get_tracking: tool({
       description:
-        "读取一个向前跟踪的现状（默认当前页面的跟踪）：跟踪天数、累计超额、跑赢回测同期的百分比（deviationPct）、明日计划。",
+        "读取一个向前跟踪的现状（默认当前页面的跟踪）：跟踪天数、累计超额、跑赢回测同期的百分比（deviationPct，按超额）、" +
+        "按绝对净值在回测重抽样区间里的分位（navFanPercentile，不扣基准，市场整体涨跌会影响它）、明日计划。",
       inputSchema: z.object({ trackingId: z.string().optional() }),
       execute: async ({ trackingId }) => {
         const id = trackingId ?? ctx.page.trackingId;
@@ -504,6 +614,9 @@ export function buildTools(ctx: AgentContext): ToolSet {
           benchReturn: t.bench !== null ? r2(t.bench - 1) : null,
           excess: r2(t.excess),
           deviationPct: r2(t.deviationPct, 0),
+          // 按绝对净值（不扣基准）在基准回测重抽样扇形里的分位（D65）；和按超额算的 deviationPct 是两回事
+          navFanPercentile: r2(navFanOf(t.summary).percentile, 0),
+          navFanBand: navFanOf(t.summary).band,
           orders: t.orders.map((o) => ({
             side: o.side,
             code: o.code,
@@ -518,7 +631,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
     get_overview: tool({
       description:
         "看板概览：用户所有运行中的跟踪（跟踪天数、跟踪超额、跑赢回测同期的百分比）、明日计划买卖、最新简报、数据截至日期。" +
-        "用户问「今天怎么样」「我的跟踪」「明天买卖什么」这类问题时先调它；卡片会列出每个跟踪。",
+        "用户问「今天怎么样」「我的跟踪」这类问题时先调它；卡片会列出每个跟踪。某个跟踪明天具体买卖什么、为什么，用 get_plan。",
       inputSchema: z.object({}),
       execute: async () => overview(userId),
       toModelOutput: ({ output }) =>
@@ -570,6 +683,8 @@ export function buildTools(ctx: AgentContext): ToolSet {
             close: number | null;
             factors: Record<string, unknown>;
           }>;
+          dataVersion: { id: number | null; asOf: string | null };
+          listHash: string;
         }>("/internal/screen", { spec: v.spec, date, limit: n });
         const describe = describeSpec(v.spec).filter((l) => !/^(调仓|仓位|退出|基准)/.test(l));
         return { ok: true as const, market: v.spec.market, describe, ...res };
@@ -597,23 +712,57 @@ export function buildTools(ctx: AgentContext): ToolSet {
 
     propose_stop_tracking: tool({
       description:
-        "提议停止一个运行中的向前跟踪（默认当前页面的跟踪）。只生成一张确认卡片，用户点「确认停止」后才停；停止后不再每日结算，历史保留。",
-      inputSchema: z.object({ trackingId: z.string().optional() }),
-      execute: async ({ trackingId }) => {
+        "提议停止一个运行中的向前跟踪（默认当前页面的跟踪），可带用户说的原因。只生成一张确认卡片，用户点「确认停止」后才停；停止后不再每日结算，历史保留。",
+      inputSchema: z.object({
+        trackingId: z.string().optional(),
+        reason: z.string().max(200).optional().describe("用户说的停止原因（选填，原话即可）"),
+      }),
+      execute: async ({ trackingId, reason }) => {
+        const id = trackingId ?? ctx.page.trackingId;
+        if (!id) throw new Error("没有指定跟踪：先调 get_overview 找到 trackingId");
+        return proposeStopTracking(userId, { trackingId: id, reason, threadId: ctx.threadId });
+      },
+      toModelOutput: ({ output }) =>
+        json({
+          draftId: output.draftId,
+          trackingId: output.trackingId,
+          strategyName: output.strategyName,
+          days: output.days,
+          excess: r2(output.excess),
+          reason: output.reason,
+          note: "等待用户在卡片上确认后才会停止。",
+        }),
+    }),
+
+    get_plan: tool({
+      description:
+        "查看某个跟踪的明日计划与依据（默认当前页面的跟踪、最近一晚）：每只买卖的原因（掉出前 N 名、不再满足哪条、止盈止损…）、" +
+        "名次、得分、估算仓位、关键因子；给 date 时查那晚的计划（决策日或成交日都行），edition = 1 是当晚看到的第 1 版。只读。",
+      inputSchema: z.object({
+        trackingId: z.string().optional(),
+        date: z.string().optional().describe("YYYY-MM-DD：决策日或计划日（成交日）"),
+        edition: z.number().int().min(1).optional().describe("版次；不给 = 最新一版"),
+      }),
+      execute: async ({ trackingId, date, edition }) => {
         const id = trackingId ?? ctx.page.trackingId;
         if (!id) throw new Error("没有指定跟踪：先调 get_overview 找到 trackingId");
         const t = getTracking(userId, id);
-        if (t.status !== "active") throw new Error("这个跟踪已经停了");
-        return {
-          trackingId: t.id,
-          strategyName: t.strategyName,
-          startDate: t.startDate,
-          days: t.days.length,
-          excess: t.excess,
-        };
+        const plan = findSnapshot(userId, id, { date, edition });
+        if (!plan) {
+          throw new Error(
+            date
+              ? `这个跟踪在 ${date} 前后没有计划快照`
+              : "这个跟踪还没有计划快照（第一次结算之后才有）",
+          );
+        }
+        return { trackingId: t.id, strategyName: t.strategyName, market: t.market, plan };
       },
       toModelOutput: ({ output }) =>
-        json({ ...output, excess: r2(output.excess), note: "等待用户在卡片上确认后才会停止。" }),
+        json({
+          trackingId: output.trackingId,
+          strategyName: output.strategyName,
+          ...planForModel(output.plan, output.plan.items),
+        }),
     }),
   };
 }

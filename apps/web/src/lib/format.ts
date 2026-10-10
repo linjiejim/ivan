@@ -63,9 +63,41 @@ export const MARKET_TEXT: Record<string, string> = { A: "A 股", HK: "港股" };
 export const DEVIATION_INFO =
   "「跑赢回测同期 X%」：把跟踪以来的超额收益，放进回测里所有同样长度的时段里比，X% 是跟踪跑赢了其中多少。50% 左右是正常表现；低于 10% 值得留意，可能是策略在失效，也可能只是运气不好。";
 
+/**
+ * 跟踪净值在基准回测重抽样扇形里的位置（D65）：按绝对净值、不扣基准，和按超额算的「跑赢回测同期」不是一回事，
+ * 只放进那个指标的 ⓘ 里。没有扇形时为 null。
+ */
+export function navFanText(
+  p: number | null | undefined,
+  band: string | null | undefined,
+): string | null {
+  if (p === null || p === undefined) return null;
+  const where =
+    band === "<5"
+      ? "低于回测重抽样区间的第 5 百分位"
+      : band === ">95"
+        ? "高于回测重抽样区间的第 95 百分位"
+        : `处于回测重抽样区间第 ${p.toFixed(0)} 百分位`;
+  return `按绝对净值：${where}（不扣基准，市场整体涨跌会影响它）`;
+}
+
 /** 偏离百分位 → 一句人话；天数太少或没有回测时说明原因 */
 export function deviationText(p: number | null, days: number): string {
   if (p !== null) return `跑赢回测同期 ${p.toFixed(0)}%`;
   if (days < 5) return "天数太少，还不好和回测比";
   return "没有可对照的回测";
+}
+
+// ── 计划快照（D68）：原因文字表在 @ivan/core，给模型看的摘要用同一张 ──
+
+export { formatPlanReason, PLAN_CAUSE_TEXT, REASON_DETAIL_TEXT, REASON_TEXT } from "@ivan/core";
+
+/** 计划日旁注：按交易所休市安排推算，或表里没有那一年时按工作日推算 */
+export function planDateNote(basis: string | null | undefined): string {
+  return basis === "holiday_table" ? "（按交易所休市安排推算）" : "（按工作日推算，遇节假日顺延）";
+}
+
+/** 分位（0–1）→「83 分位」 */
+export function pctile(p: number | null | undefined): string {
+  return p === null || p === undefined || !Number.isFinite(p) ? NA : `${Math.round(p * 100)} 分位`;
 }

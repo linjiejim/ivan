@@ -341,6 +341,9 @@ importers:
       '@ai-sdk/openai-compatible':
         specifier: 'catalog:'
         version: 3.0.57(zod@4.6.5)
+      '@ivan/core':
+        specifier: workspace:*
+        version: link:../core
       ai:
         specifier: 'catalog:'
         version: 7.0.118(zod@4.6.5)

@@ -1,5 +1,6 @@
 /**
- * 回测与参数扫描任务：组装输入（DuckDB）→ 算输入指纹 → 线程里模拟 → 结果与运行卡写应用库（D57）。
+ * 回测与参数扫描任务：组装输入（DuckDB）→ 算输入指纹 → 线程里模拟（指标第 2 版再算可信度，D65）→
+ * 结果与运行卡写应用库（D57）。可信度的种子来自输入指纹：同样的输入第二天重跑也是同样的区间，完整重跑能逐笔一致。
  * 完整重跑（kind = reproduce）也走这里，跑完和原运行比结果指纹，写回原运行的 verify。
  */
 import {
@@ -39,6 +40,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { env } from "../env.ts";
 import type { JobContext } from "../runner.ts";
 import { runSimulation } from "../sim-pool.ts";
+import { validationSeed } from "../sim-tasks.ts";
 
 type RunRow = typeof runs.$inferSelect;
 
@@ -136,6 +138,9 @@ export function storedResultHashes(runId: string): { coreHash: string; reportHas
       reason: t.reason,
       pnl: t.pnl ?? undefined,
       holdDays: t.holdDays ?? undefined,
+      ref: t.ref ?? undefined,
+      slip: t.slip ?? undefined,
+      part: t.part ?? undefined,
     }));
   return {
     coreHash: sha256Canonical({
@@ -173,8 +178,13 @@ async function execute(
   // 指纹必须在转交线程之前算（转交后 TypedArray 失效）
   const hashes = hashSimInput(built.input);
   const caveatsHash = sha256Canonical(built.input.dataCaveats ?? []);
+  // 可信度只对指标第 2 版做（旧口径要和当初逐字节一致）；种子来自输入指纹，不来自每晚都涨的数据版本号
+  const seed = exec.metrics === 2 ? validationSeed(hashes.inputHash) : null;
   ctx.progress(base + 0.5 * weight, `模拟 ${built.stats.codes} 只股票`);
-  const result = await runSimulation(built.input);
+  const { result, validation } = await runSimulation(
+    built.input,
+    seed === null ? {} : { tasks: ["validation"], seed },
+  );
   if (canonicalJson(result.exec) !== canonicalJson(exec)) throw new Error("成交假设没有传到引擎");
   ctx.progress(base + 0.9 * weight, "写入结果");
   const card = buildRunCard(
@@ -191,7 +201,11 @@ async function execute(
         oosMonths: p.oosMonths,
       },
       exec: result.exec,
-      engine: { version: result.engineVersion, rulesVersion: 1, metricsVersion: 1 },
+      engine: {
+        version: result.engineVersion,
+        rulesVersion: result.exec.rules,
+        metricsVersion: result.exec.metrics,
+      },
       data: {
         market: spec.market,
         versionId: built.dataVersion.id,
@@ -205,14 +219,15 @@ async function execute(
         benchHash: hashes.benchHash,
         caveatsHash,
       },
-      seeds: { validation: null },
-      outputs: resultHashes(result, sha256Canonical),
+      seeds: { validation: seed },
+      outputs: resultHashes({ ...result, validation }, sha256Canonical),
     },
     sha256Canonical,
   );
   const insert = app.sqlite.prepare(
-    `INSERT INTO run_trades (run_id, seq, date, code, side, price, shares, amount, fee, reason, pnl, hold_days)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO run_trades (run_id, seq, date, code, side, price, shares, amount, fee, reason, pnl, hold_days,
+                             ref, slip, part)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   app.sqlite.transaction(() => {
     app.db.delete(runTrades).where(eq(runTrades.runId, run.id)).run();
@@ -230,6 +245,9 @@ async function execute(
         t.reason,
         t.pnl ?? null,
         t.holdDays ?? null,
+        t.ref ?? null,
+        t.slip ?? null,
+        t.part ?? null,
       ),
     );
     app.db
@@ -246,6 +264,9 @@ async function execute(
         checks: result.checks,
         attribution: result.attribution as unknown as Record<string, unknown>,
         final: result.final as unknown as Record<string, unknown>,
+        diagnostics: (result.diagnostics ?? null) as unknown as Record<string, unknown> | null,
+        validation: (validation?.confidence ?? null) as unknown as Record<string, unknown> | null,
+        validationZ: validation?.fan ? packJson(validation.fan) : null,
         seriesZ: packJson(result.series),
         holdingsZ: packJson(result.holdings),
         card: card as unknown as Record<string, unknown>,
@@ -284,13 +305,14 @@ function recordReproduction(repro: RunRow, card: RunCard, built: BuiltInput): vo
         {
           engineVersion: orig.engineVersion,
           hashVersion: origCard?.data.hashVersion ?? null,
-          execHash: origCard ? sha256Canonical(origCard.exec) : null,
+          // 按补齐后的成交假设比：S04 之前的运行卡记的是 {v:1}，与现在的旧口径同义
+          execHash: origCard ? execHashOf(origCard.exec) : null,
           data: origCard ? [origCard.data.inputHash] : null,
         },
         {
           engineVersion: card.engine.version,
           hashVersion: card.data.hashVersion,
-          execHash: sha256Canonical(card.exec),
+          execHash: execHashOf(card.exec),
           data: [card.data.inputHash],
         },
       );
@@ -312,6 +334,15 @@ function recordReproduction(repro: RunRow, card: RunCard, built: BuiltInput): vo
   // 原运行与重跑各记一份：原运行的 verify 之后可能被新的复核覆盖，重跑页仍要能说清这次比的结果
   for (const id of [orig.id, repro.id]) {
     db.update(runs).set({ verify }).where(eq(runs.id, id)).run();
+  }
+}
+
+/** 成交假设指纹（补齐缺省字段后算；读不懂时退回原样，让比较如实报「成交假设不同」） */
+function execHashOf(e: unknown): string {
+  try {
+    return sha256Canonical(resolveExec(e));
+  } catch {
+    return sha256Canonical(e ?? null);
   }
 }
 
@@ -363,7 +394,12 @@ export const FRAGILITY_JUMP = 0.05;
 export async function sweepJob(ctx: JobContext): Promise<Record<string, unknown>> {
   const { db } = env().app;
   const parentId = String(ctx.job.payload.runId);
-  const variants = ctx.job.payload.variants as Array<{ label: string; spec: StrategySpec }>;
+  // priorVersions：服务端排队时按每个取值的策略内容算好的试错次数（D66）；更早排的任务没有，沿用父记录的
+  const variants = ctx.job.payload.variants as Array<{
+    label: string;
+    spec: StrategySpec;
+    priorVersions?: number;
+  }>;
   const parent = db.select().from(runs).where(eq(runs.id, parentId)).get();
   if (!parent) throw new Error(`扫描 ${parentId} 不存在`);
   db.update(runs)
@@ -389,7 +425,11 @@ export async function sweepJob(ctx: JobContext): Promise<Record<string, unknown>
           kind: "sweep_child",
           parentId,
           label: v.label,
-          params: { ...(parent.params as object), specOverride: v.spec } as Record<string, unknown>,
+          params: {
+            ...(parent.params as object),
+            specOverride: v.spec,
+            ...(v.priorVersions !== undefined ? { priorVersions: v.priorVersions } : {}),
+          } as Record<string, unknown>,
         })
         .run();
       const child = db.select().from(runs).where(eq(runs.id, childId)).get()!;

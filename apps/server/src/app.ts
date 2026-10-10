@@ -25,6 +25,8 @@ import { AppError, forbidden } from "./lib/errors.ts";
 import { QUOTA_KINDS, type QuotaKind, quotaOf, usageToday } from "./lib/quota.ts";
 import { worker } from "./lib/worker-client.ts";
 import { dashboard, dataStatus } from "./services/dashboard.ts";
+import { getSnapshot, listSnapshots, planOutcomes } from "./services/plans.ts";
+import { securityEvidence } from "./services/evidence.ts";
 import {
   compareRuns,
   enqueueBacktest,
@@ -294,6 +296,21 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       ),
     ),
   );
+  /**
+   * 个股证据（D67）：决策日当时可得的数据，带出处与校验值；给成交日时按前一个交易日取数；
+   * 带回测 / 策略版本 / 跟踪时解释它在策略里的名次。计入数据查询额度（D59）。
+   */
+  app.get("/api/securities/:code/evidence", async (c) =>
+    c.json(
+      await securityEvidence(user(c).id, c.req.param("code"), {
+        decisionDate: c.req.query("decisionDate") || undefined,
+        tradeDate: c.req.query("tradeDate") || undefined,
+        runId: c.req.query("runId") || undefined,
+        versionId: c.req.query("versionId") || undefined,
+        trackingId: c.req.query("trackingId") || undefined,
+      }),
+    ),
+  );
   app.get("/api/securities/:code", async (c) =>
     c.json(await worker.get(`/internal/securities/${encodeURIComponent(c.req.param("code"))}`)),
   );
@@ -306,10 +323,25 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   app.get("/api/trackings", (c) => c.json(listTrackings(user(c).id)));
   app.get("/api/trackings/:id", (c) => c.json(getTracking(user(c).id, c.req.param("id"))));
   app.get("/api/trackings/:id/chart", (c) => c.json(trackingChart(user(c).id, c.req.param("id"))));
-  app.post("/api/trackings/:id/stop", (c) => {
-    stopTracking(user(c).id, c.req.param("id"));
+  app.post("/api/trackings/:id/stop", async (c) => {
+    // 停止原因选填：没有请求体也行（旧前端）
+    const b = ((await c.req.json().catch(() => null)) ?? {}) as { reason?: unknown };
+    stopTracking(user(c).id, c.req.param("id"), typeof b.reason === "string" ? b.reason : null);
     return c.json({ ok: true });
   });
+  // ── 计划快照（D68）：每晚的明日计划与依据，只读；计划结果回看（D79）只用提交过的数据 ──
+  app.get("/api/trackings/:id/plans", (c) =>
+    c.json(
+      listSnapshots(user(c).id, c.req.param("id"), {
+        from: c.req.query("from") || undefined,
+        to: c.req.query("to") || undefined,
+      }),
+    ),
+  );
+  app.get("/api/plans/:id", (c) => c.json(getSnapshot(user(c).id, c.req.param("id"))));
+  app.get("/api/plans/:id/outcomes", async (c) =>
+    c.json(await planOutcomes(user(c).id, c.req.param("id"))),
+  );
 
   // ── 看板 ──
   app.get("/api/dashboard", async (c) => c.json(await dashboard(user(c).id)));

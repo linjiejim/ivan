@@ -7,3 +7,5 @@ export * from "./backtest.ts";
 export * from "./exec.ts";
 export * from "./runcard.ts";
 export * from "./presets.ts";
+export * from "./holidays.ts";
+export * from "./plan.ts";

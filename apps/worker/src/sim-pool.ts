@@ -4,10 +4,13 @@
  * 加固（spec §1）：线程崩溃（error / 非零 exit）时拒绝当前调用并重建线程；单次调用超过 timeoutMs 终止并重建；
  * 线程堆上限 resourceLimits.maxOldGenerationSizeMb。结算在串行的 etl 道里调它，一次崩溃或卡死不能堵住后面的任务。
  * 线程工厂可注入，测试用假线程。
+ *
+ * 消息：{id, input, tasks?, seed?} → {id, result, validation?} 或 {id, error}。tasks 含 validation 时线程在模拟后
+ * 算可信度（D65）；主线程退路走同一个 runSimTasks。
  */
 import { Worker } from "node:worker_threads";
-import type { SimInput, SimResult } from "@ivan/core";
-import { simulate } from "@ivan/engine";
+import type { SimInput, SimResult, ValidationResult } from "@ivan/core";
+import { runSimTasks, type SimOutput, type SimTaskOptions } from "./sim-tasks.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Listener = (...a: any[]) => void;
@@ -113,7 +116,9 @@ async function acquire(): Promise<Slot | null> {
 function transferables(input: SimInput): ArrayBuffer[] {
   const out = new Set<ArrayBuffer>();
   for (const p of input.prices.values()) {
-    for (const a of [p.open, p.high, p.low, p.close, p.adj, p.st]) out.add(a.buffer as ArrayBuffer);
+    for (const a of [p.open, p.high, p.low, p.close, p.adj, p.st, p.adv, p.sigma]) {
+      if (a) out.add(a.buffer as ArrayBuffer);
+    }
   }
   out.add(input.bench.buffer as ArrayBuffer);
   return [...out];
@@ -144,15 +149,18 @@ function timeoutText(ms: number): string {
   return ms < 1000 ? `${ms} 毫秒` : `${Math.round(ms / 1000)} 秒`;
 }
 
-export async function runSimulation(input: SimInput): Promise<SimResult> {
+export async function runSimulation(
+  input: SimInput,
+  opts: SimTaskOptions = {},
+): Promise<SimOutput> {
   const slot = await acquire();
-  if (!slot) return simulate(input);
+  if (!slot) return runSimTasks(input, opts);
   const id = ++seq;
   const thread = slot.thread;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const listeners: Array<[string, Listener]> = [];
   try {
-    return await new Promise<SimResult>((resolve, reject) => {
+    return await new Promise<SimOutput>((resolve, reject) => {
       let settled = false;
       const listen = (ev: "message" | "error" | "exit", fn: Listener) => {
         thread.on(ev, fn);
@@ -165,12 +173,25 @@ export async function runSimulation(input: SimInput): Promise<SimResult> {
         respawn(slot);
         reject(new Error(msg));
       };
-      listen("message", (msg: { id: number; result?: SimResult; error?: string }) => {
-        if (settled || msg?.id !== id) return;
-        settled = true;
-        if (msg.error) reject(new Error(msg.error));
-        else resolve(msg.result!);
-      });
+      listen(
+        "message",
+        (msg: {
+          id: number;
+          result?: SimResult;
+          validation?: ValidationResult;
+          error?: string;
+        }) => {
+          if (settled || msg?.id !== id) return;
+          settled = true;
+          if (msg.error) reject(new Error(msg.error));
+          else
+            resolve(
+              msg.validation
+                ? { result: msg.result!, validation: msg.validation }
+                : { result: msg.result! },
+            );
+        },
+      );
       listen("error", (e: unknown) => {
         fail(`回测线程异常退出：${e instanceof Error ? e.message : String(e)}`);
       });
@@ -180,7 +201,7 @@ export async function runSimulation(input: SimInput): Promise<SimResult> {
       timer = setTimeout(() => {
         fail(`回测线程 ${timeoutText(timeoutMs)}没有返回结果，已重启线程`);
       }, timeoutMs);
-      thread.postMessage({ id, input }, transferables(input));
+      thread.postMessage({ id, input, tasks: opts.tasks, seed: opts.seed }, transferables(input));
     });
   } finally {
     if (timer) clearTimeout(timer);

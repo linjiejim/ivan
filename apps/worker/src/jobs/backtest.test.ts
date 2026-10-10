@@ -1,16 +1,25 @@
 /**
  * 运行合约（D57）：回测写运行卡与输入指纹；复核数据只比输入；完整重跑比结果指纹并写回原运行。
  */
-import { LEGACY_EXEC, type RunCard, StrategySpecSchema } from "@ivan/core";
-import { specHashOf } from "@ivan/core/node";
+import {
+  type Confidence,
+  defaultExec,
+  type Fan,
+  LEGACY_EXEC,
+  type Metrics,
+  type RunCard,
+  StrategySpecSchema,
+} from "@ivan/core";
+import { sha256Canonical, specHashOf } from "@ivan/core/node";
 import { seedSyntheticMarket } from "@ivan/data/testing";
-import { type AppDbHandle, newId, runs, strategies, strategyVersions } from "@ivan/db";
-import { ENGINE_VERSION } from "@ivan/engine";
+import { HASH_VERSION } from "@ivan/data";
+import { type AppDbHandle, newId, runs, strategies, strategyVersions, unpackJson } from "@ivan/db";
+import { ENGINE_VERSION, VALIDATION_VERSION } from "@ivan/engine";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recoverStale } from "../runner.ts";
 import { fakeJobContext, makeTestEnv } from "../testing/harness.ts";
-import { backtestJob } from "./backtest.ts";
+import { backtestJob, sweepJob } from "./backtest.ts";
 import { verifyJob } from "./verify.ts";
 
 const spec = StrategySpecSchema.parse({
@@ -31,7 +40,12 @@ beforeEach(async () => {
       code,
       name: `股${k}`,
       close: (i: number) => 10 + k + Math.sin(i / 5 + k) * 2,
-      factors: (i: number) => ({ pe_ttm: 5 + ((i + k * 7) % 11) }),
+      // 股0、股2 是小盘：20 日均成交额只有 50 万（按流动性成交时单笔上限 5 万）
+      factors: (i: number) => ({
+        pe_ttm: 5 + ((i + k * 7) % 11),
+        turnover_20d: k % 2 === 0 ? 0.005 : 5 + k,
+        volatility_60d: 30,
+      }),
     })),
   }));
 });
@@ -130,7 +144,80 @@ describe("回测写运行卡（D57）", () => {
   it("存下的参数没有 exec（旧运行）时按旧口径跑", async () => {
     const { runId } = seedRun(t.env.app, { params: { exec: undefined } });
     await backtestJob(fakeJobContext("backtest", { runId }));
-    expect((runOf(runId).card as unknown as RunCard).exec).toEqual(LEGACY_EXEC);
+    const card = runOf(runId).card as unknown as RunCard;
+    expect(card.exec).toEqual(LEGACY_EXEC);
+    expect(card.engine).toMatchObject({ rulesVersion: 1, metricsVersion: 1 });
+    expect((runOf(runId).metrics as unknown as Metrics).metricsVersion).toBeUndefined();
+  });
+
+  it("新回测（defaultExec）的运行卡记规则表第 2 版、指标第 2 版与指纹口径 2（S04）", async () => {
+    const { runId } = seedRun(t.env.app, { params: { exec: defaultExec("A") } });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    const card = r.card as unknown as RunCard;
+    expect(card.exec).toEqual(defaultExec("A"));
+    expect(card.engine).toMatchObject({ rulesVersion: 2, metricsVersion: 2 });
+    expect(HASH_VERSION).toBe(2);
+    expect(card.data.hashVersion).toBe(2);
+    const m = r.metrics as unknown as Metrics;
+    expect(m.metricsVersion).toBe(2);
+    expect(m.risk).toBeDefined();
+    // 从投入第一笔资金算起
+    expect(m.totalReturn).toBe(m.finalEquity / 1_000_000 - 1);
+  });
+});
+
+describe("按流动性成交（D64）", () => {
+  it("默认成交假设：诊断存进 runs.diagnostics，成交记录带参考价、滑点与参与率，小盘股被截小", async () => {
+    const { runId } = seedRun(t.env.app, { params: { exec: defaultExec("A") } });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    expect(r.status).toBe("done");
+    const d = r.diagnostics as unknown as {
+      rejections: Record<string, { count: number; value: number }>;
+      participation: { p90: number } | null;
+      capacityEstimate: number | null;
+      cappedBuyShare: number;
+    };
+    expect(d.rejections["buy:capacity"]!.count).toBeGreaterThan(0);
+    expect(d.participation!.p90).toBeGreaterThan(0);
+    expect(d.capacityEstimate).toBeGreaterThan(0);
+    expect((r.metrics as unknown as Metrics).slippageCost).toBeGreaterThan(0);
+    const trades = t.env.app.sqlite
+      .prepare(
+        `SELECT code, price, ref, slip, part FROM run_trades WHERE run_id = ? AND side = 'buy'`,
+      )
+      .all(runId) as Array<{
+      code: string;
+      price: number;
+      ref: number;
+      slip: number;
+      part: number;
+    }>;
+    expect(trades.length).toBeGreaterThan(0);
+    for (const x of trades) {
+      expect(x.price).toBeGreaterThan(x.ref);
+      expect(x.slip).toBeGreaterThan(0);
+      expect(x.part).toBeGreaterThan(0);
+    }
+    // 小盘股每笔不超过 50 万 × 10%
+    const small = trades.filter((x) => x.code === "600001.SH" || x.code === "600003.SH");
+    expect(small.length).toBeGreaterThan(0);
+    for (const x of small) expect(x.part).toBeLessThanOrEqual(0.1 + 1e-9);
+    expect((r.checks as Array<{ id: string }>).some((c) => c.id === "capacity_limit")).toBe(true);
+  });
+
+  it("旧口径也存拒单统计；成交记录没有参考价与滑点", async () => {
+    const { runId } = seedRun(t.env.app);
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    const d = r.diagnostics as unknown as Record<string, unknown>;
+    expect(d).toHaveProperty("rejections");
+    expect(d).not.toHaveProperty("participation");
+    const row = t.env.app.sqlite
+      .prepare(`SELECT count(*) AS n FROM run_trades WHERE run_id = ? AND ref IS NOT NULL`)
+      .get(runId) as { n: number };
+    expect(row.n).toBe(0);
   });
 });
 
@@ -341,5 +428,105 @@ describe("完整重跑（kind = reproduce）", () => {
       hashVersionSame: false,
       cause: "none",
     });
+  });
+});
+
+describe("可信度（D65）", () => {
+  const v2 = { exec: defaultExec("A") };
+  const seedOf = (inputHash: string) =>
+    Number.parseInt(sha256Canonical({ inputHash, v: VALIDATION_VERSION }).slice(0, 8), 16);
+
+  it("第 2 版口径的新回测存区间与扇形；运行卡的种子来自输入指纹；结果指纹覆盖它", async () => {
+    const { runId } = seedRun(t.env.app, { params: v2 });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    const card = r.card as unknown as RunCard;
+    const v = r.validation as unknown as Confidence;
+    expect(card.seeds.validation).toBe(seedOf(r.inputHash!));
+    expect(v).toMatchObject({
+      method: "stationary_bootstrap",
+      version: 1,
+      B: 1000,
+      seed: card.seeds.validation,
+    });
+    // 周度以外默认按月调仓：平均段长 21 天
+    expect(v.blockMean).toBe(21);
+    expect(v.excessCagr.lo).toBeLessThanOrEqual(v.excessCagr.hi);
+    const fan = unpackJson<Fan>(r.validationZ)!;
+    expect(fan.days).toHaveLength(60);
+    for (let c = 0; c < 60; c++) expect(fan.p5[c]).toBeLessThanOrEqual(fan.p95[c]!);
+    // low_confidence 与点估计、区间一致
+    const checks = r.checks as Array<{ id: string }>;
+    expect(checks.some((c) => c.id === "low_confidence")).toBe(
+      v.excessCagr.est > 0 && v.excessCagr.lo <= 0,
+    );
+  });
+
+  it("又提交了一个没改任何数据的版本、第二天再跑同样的参数：种子与区间完全相同；完整重跑逐笔一致", async () => {
+    const { runId, strategyId, versionId } = seedRun(t.env.app, { params: v2 });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    await t.env.wh.run(
+      `INSERT INTO data_versions (id, market, as_of, kind, status)
+       VALUES (nextval('data_version_seq'), 'A', $d::DATE, 'daily', 'ok')`,
+      { d: calendar.at(-1)! },
+    );
+    const again = newId("r_");
+    t.env.app.db
+      .insert(runs)
+      .values({
+        id: again,
+        userId: "u_test",
+        strategyId,
+        versionId,
+        kind: "backtest",
+        params: runOf(runId).params,
+      })
+      .run();
+    await backtestJob(fakeJobContext("backtest", { runId: again }));
+    const [a, b] = [runOf(runId), runOf(again)];
+    expect(b.dataVersion).toBe(a.dataVersion! + 1);
+    expect(JSON.stringify(b.validation)).toBe(JSON.stringify(a.validation));
+    expect(b.validationZ!.equals(a.validationZ!)).toBe(true);
+    expect((b.card as unknown as RunCard).seeds).toEqual((a.card as unknown as RunCard).seeds);
+    expect((b.card as unknown as RunCard).outputs.coreHash).toBe(
+      (a.card as unknown as RunCard).outputs.coreHash,
+    );
+
+    const reproId = seedReproduce(runId);
+    await backtestJob(fakeJobContext("backtest", { runId: reproId }));
+    expect(JSON.stringify(runOf(reproId).validation)).toBe(JSON.stringify(a.validation));
+    expect(runOf(runId).verify).toMatchObject({ kind: "full", sameResult: true, reportSame: true });
+  });
+
+  it("旧口径的回测不算可信度，种子为空", async () => {
+    const { runId } = seedRun(t.env.app);
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    expect(r.validation).toBeNull();
+    expect(r.validationZ).toBeNull();
+    expect((r.card as unknown as RunCard).seeds.validation).toBeNull();
+    const checks = r.checks as Array<{ id: string }>;
+    expect(checks.some((c) => c.id === "low_confidence" || c.id === "optimistic_drawdown")).toBe(
+      false,
+    );
+  });
+
+  it("扫描的子回测也算可信度，试错次数按服务端给每个取值算好的存", async () => {
+    const { runId: parentId } = seedRun(t.env.app, { kind: "sweep", params: v2 });
+    const variants = [10, 20].map((top, i) => ({
+      label: `/rank/top = ${top}`,
+      spec: { ...spec, rank: { ...spec.rank!, top } },
+      priorVersions: i + 3,
+    }));
+    await sweepJob(fakeJobContext("sweep", { runId: parentId, variants }));
+    const children = t.env.app.db.select().from(runs).where(eq(runs.parentId, parentId)).all();
+    expect(children).toHaveLength(2);
+    for (const c of children) {
+      expect(c.status).toBe("done");
+      expect(c.validation).not.toBeNull();
+    }
+    expect(
+      children.map((c) => (c.params as { priorVersions: number }).priorVersions).sort(),
+    ).toEqual([3, 4]);
   });
 });

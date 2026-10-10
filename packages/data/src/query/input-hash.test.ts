@@ -2,7 +2,7 @@
  * 输入指纹（D57）：同样的输入两次组装指纹相同；改一个价格只动 priceHash，改名单顺序只动 selectionHash；
  * 跟踪前缀（rule = executed）在「周五休市、周四是本周最后一个交易日」这种边界上两晚一致。
  */
-import { type DateStr, LEGACY_EXEC, StrategySpecSchema } from "@ivan/core";
+import { type DateStr, defaultExec, LEGACY_EXEC, StrategySpecSchema } from "@ivan/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { seedSyntheticMarket, syntheticCalendar } from "../testing/seed.ts";
 import { Warehouse } from "../warehouse/db.ts";
@@ -61,6 +61,48 @@ const params = (end: DateStr) => ({
   exec: LEGACY_EXEC,
 });
 
+describe("按流动性成交的价格面板（D64）", () => {
+  it("要日均成交额时才装 adv / sigma（元、日波动），并进 priceHash", async () => {
+    const wh = await Warehouse.open(":memory:");
+    opened.push(wh);
+    await seedSyntheticMarket(wh, {
+      market: "A",
+      start: START,
+      days: 10,
+      skipDates: SKIP,
+      stocks: stocks.map((s) => ({
+        ...s,
+        factors: (i: number) => ({
+          ...s.factors(i),
+          turnover_20d: i === 2 ? null : 1 + i * 0.5,
+          volatility_60d: 40,
+        }),
+      })),
+    });
+    const legacy = await buildSimInput(wh, spec, params("2026-03-13"));
+    const p0 = [...legacy.input.prices.values()][0]!;
+    expect(p0.adv).toBeUndefined();
+    expect(p0.sigma).toBeUndefined();
+
+    const liq = await buildSimInput(wh, spec, { ...params("2026-03-13"), exec: defaultExec("A") });
+    const p = liq.input.prices.get(p0.code)!;
+    const k = (i: number) => i - p.from; // 第 i 个交易日在这只股票面板里的下标
+    expect(p.adv).toBeInstanceOf(Float32Array);
+    expect(p.adv![k(1)]).toBeCloseTo(1.5e8, -2);
+    expect(p.adv![k(2)]).toBeNaN();
+    expect(p.sigma![k(1)]).toBeCloseTo(0.4 / Math.sqrt(250), 6);
+    // 只要单边滑点（不设上限、不计冲击）不用这两列
+    const slipOnly = await buildSimInput(wh, spec, {
+      ...params("2026-03-13"),
+      exec: { ...defaultExec("A"), participation: null, impact: "none" },
+    });
+    expect([...slipOnly.input.prices.values()][0]!.adv).toBeUndefined();
+    // 同样的价格，带上这两列后 priceHash 不同
+    const a = hashSimInput({ ...liq.input, params: legacy.input.params });
+    expect(a.priceHash).not.toBe(hashSimInput(legacy.input).priceHash);
+  });
+});
+
 describe("hashSimInput", () => {
   it("同样的数据组装两次，指纹完全相同；全长 64 位并带口径版本", async () => {
     const wh = await market(NEXT_WED);
@@ -101,6 +143,34 @@ describe("hashSimInput", () => {
     caveats.dataCaveats = [{ id: "x", level: "warn", title: "t", detail: "d" }];
     caveats.priorVersionsOnPeriod = 7;
     expect(hashSimInput(caveats)).toEqual(base);
+  });
+
+  it("口径版本 2（S04）：上市日进价格指纹；成交假设补齐后的规则表 / 指标版本进总指纹", async () => {
+    expect(HASH_VERSION).toBe(2);
+    const wh = await market(NEXT_WED);
+    const fresh = async () => (await buildSimInput(wh, spec, params(NEXT_WED))).input;
+    const base = await fresh();
+    // 行情仓里的上市日带进证券信息
+    const [code, sec] = [...base.securities.entries()][0]!;
+    expect(sec).toHaveProperty("listDate");
+    const h0 = hashSimInput(base);
+
+    const moved = await fresh();
+    moved.securities.set(code, { ...moved.securities.get(code)!, listDate: "2026-03-04" });
+    const h1 = hashSimInput(moved);
+    expect(h1.priceHash).not.toBe(h0.priceHash);
+    expect(h1.selectionHash).toBe(h0.selectionHash);
+    expect(h1.inputHash).not.toBe(h0.inputHash);
+
+    // 缺省 exec 与显式 LEGACY_EXEC 同一个指纹；换成新口径就不同
+    const noExec = await fresh();
+    noExec.params = { ...noExec.params, exec: undefined };
+    expect(hashSimInput(noExec).inputHash).toBe(h0.inputHash);
+    const v2 = await fresh();
+    v2.params = { ...v2.params, exec: { ...LEGACY_EXEC, rules: 2, metrics: 2 } };
+    const h2 = hashSimInput(v2);
+    expect(h2.priceHash).toBe(h0.priceHash);
+    expect(h2.inputHash).not.toBe(h0.inputHash);
   });
 
   it("周五休市：今晚与上一晚按 executed 规则在周四截的前缀相同，按 all 规则不同", async () => {

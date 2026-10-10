@@ -9,11 +9,15 @@
  *   新买入每只预算 = min(上一收盘总资产 × 仓位系数 / top, 现金 / 空位数, 单只上限)。持仓不做再平衡。
  * - 仓位控制（D52，可选）：每周最后一个交易日收盘，按当前持仓组合近 N 日的年化波动算出下周的仓位系数
  *   （目标波动 ÷ 实际波动，按 10% 取整，最多 1）；系数变了就在下一交易日开盘把每只持仓按同一比例增减。
+ * - 按流动性成交（D64，挂在成交假设上）：成交价 = 开盘价加减半价差与冲击（fill.ts 的 quote），
+ *   买单不超过决策日日均成交额的一定比例；旧办法成交时不经过报价，逐字节复现 1.1.0。
+ *   拒单（停牌、涨跌停、上限、不够一手、现金不足、没有成交额数据）都记进 diagnostics，只记录、不改变决定。
  */
 import {
   type BacktestParams,
   type DateStr,
   type HoldingSnapshot,
+  isLegacyFill,
   type OpenPosition,
   type PendingOrder,
   type PriceSeries,
@@ -30,7 +34,8 @@ import {
   tradeFees,
 } from "@ivan/core";
 import { runChecks } from "./checks.ts";
-import { attribution, computeMetrics, periodMetrics } from "./metrics.ts";
+import { FillLog, lotFloor as lotFloorOf, type Quote, quote } from "./fill.ts";
+import { annualDrag, attribution, computeMetrics, oosStart, periodMetrics } from "./metrics.ts";
 
 /**
  * 引擎版本（D56）：本轮只从 1.1.0 升到 1.2.0 一次；之后的新行为都挂在成交假设 exec 的字段上，
@@ -87,8 +92,12 @@ export function rebalanceDays(
 
 export function simulate(input: SimInput): SimResult {
   const { spec, params, calendar, prices, securities } = input;
-  // 成交假设：缺省字段按旧口径补齐（S02 还没有改变成交的字段，只回显）
+  // 成交假设：缺省字段按旧口径补齐；规则表与指标版本挂在它上面（D62、D63）
   const exec = resolveExec(params.exec);
+  const rules = exec.rules;
+  // 按流动性成交（D64）：旧办法（开盘价、不计滑点、不设上限）不经过报价；拒单统计两种都记
+  const legacyFill = isLegacyFill(exec);
+  const fills = new FillLog();
   const { startIdx, endIdx } = periodIndexes(calendar, params);
   if (startIdx < 1) throw new SimError("交易日历需要包含回测起点之前至少一个交易日");
   if (endIdx < startIdx) throw new SimError("回测区间内没有交易日");
@@ -147,6 +156,20 @@ export function simulate(input: SimInput): SimResult {
     return undefined;
   };
   const nameOf = (code: string) => securities.get(code)?.name ?? code;
+  /**
+   * 第 i 天开盘成交用的日均成交额 / 日波动（D64）：决策日（i − 1）及以前最后一个有效值。
+   * 面板第 i 格含第 i 天自己的成交量，开盘时还不知道，用它就是偷看。
+   */
+  const decisionValue = (field: "adv" | "sigma", code: string, i: number): number => {
+    const p = prices.get(code);
+    const a = p?.[field];
+    if (!p || !a) return NaN;
+    for (let k = Math.min(i - 1 - p.from, a.length - 1); k >= 0; k--) {
+      const v = a[k]!;
+      if (Number.isFinite(v)) return v;
+    }
+    return NaN;
+  };
 
   let cash = params.capital;
   const positions = new Map<string, Position>();
@@ -211,26 +234,86 @@ export function simulate(input: SimInput): SimResult {
     return sd * Math.sqrt(243);
   };
 
-  /** A 股：当日开盘是否触及涨/跌停（参考价 = 前收按复权因子折算到除权后） */
-  const limitHit = (code: string, i: number, side: "buy" | "sell"): boolean => {
-    if (market !== "A") return false;
+  /** 上市后第几个交易日（上市当天 = 0）；上市日早于日历或不知道时当作老股 */
+  const daysSinceList = (listDate: DateStr | null | undefined, i: number): number => {
+    if (!listDate || listDate < calendar[0]!) return 1e9;
+    return i - lowerBound(calendar, listDate);
+  };
+
+  /** A 股当日的涨跌停价（参考价 = 前收按复权因子折算到除权后）；港股、不设涨跌幅的日子为 null */
+  const limitsAt = (code: string, i: number): { up: number; down: number } | null => {
+    if (market !== "A") return null;
     const cur = px(code, i);
-    if (!cur) return false;
+    if (!cur) return null;
     const { p, k } = cur;
     let pk = k - 1;
     while (pk >= 0 && !Number.isFinite(p.close[pk]!)) pk--;
-    if (pk < 0) return false; // 上市首日不设限（默认也会排除次新股）
+    if (pk < 0) return null; // 上市首日不设限（默认也会排除次新股）
     const ref = (p.close[pk]! * p.adj[pk]!) / p.adj[k]!;
-    const pct = priceLimitPct(
-      "A",
-      securities.get(code)?.board ?? null,
-      p.st[k] === 1,
-      calendar[i]!,
+    const sec = securities.get(code);
+    const pct =
+      rules === 1
+        ? priceLimitPct("A", sec?.board ?? null, p.st[k] === 1, calendar[i]!)
+        : priceLimitPct("A", sec?.board ?? null, p.st[k] === 1, calendar[i]!, {
+            rules,
+            listDate: sec?.listDate ?? null,
+            daysSinceList: daysSinceList(sec?.listDate, i),
+          });
+    if (pct === null) return null;
+    return limitPrices(ref, pct);
+  };
+
+  /** A 股：当日开盘是否触及涨/跌停 */
+  const limitHit = (code: string, i: number, side: "buy" | "sell"): boolean => {
+    const lim = limitsAt(code, i);
+    if (!lim) return false;
+    const cur = px(code, i)!;
+    const open = cur.p.open[cur.k]!;
+    return side === "buy" ? open >= lim.up - 1e-6 : open <= lim.down + 1e-6;
+  };
+
+  /** 第 i 天开盘的报价（D64），带上决策日的日均成交额（成交记录要算参与率） */
+  const quoteAt = (
+    code: string,
+    i: number,
+    side: "buy" | "sell",
+    open: number,
+    wantValue: number,
+    uncapped = false,
+  ): { q: Quote; adv: number } => {
+    const adv = decisionValue("adv", code, i);
+    const q = quote(
+      {
+        market,
+        exec,
+        side,
+        open,
+        adv,
+        sigma: decisionValue("sigma", code, i),
+        limit: limitsAt(code, i),
+        date: calendar[i]!,
+        uncapped,
+      },
+      wantValue,
     );
-    if (pct === null) return false;
-    const { up, down } = limitPrices(ref, pct);
-    const open = p.open[k]!;
-    return side === "buy" ? open >= up - 1e-6 : open <= down + 1e-6;
+    if (q.ok && q.sigmaFallback) fills.sigmaFallbacks++;
+    return { q, adv };
+  };
+  /** 成交记录的参考价、价差与冲击金额、参与率 */
+  const liquidityOf = (
+    q: Quote,
+    shares: number,
+    amount: number,
+    adv: number,
+  ): Pick<Trade, "ref" | "slip" | "part"> => {
+    if (!q.ok) return {};
+    const slip = Math.abs(q.price - q.ref) * shares;
+    return adv > 0 ? { ref: q.ref, slip, part: amount / adv } : { ref: q.ref, slip };
+  };
+  /** 买入股数的上限：上限金额 ÷ 价格，按交易单位向下取整（科创板不到 200 股为 0） */
+  const capShares = (code: string, value: number, price: number): number => {
+    const sec = securities.get(code);
+    return lotFloorOf(market, sec?.board ?? null, sec?.lotSize ?? null, value / price, true);
   };
 
   for (let i = startIdx; i <= endIdx; i++) {
@@ -251,7 +334,7 @@ export function simulate(input: SimInput): SimResult {
       if (!lc) continue;
       const sharesNow = pos.shares * (lc.adj / pos.entryAdj);
       const amount = sharesNow * lc.close;
-      const fee = tradeFees(market, "sell", amount, date, costs).total;
+      const fee = tradeFees(market, "sell", amount, date, costs, rules).total;
       cash += amount - fee;
       trades.push({
         date,
@@ -277,24 +360,40 @@ export function simulate(input: SimInput): SimResult {
         continue;
       }
       const cur = px(code, i);
-      if (!cur || !Number.isFinite(cur.p.open[cur.k]!)) continue; // 停牌：顺延
-      if (limitHit(code, i, "sell")) continue; // 跌停开盘：顺延
+      if (!cur || !Number.isFinite(cur.p.open[cur.k]!)) {
+        fills.reject(date, code, "sell", "suspended", posValue(pos, i));
+        continue; // 停牌：顺延
+      }
       const open = cur.p.open[cur.k]!;
       const sharesNow = pos.shares * (cur.p.adj[cur.k]! / pos.entryAdj);
-      const amount = sharesNow * open;
-      const fee = tradeFees(market, "sell", amount, date, costs).total;
+      if (limitHit(code, i, "sell")) {
+        fills.reject(date, code, "sell", "limit_down", sharesNow * open);
+        continue; // 跌停开盘：顺延
+      }
+      let price = open;
+      let liq: Pick<Trade, "ref" | "slip" | "part"> = {};
+      if (!legacyFill) {
+        const { q, adv } = quoteAt(code, i, "sell", open, sharesNow * open);
+        if (q.ok) {
+          price = q.price;
+          liq = liquidityOf(q, sharesNow, sharesNow * price, adv);
+        }
+      }
+      const amount = sharesNow * price;
+      const fee = tradeFees(market, "sell", amount, date, costs, rules).total;
       cash += amount - fee;
       trades.push({
         date,
         code,
         side: "sell",
-        price: open,
+        price,
         shares: sharesNow,
         amount,
         fee,
         reason,
         pnl: amount - fee - pos.cost,
         holdDays: i - pos.entryIdx,
+        ...liq,
       });
       positions.delete(code);
       pendingSells.delete(code);
@@ -307,53 +406,97 @@ export function simulate(input: SimInput): SimResult {
       for (const code of buyList) {
         if (vacancies <= 0) break;
         if (positions.has(code)) continue;
-        const cur = px(code, i);
-        if (!cur || !Number.isFinite(cur.p.open[cur.k]!)) continue; // 停牌
-        if (limitHit(code, i, "buy")) continue; // 涨停开盘买不进
-        const open = cur.p.open[cur.k]!;
         const sec = securities.get(code);
         let budget = Math.min((prevEquity * scale) / N, cash / vacancies);
         if (spec.sizing.maxWeight) budget = Math.min(budget, prevEquity * spec.sizing.maxWeight);
+        const cur = px(code, i);
+        if (!cur || !Number.isFinite(cur.p.open[cur.k]!)) {
+          fills.reject(date, code, "buy", "suspended", budget);
+          continue; // 停牌
+        }
+        if (limitHit(code, i, "buy")) {
+          fills.reject(date, code, "buy", "limit_up", budget);
+          continue; // 涨停开盘买不进
+        }
+        const open = cur.p.open[cur.k]!;
+        let price = open;
+        let quoted: { q: Quote; adv: number } | null = null;
+        if (!legacyFill) {
+          quoted = quoteAt(code, i, "buy", open, budget);
+          if (!(quoted.adv > 0)) fills.advUnknownBuys++;
+          if (!quoted.q.ok) {
+            fills.reject(date, code, "buy", quoted.q.reason, budget);
+            continue; // 没有成交额数据：不能假设无限流动性
+          }
+          price = quoted.q.price;
+        }
         let shares = sharesForBudget(
           market,
           sec?.board ?? null,
           sec?.lotSize ?? null,
           budget * 0.998,
-          open,
+          price,
         );
-        let amount = shares * open;
-        let fee = tradeFees(market, "buy", amount, date, costs).total;
+        // 单笔上限（D64）：超过决策日日均成交额的比例时截小，空位照样占用（D15）
+        let capped = false;
+        if (quoted?.q.ok && Number.isFinite(quoted.q.maxValue)) {
+          const cap = capShares(code, quoted.q.maxValue, price);
+          if (cap < shares) {
+            shares = cap;
+            capped = true;
+          }
+        }
+        let amount = shares * price;
+        let fee = tradeFees(market, "buy", amount, date, costs, rules).total;
         // 费用让现金不够时退一手
+        let steppedDown = false;
         while (shares > 0 && amount + fee > cash) {
+          steppedDown = true;
           shares = sharesForBudget(
             market,
             sec?.board ?? null,
             sec?.lotSize ?? null,
-            amount - open * 1.0001,
-            open,
+            amount - price * 1.0001,
+            price,
           );
-          amount = shares * open;
-          fee = tradeFees(market, "buy", amount, date, costs).total;
+          amount = shares * price;
+          fee = tradeFees(market, "buy", amount, date, costs, rules).total;
         }
-        if (shares <= 0) continue;
+        if (quoted) {
+          fills.sized++;
+          if (capped) fills.capped++;
+        }
+        if (shares <= 0) {
+          // 空位不占用，名单顺延
+          const why = steppedDown ? "cash" : capped ? "capacity" : "lot_zero";
+          fills.reject(date, code, "buy", why, budget);
+          continue;
+        }
+        if (capped) fills.reject(date, code, "buy", "capacity", budget, amount);
         cash -= amount + fee;
         positions.set(code, {
           code,
           shares,
           entryIdx: i,
-          entryPrice: open,
+          entryPrice: price,
           entryAdj: cur.p.adj[cur.k]!,
           cost: amount + fee,
         });
+        let liq: Pick<Trade, "ref" | "slip" | "part"> = {};
+        if (quoted) {
+          liq = liquidityOf(quoted.q, shares, amount, quoted.adv);
+          if (quoted.adv > 0) fills.parts.push(amount / quoted.adv);
+        }
         trades.push({
           date,
           code,
           side: "buy",
-          price: open,
+          price,
           shares,
           amount,
           fee,
           reason: spec.mode === "signals" ? "signal" : "entry",
+          ...liq,
         });
         vacancies--;
       }
@@ -384,9 +527,19 @@ export function simulate(input: SimInput): SimResult {
       }
       for (const { pos, open, adjNow, real, q } of plans) {
         if (q <= 0) continue;
-        const amount = q * open;
+        // 仓位控制的增减也付价差与冲击，但不设单笔上限（D64）
+        let price = open;
+        let liq: Pick<Trade, "ref" | "slip" | "part"> = {};
+        if (!legacyFill) {
+          const r = quoteAt(pos.code, i, f < 1 ? "sell" : "buy", open, q * open, true);
+          if (r.q.ok) {
+            price = r.q.price;
+            liq = liquidityOf(r.q, q, q * price, r.adv);
+          }
+        }
+        const amount = q * price;
         if (f < 1) {
-          const fee = tradeFees(market, "sell", amount, date, costs).total;
+          const fee = tradeFees(market, "sell", amount, date, costs, rules).total;
           const costPart = pos.cost * (q / real);
           cash += amount - fee;
           pos.cost -= costPart;
@@ -395,17 +548,18 @@ export function simulate(input: SimInput): SimResult {
             date,
             code: pos.code,
             side: "sell",
-            price: open,
+            price,
             shares: q,
             amount,
             fee,
             reason: "exposure",
             pnl: amount - fee - costPart,
             holdDays: i - pos.entryIdx,
+            ...liq,
           });
           if (pos.shares * (adjNow / pos.entryAdj) < 1e-6) positions.delete(pos.code);
         } else {
-          const fee = tradeFees(market, "buy", amount, date, costs).total;
+          const fee = tradeFees(market, "buy", amount, date, costs, rules).total;
           if (amount + fee > cash) continue;
           cash -= amount + fee;
           pos.cost += amount + fee;
@@ -414,11 +568,12 @@ export function simulate(input: SimInput): SimResult {
             date,
             code: pos.code,
             side: "buy",
-            price: open,
+            price,
             shares: q,
             amount,
             fee,
             reason: "exposure",
+            ...liq,
           });
         }
       }
@@ -509,51 +664,153 @@ export function simulate(input: SimInput): SimResult {
       cost: pos.cost,
     };
   });
-  // 下一个交易日要执行的单：卖单 + （若明天调仓/有信号）买单
-  const pending: PendingOrder[] = [...pendingSells].map(([code, reason]) => ({
-    code,
-    name: nameOf(code),
-    side: "sell",
-    reason,
-  }));
+  // 下一个交易日要执行的单：卖单 + （若明天调仓/有信号）买单。
+  // 估算（D64，给决策账本用）：在最后收盘价上用同一个报价与同样的预算规则估成交价、股数与仓位
+  const nextDate = calendar[lastIdx + 1] ?? finalDate;
+  const estQuote = (code: string, side: "buy" | "sell", refClose: number, want: number) =>
+    quote(
+      {
+        market,
+        exec,
+        side,
+        open: refClose,
+        adv: decisionValue("adv", code, lastIdx + 1),
+        sigma: decisionValue("sigma", code, lastIdx + 1),
+        limit: null,
+        date: nextDate,
+      },
+      want,
+    );
+  let estCash = cash;
+  const pending: PendingOrder[] = [...pendingSells].map(([code, reason]) => {
+    const o: PendingOrder = { code, name: nameOf(code), side: "sell", reason };
+    const pos = positions.get(code);
+    const lc = lastClose(code, lastIdx);
+    if (pos && lc) {
+      const shares = pos.shares * (lc.adj / pos.entryAdj);
+      const value = shares * lc.close;
+      const q = legacyFill ? null : estQuote(code, "sell", lc.close, value);
+      const estPrice = q?.ok ? q.price : lc.close;
+      const weight = finalEquity > 0 ? value / finalEquity : 0;
+      o.estPrice = estPrice;
+      o.estShares = shares;
+      o.estWeight = weight;
+      o.refClose = lc.close;
+      o.curWeight = weight;
+      const amount = shares * estPrice;
+      estCash += amount - tradeFees(market, "sell", amount, nextDate, costs, rules).total;
+    }
+    return o;
+  });
   const nextBuys = buyListAt.get(lastIdx + 1);
   if (nextBuys?.length) {
     const remaining = new Set([...positions.keys()].filter((c) => !pendingSells.has(c)));
     let vacancies = N - remaining.size;
+    const scaleNext = nextScale ?? scale;
     for (const code of nextBuys) {
       if (vacancies <= 0) break;
       if (remaining.has(code)) continue;
-      pending.push({
+      const o: PendingOrder = {
         code,
         name: nameOf(code),
         side: "buy",
         reason: spec.mode === "signals" ? "signal" : "entry",
-      });
+      };
+      const lc = lastClose(code, lastIdx);
+      if (lc) {
+        let budget = Math.min((finalEquity * scaleNext) / N, estCash / vacancies);
+        if (spec.sizing.maxWeight) budget = Math.min(budget, finalEquity * spec.sizing.maxWeight);
+        budget *= 0.998;
+        const q = estQuote(code, "buy", lc.close, budget);
+        const sec = securities.get(code);
+        let shares = 0;
+        if (q.ok) {
+          shares = sharesForBudget(
+            market,
+            sec?.board ?? null,
+            sec?.lotSize ?? null,
+            budget,
+            q.price,
+          );
+          if (Number.isFinite(q.maxValue))
+            shares = Math.min(shares, capShares(code, q.maxValue, q.price));
+        }
+        const amount = q.ok ? shares * q.price : 0;
+        o.estPrice = q.ok ? q.price : null;
+        o.estShares = shares;
+        o.estWeight = finalEquity > 0 ? amount / finalEquity : 0;
+        o.refClose = lc.close;
+        if (amount > 0)
+          estCash -= amount + tradeFees(market, "buy", amount, nextDate, costs, rules).total;
+      }
+      pending.push(o);
       vacancies--;
     }
   }
 
   const exposure = volTarget ? { current: scale, next: nextScale ?? scale } : undefined;
-  const metrics = computeMetrics(series, trades, params.capital);
-  const oosStartDate = params.oosMonths > 0 ? oosStart(series, params.oosMonths) : null;
-  const segments = oosStartDate
-    ? {
-        inSample: periodMetrics(series.filter((p) => p.date < oosStartDate)),
-        outOfSample: periodMetrics(series.filter((p) => p.date >= oosStartDate)),
-      }
-    : { inSample: periodMetrics(series), outOfSample: null };
+  let anchor: SeriesPoint | undefined;
+  let metrics: SimResult["metrics"];
+  let segments: SimResult["segments"];
+  if (exec.metrics === 1) {
+    metrics = computeMetrics(series, trades, params.capital);
+    const oosStartDate = params.oosMonths > 0 ? oosStart(series, params.oosMonths) : null;
+    segments = oosStartDate
+      ? {
+          inSample: periodMetrics(series.filter((p) => p.date < oosStartDate)),
+          outOfSample: periodMetrics(series.filter((p) => p.date >= oosStartDate)),
+        }
+      : { inSample: periodMetrics(series), outOfSample: null };
+  } else {
+    // 指标第 2 版（D63）：决策日虚拟加一点（净值 1，基准按决策日收盘归一），只在指标里加
+    const b = bench[startIdx - 1]!;
+    anchor = {
+      date: calendar[startIdx - 1]!,
+      nav: 1,
+      bench: Number.isFinite(b) ? b / bench0 : 1,
+      cash: params.capital,
+      positions: 0,
+    };
+    metrics = computeMetrics(series, trades, params.capital, { version: 2, anchor });
+    const oosStartDate = params.oosMonths > 0 ? oosStart(series, params.oosMonths, 2) : null;
+    segments = oosStartDate
+      ? {
+          inSample: periodMetrics([anchor, ...series.filter((p) => p.date < oosStartDate)]),
+          outOfSample: periodMetrics(series.filter((p) => p.date >= oosStartDate)),
+        }
+      : { inSample: periodMetrics([anchor, ...series], metrics.totalReturn), outOfSample: null };
+  }
+  // 按流动性成交（D64）：费用拖累拆成费用与滑点两部分（costDrag = 两者之和）
+  fills.slippageCost = trades.reduce((s, t) => s + (t.slip ?? 0), 0);
+  if (!legacyFill) {
+    const slipDrag = annualDrag(series, params.capital, fills.slippageCost);
+    metrics = {
+      ...metrics,
+      slippageCost: fills.slippageCost,
+      feeDrag: metrics.costDrag,
+      slipDrag,
+      costDrag: metrics.costDrag + slipDrag,
+    };
+  }
+  const diagnostics = fills.result({
+    liquidity: !legacyFill,
+    capital: params.capital,
+    participation: exec.participation,
+  });
   const attr = attribution(trades, openPositions, holdings, securities);
 
   return {
     engineVersion: ENGINE_VERSION,
     exec,
     series,
+    ...(anchor ? { anchor } : {}),
     trades,
     holdings,
     metrics,
     segments,
     attribution: attr,
-    checks: runChecks({ input, metrics, segments, attribution: attr, trades }),
+    checks: runChecks({ input, metrics, segments, attribution: attr, trades, diagnostics }),
+    diagnostics,
     final: {
       date: finalDate,
       cash,
@@ -565,18 +822,14 @@ export function simulate(input: SimInput): SimResult {
   };
 }
 
-/** 样本外起点：区间最后 N 个月；区间不到 2N 个月时不分段。 */
-function oosStart(series: SeriesPoint[], months: number): DateStr | null {
-  if (series.length < 2) return null;
-  const first = series[0]!.date;
-  const last = series.at(-1)!.date;
-  const y = Number(last.slice(0, 4));
-  const m = Number(last.slice(5, 7)) - months;
-  const d = new Date(Date.UTC(y, m - 1, Number(last.slice(8, 10))));
-  const cut = d.toISOString().slice(0, 10);
-  const spanMonths =
-    (Number(last.slice(0, 4)) - Number(first.slice(0, 4))) * 12 +
-    (Number(last.slice(5, 7)) - Number(first.slice(5, 7)));
-  if (spanMonths < months * 2) return null;
-  return cut;
+/** 日历上第一个 ≥ d 的下标 */
+function lowerBound(calendar: readonly DateStr[], d: DateStr): number {
+  let lo = 0;
+  let hi = calendar.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (calendar[mid]! < d) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }

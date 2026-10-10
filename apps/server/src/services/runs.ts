@@ -6,21 +6,28 @@ import {
   type Attribution,
   type BacktestParams,
   type Check,
+  type Confidence,
+  canonicalJson,
   DEFAULT_PARAMS,
+  describeExec,
   diffDays,
   ExecConfigError,
+  type Fan,
   type Market,
   parseExecOverrides,
   resolveExec,
   isDateStr,
+  isLegacyFill,
   type HoldingSnapshot,
   type Metrics,
   type PeriodMetrics,
   type SeriesPoint,
+  type SimDiagnostics,
   type StrategySpec,
   todayCN,
   validateSpec,
 } from "@ivan/core";
+import { specHashOf } from "@ivan/core/node";
 import { periodMetrics } from "@ivan/engine";
 import {
   computeBlocked,
@@ -95,25 +102,54 @@ function activeJobs(userId: string, kind?: string): number {
   );
 }
 
-/** 同一策略在同一区间（起点相同、终点相差 31 天内）已回测过的不同版本数 */
-export function priorVersionsOnPeriod(
+/** 和本次区间重叠至少这个比例（按本次区间的自然日）才算「同一段历史上的又一次尝试」 */
+export const TRIAL_OVERLAP_MIN = 0.5;
+
+/**
+ * 试错次数（D66）：同一策略里、区间与本次重叠 ≥ 50% 的已完成回测与扫描子回测，按实际用的策略内容去重
+ * （版本取 spec_hash，扫描子回测取 specHashOf(specOverride)，同一个 16 位函数，所以和某个版本相同的扫描取值只算一次），
+ * 不含本次自己的策略内容。完整重跑（kind = reproduce）不算；挪一天起点不会清零。新建一个策略会从零算。
+ */
+export function countTrials(
   strategyId: string,
-  params: BacktestParams,
-  exceptVersion: string,
+  params: Pick<BacktestParams, "start" | "end">,
+  exceptSpecHash: string,
 ): number {
   const { db } = env().app;
   const rows = db
     .select({ versionId: runs.versionId, params: runs.params })
     .from(runs)
-    .where(and(eq(runs.strategyId, strategyId), eq(runs.kind, "backtest")))
+    .where(
+      and(
+        eq(runs.strategyId, strategyId),
+        inArray(runs.kind, ["backtest", "sweep_child"]),
+        eq(runs.status, "done"),
+      ),
+    )
     .all();
-  const versions = new Set<string>();
+  const versionHash = new Map(
+    db
+      .select({ id: strategyVersions.id, specHash: strategyVersions.specHash })
+      .from(strategyVersions)
+      .where(eq(strategyVersions.strategyId, strategyId))
+      .all()
+      .map((v) => [v.id, v.specHash]),
+  );
+  const span = diffDays(params.end, params.start);
+  if (!(span > 0)) return 0;
+  const keys = new Set<string>();
   for (const r of rows) {
-    const p = r.params as Partial<BacktestParams>;
-    if (r.versionId === exceptVersion || p.start !== params.start || !p.end) continue;
-    if (Math.abs(diffDays(p.end, params.end)) <= 31) versions.add(r.versionId);
+    const p = r.params as Partial<BacktestParams> & { specOverride?: unknown };
+    if (!p.start || !p.end) continue;
+    const lo = p.start > params.start ? p.start : params.start;
+    const hi = p.end < params.end ? p.end : params.end;
+    const overlap = Math.max(0, diffDays(hi, lo));
+    if (overlap / span < TRIAL_OVERLAP_MIN) continue;
+    const key = p.specOverride ? specHashOf(p.specOverride) : versionHash.get(r.versionId);
+    if (key) keys.add(key);
   }
-  return versions.size;
+  keys.delete(exceptSpecHash);
+  return keys.size;
 }
 
 export function enqueueBacktest(
@@ -140,7 +176,7 @@ export function enqueueBacktest(
         kind: "backtest",
         params: {
           ...params,
-          priorVersions: priorVersionsOnPeriod(strategy.id, params, versionId),
+          priorVersions: countTrials(strategy.id, params, version.specHash),
         } as unknown as Record<string, unknown>,
       })
       .run();
@@ -164,7 +200,7 @@ export function enqueueSweep(
   if (sweep.values.length < 2 || sweep.values.length > 8)
     throw new AppError(400, "扫描取值要 2–8 个");
   const params = normalizeParams(input, version.spec.market);
-  const variants: Array<{ label: string; spec: StrategySpec }> = [];
+  const variants: Array<{ label: string; spec: StrategySpec; priorVersions: number }> = [];
   for (const value of sweep.values) {
     let candidate: unknown;
     try {
@@ -178,6 +214,8 @@ export function enqueueSweep(
     variants.push({
       label: `${sweep.label ?? sweep.path} = ${JSON.stringify(value)}`,
       spec: v.spec,
+      // 每个取值按自己的策略内容算试错次数（D66）；同一次扫描里的兄弟取值还没跑完，不算
+      priorVersions: countTrials(strategy.id, params, specHashOf(v.spec)),
     });
   }
   if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
@@ -253,6 +291,9 @@ export function runSummary(r: RunRow) {
           sharpe: m.sharpe,
           winRate: m.winRate,
           buys: m.buys,
+          // 指标第 2 版才有（D63）；旧口径的回测为 null
+          ir: m.risk?.infoRatio ?? null,
+          sortino: m.risk?.sortino ?? null,
         }
       : null,
   };
@@ -332,6 +373,11 @@ export function getRun(userId: string, runId: string) {
     inputHash: r.inputHash,
     verify: r.verify,
     exec: safeExec(r.params.exec),
+    /** 成交诊断（D64）；早于 S05 的回测没有 */
+    diagnostics: (r.diagnostics ?? null) as SimDiagnostics | null,
+    /** 可信度（D65）：区间摘要与一年净值扇形；只有指标第 2 版的新回测有 */
+    validation: (r.validation ?? null) as Confidence | null,
+    fan: unpackJson<Fan>(r.validationZ),
     metrics: r.metrics as Metrics | null,
     segments: r.segments as { inSample: PeriodMetrics; outOfSample: PeriodMetrics | null } | null,
     attribution: r.attribution,
@@ -340,6 +386,27 @@ export function getRun(userId: string, runId: string) {
     job: job ?? null,
     children,
     computePaused: blocked ? { reason: blocked.kind, since: blocked.since } : null,
+  };
+}
+
+/**
+ * 解释一次回测里的选股要用的策略内容（D67）：扫描子回测用它自己的 specOverride，其余用版本的策略；
+ * 带上运行卡记下的数据版本（没有运行卡 = 早于数据版本记录）。
+ */
+export function runSpecContext(userId: string, runId: string) {
+  const r = ownRun(userId, runId);
+  const { strategy, version } = getVersion(userId, r.versionId);
+  const override = (r.params as { specOverride?: unknown }).specOverride;
+  const spec = override ? validateSpec(override).spec : version.spec;
+  if (!spec) throw new AppError(409, "这次回测记下的策略内容读不懂");
+  const card = r.card as { data?: { versionId?: number | null } } | null;
+  return {
+    runId: r.id,
+    versionId: r.versionId,
+    name: override && r.label ? `${strategy.name}（${r.label}）` : strategy.name,
+    spec,
+    hasCard: !!card,
+    cardDataVersionId: card?.data?.versionId ?? null,
   };
 }
 
@@ -409,7 +476,7 @@ function origEffectiveEnd(orig: RunRow): string {
 
 /**
  * 完整重跑（D57）：参数完全照抄（含试错次数，让检查项也可比；终点取原运行截到的那天），新建一次 kind = reproduce 的运行，计入回测额度。
- * 跑完由 worker 比结果指纹并写回原运行的 verify；重跑不计入试错次数（priorVersionsOnPeriod 只数 backtest）。
+ * 跑完由 worker 比结果指纹并写回原运行的 verify；重跑不计入试错次数（countTrials 只数回测与扫描子回测）。
  */
 export function reproduceRun(userId: string, runId: string): { runId: string; jobId: string } {
   const orig = ownRun(userId, runId);
@@ -519,9 +586,13 @@ export function downsample(series: SeriesPoint[], maxPoints = 400): SeriesPoint[
   return out;
 }
 
+/**
+ * 对比 2–4 个回测。口径不同不直接比（D64）：每次带成交假设与指标口径，`comparable` = 补齐后的成交假设
+ * 逐项相同且指标版本相同；读不懂的成交假设算不可比。
+ */
 export function compareRuns(userId: string, runIds: string[]) {
   if (runIds.length < 2 || runIds.length > 4) throw new AppError(400, "对比要 2–4 个回测");
-  return runIds.map((id) => {
+  const rows = runIds.map((id) => {
     const r = getRun(userId, id);
     const versionN = versionNOf(userId, r.versionId);
     return {
@@ -529,8 +600,17 @@ export function compareRuns(userId: string, runIds: string[]) {
       versionN,
       segments: r.segments,
       series: downsample(r.series, 300),
+      execText: r.exec ? describeExec(r.exec) : "成交假设读不懂",
+      rulesVersion: r.exec?.rules ?? null,
+      // 指标口径看结果里实际的版本（缺省 = 第 1 版）
+      metricsVersion: r.metrics ? (r.metrics.metricsVersion ?? 1) : (r.exec?.metrics ?? null),
+      execKey: r.exec ? canonicalJson(r.exec) : null,
     };
   });
+  const comparable =
+    rows.every((r) => r.execKey !== null && r.execKey === rows[0]!.execKey) &&
+    rows.every((r) => r.metricsVersion === rows[0]!.metricsVersion);
+  return { runs: rows.map(({ execKey: _, ...r }) => r), comparable };
 }
 
 export type RunQuery =
@@ -540,7 +620,8 @@ export type RunQuery =
   | { what: "trades"; code?: string; from?: string; to?: string; limit?: number }
   | { what: "contributors"; top?: number }
   | { what: "industry" }
-  | { what: "monthly" };
+  | { what: "monthly" }
+  | { what: "execution" };
 
 /** 下钻（对话工具 query_run 与报告页共用）。返回数据小而准，数字全部来自存档结果。 */
 export function queryRun(userId: string, runId: string, q: RunQuery) {
@@ -627,7 +708,65 @@ export function queryRun(userId: string, runId: string, q: RunQuery) {
       };
     case "monthly":
       return { what: q.what, monthly: r.metrics?.monthly ?? [], yearly: r.metrics?.yearly ?? [] };
+    case "execution":
+      return { what: q.what, ...executionView(r) };
   }
+}
+
+const REJECT_TEXT: Record<string, string> = {
+  suspended: "停牌",
+  limit_up: "涨停开盘",
+  limit_down: "跌停开盘",
+  capacity: "超过成交额上限",
+  lot_zero: "不够一手",
+  cash: "现金不足",
+  no_liquidity: "没有成交额数据",
+};
+
+/**
+ * 成交与容量（query_run what = execution，D64）：成交假设、拒单统计、参与率、容量估计、滑点与费用。
+ * 数字全部来自存档的诊断；早于 S05 的回测没有诊断，如实说没有。
+ */
+function executionView(r: ReturnType<typeof getRun>) {
+  const d = r.diagnostics;
+  const legacyFill = r.exec ? isLegacyFill(r.exec) : true;
+  return {
+    exec: r.exec ? describeExec(r.exec) : null,
+    legacyFill,
+    note: !d
+      ? "这次回测早于成交诊断，没有拒单与容量数据"
+      : legacyFill
+        ? "旧成交假设（开盘价成交、不计滑点），结果偏乐观；只有拒单统计"
+        : null,
+    rejections: d
+      ? Object.entries(d.rejections).map(([key, v]) => {
+          const [side, reason] = key.split(":") as [string, string];
+          return {
+            side: side === "buy" ? "买" : "卖",
+            reason: REJECT_TEXT[reason] ?? reason,
+            count: v.count,
+            value: Math.round(v.value),
+          };
+        })
+      : [],
+    recentSamples: (d?.samples ?? []).slice(-10).map((s) => ({
+      date: s.date,
+      code: s.code,
+      side: s.side === "buy" ? "买" : "卖",
+      reason: REJECT_TEXT[s.reason] ?? s.reason,
+      wantValue: Math.round(s.wantValue),
+      filledValue: Math.round(s.filledValue),
+    })),
+    participation: d?.participation ?? null,
+    cappedBuyShare: d?.cappedBuyShare ?? null,
+    advUnknownBuys: d?.advUnknownBuys ?? null,
+    sigmaFallbacks: d?.sigmaFallbacks ?? null,
+    capacityEstimate: d?.capacityEstimate ?? null,
+    slippageCost: r.metrics?.slippageCost ?? null,
+    fees: r.metrics?.fees ?? null,
+    feeDrag: r.metrics?.feeDrag ?? r.metrics?.costDrag ?? null,
+    slipDrag: r.metrics?.slipDrag ?? null,
+  };
 }
 
 /** 某个版本上线日前最近一次跑完的回测（跟踪的对照基线） */

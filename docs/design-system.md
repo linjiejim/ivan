@@ -165,6 +165,9 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 | 净值 / 走势 | ChartLine | | 框选问 AI | Selection |
 | 明日计划 | CalendarCheck | | 对话上下文 | Paperclip |
 | 持仓 | Briefcase | | 行情服务离线 | Plugs |
+| 证据（某个决策日为什么选它） | FileMagnifyingGlass | | | |
+
+「证据」和「选股」是两个概念：选股是一份名单（ListMagnifyingGlass），证据是一只股票在某个决策日的出处清单（FileMagnifyingGlass），不复用。
 
 - 图标帮助扫读，不承载信息：纯装饰的图标自动 `aria-hidden`；只有图标的按钮（`IconButton`）必须给 `label`。
 - 不自己画图标路径（品牌标志除外）。
@@ -175,7 +178,7 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 |---|---|
 | `Button` | `primary`（墨，一屏最多一个）· `secondary`（描边）· `ghost`（工具栏、次要）· `ai`（花青浅底：所有问 AI / 让 AI 做事的入口）· `danger`（停止、删除）。`icon` 传图标，`loading` 时图标换成转圈、宽度不跳 |
 | `IconButton` | 只有图标的按钮（关闭、翻页、新对话），必须给 `label` |
-| `TextLink` | 「完整报告 ›」这类去别处看的入口（花青） |
+| `TextLink` | 「完整报告 ›」这类去别处看的入口（花青）；`onClick` 变体给「恢复默认」这类就地的小操作 |
 | `Card` | 标题（可带图标、ⓘ、右侧动作）+ 内容；列表、表格用 `flush` 自己管边距 |
 | `PageHeader` | 每个页面的抬头：返回上一级、标题、标签、元信息、动作；窄屏时动作换行 |
 | `Tag` vs `Badge` | `Tag` 描边无底色 = 分类元数据（市场、版本号）；`Badge` 有底色 = 状态（运行中、失败、待确认、买卖） |
@@ -192,6 +195,8 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 | `CopyButton` | 复制后 1.6 秒内显示「已复制」 |
 | `SeriesDot` / `LiveDot` | 策略色点（和图里的线同色）/ 运行中的实时点（只用在真实状态上） |
 | `Kbd` | 键盘提示 |
+| `EvidenceCard` / `EvidenceModal`（`components/evidence-modal.tsx`） | 个股证据（D67）：抬头「名称 代码 · 决策日 X（次日 Y 开盘成交）」，提示用 `Callout`，分组列出估值与价格 / 质量与成长 / 财报 / 数据状态，每行有来源 `Tag`（东方财富、腾讯、中证、深交所、来源未记录）与「数据日」；带策略时多一块名次或没满足的条件与各项分位细条；底部「数据版本 #N · 校验 前 8 位」和「仅供研究，不构成投资建议」，空值写 `--`。对话里是卡片，回测页成交 / 持仓、跟踪页持仓每行一个 `IconButton`「证据」打开同一张 |
+| `FanChart`（`components/charts/fan-chart.tsx`） | 未来一年的净值区间（按历史重抽样，D65）：5–95 / 25–75 分位带 + 中位数线，一年内回撤写在图下；按需加载，只在回测页「可信度」分页。文案说「区间」不说「概率」 |
 
 组件的 class 可以被调用方覆盖：`cx` 走 tailwind-merge，冲突的工具类以后写的为准。
 
@@ -228,6 +233,8 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 - 字：标签走 Geist，坐标轴数字走 Geist Mono 10.5px；提示框和浮层同一种质感（`tooltipStyle` / `tipHead` / `tipRow`）。
 - 线 2px，基准 1.5px；回测段淡、跟踪段实；上线日一条竖线，标签横写在顶端。
 - 面积只用在有真实零基线的视图（回撤）；净值轴不从 0 起，不填色。
+  例外只有一个：分位区间带：两条分位线之间低透明度填充，不从 0 起，只用于按历史重抽样的区间
+  （`FanChart`，透明度不超过 0.12，颜色取策略色 token；中位数仍是 2px 实线）。
 - 图上可以拖动框选一段问 AI：右上角常驻一句提示，选中后显示区间 + 「问 AI 这段」。
 
 ## 12. 无障碍与性能

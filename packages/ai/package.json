@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "LLM provider 配置（server 对话与 worker 简报共用）",
+  "description": "LLM provider 配置与给模型看的摘要（server 对话与 worker 简报、场景测试共用）",
   "exports": {
     ".": "./src/index.ts"
   },
@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@ivan/core": "workspace:*",
     "@ai-sdk/anthropic": "catalog:",
     "@ai-sdk/openai-compatible": "catalog:",
     "ai": "catalog:"

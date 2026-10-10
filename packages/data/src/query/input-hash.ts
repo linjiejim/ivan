@@ -3,7 +3,7 @@
  *
  * - 必须在 runSimulation 之前算：转交给回测线程会让 TypedArray 的底层内存失效。
  * - 检查项说明（dataCaveats）与试错次数不进指纹：它们是报告，运行卡另记 caveatsHash。
- * - 组成或 resolveExec 的输出形状一变，HASH_VERSION 就加 1（S04 升到 2）；口径版本不同的两个指纹不比，
+ * - 组成或 resolveExec 的输出形状一变，HASH_VERSION 就加 1（S04 升到 2：上市日、规则表 / 指标版本）；口径版本不同的两个指纹不比，
  *   归因记「早于记录」，不误报数据修订。
  *
  * 纳入规则 rule：
@@ -20,7 +20,11 @@ import {
 } from "@ivan/core";
 import { sha256Canonical, Sha256Stream } from "@ivan/core/node";
 
-export const HASH_VERSION = 1;
+/**
+ * 指纹口径版本。1 = R1（S02）；2 = R2（S04）：证券信息加上市日、resolveExec 多了 rules / metrics
+ * （S05 的 adv / sigma 在同一批上线，一起算在 2 里）。
+ */
+export const HASH_VERSION = 2;
 
 export type HashRule = "all" | "executed";
 
@@ -55,8 +59,7 @@ function securityView(s: SecurityInfo | undefined): unknown {
     industry: s.industry,
     delistDate: s.delistDate ?? null,
   };
-  const listDate = (s as SecurityInfo & { listDate?: DateStr | null }).listDate;
-  if (listDate !== undefined) v.listDate = listDate;
+  if (s.listDate !== undefined) v.listDate = s.listDate;
   return v;
 }
 
@@ -97,10 +100,9 @@ export function hashSimInput(
     px.update(`${code}:${p.from}:${len}\n`);
     px.update(`${canonicalJson(securityView(input.securities.get(code)))}\n`);
     for (const arr of [p.open, p.high, p.low, p.close, p.adj, p.st]) px.update(arr.subarray(0, len));
-    // S05 之后才有的日均成交额、波动率：存在才算
-    const extra = p as typeof p & { adv?: Float64Array; sigma?: Float64Array };
-    if (extra.adv) px.update("adv").update(extra.adv.subarray(0, len));
-    if (extra.sigma) px.update("sigma").update(extra.sigma.subarray(0, len));
+    // 按流动性成交（D64）才有的日均成交额、波动率：存在才算
+    if (p.adv) px.update("adv").update(p.adv.subarray(0, len));
+    if (p.sigma) px.update("sigma").update(p.sigma.subarray(0, len));
   }
 
   // 基准：截到 cut 的日历、名称与收盘字节

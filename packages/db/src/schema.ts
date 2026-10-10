@@ -92,7 +92,7 @@ export const drafts = sqliteTable(
   {
     id: text("id").primaryKey(),
     userId: text("user_id").notNull(),
-    /** strategy | tracking */
+    /** strategy | tracking | tracking_stop（停止跟踪，D68） */
     kind: text("kind").notNull(),
     strategyId: text("strategy_id"),
     baseVersionId: text("base_version_id"),
@@ -151,6 +151,12 @@ export const runs = sqliteTable(
     inputHash: text("input_hash"),
     /** 最近一次复核（复核数据 / 完整重跑）的结果，写在原运行上 */
     verify: json<Record<string, unknown>>("verify"),
+    /** 成交诊断（D64，@ivan/core SimDiagnostics）：拒单统计与样例、参与率、容量估计；更早的回测没有 */
+    diagnostics: json<Record<string, unknown>>("diagnostics"),
+    /** 可信度（D65，@ivan/core Confidence）：各项 95% 区间、跑赢基准的把握、方法与种子；只有指标第 2 版的新回测有 */
+    validation: json<Record<string, unknown>>("validation"),
+    /** 未来一年的净值扇形（@ivan/core Fan，deflate 压缩的 JSON） */
+    validationZ: blob("validation_z", { mode: "buffer" }),
     createdAt: integer("created_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
@@ -177,6 +183,10 @@ export const runTrades = sqliteTable(
     reason: text("reason").notNull(),
     pnl: real("pnl"),
     holdDays: integer("hold_days"),
+    /** 按流动性成交（D64）才有：参考价（开盘）、价差与冲击金额、成交金额 ÷ 决策日日均成交额 */
+    ref: real("ref"),
+    slip: real("slip"),
+    part: real("part"),
   },
   (t) => [primaryKey({ columns: [t.runId, t.seq] }), index("run_trades_code").on(t.runId, t.code)],
 );
@@ -232,8 +242,148 @@ export const trackingOrders = sqliteTable(
     name: text("name"),
     side: text("side").notNull(),
     reason: text("reason").notNull(),
+    /** 这条计划所在的快照（D68）；早于账本的行为空 */
+    snapshotId: text("snapshot_id"),
   },
   (t) => [index("tracking_orders_t").on(t.trackingId)],
+);
+
+/**
+ * 跟踪重放的成交与拒单（D68「重放成交留底」）：和 tracking_days 一样每晚整体重写，不是只追加。
+ * 回溯页用它回答「这条计划按现在的数据重放执行得怎样」。
+ */
+export const trackingTrades = sqliteTable(
+  "tracking_trades",
+  {
+    trackingId: text("tracking_id").notNull(),
+    date: text("date").notNull(),
+    seq: integer("seq").notNull(),
+    code: text("code").notNull(),
+    name: text("name"),
+    side: text("side").notNull(),
+    /** fill 成交 | reject 拒单（S05 的最近样例） */
+    kind: text("kind").notNull(),
+    price: real("price"),
+    shares: real("shares"),
+    /** 成交金额；拒单为没成交的金额 */
+    amount: real("amount"),
+    fee: real("fee"),
+    /** 成交原因（entry、rebalance…）；拒单为空 */
+    reason: text("reason"),
+    /** 拒单原因（suspended、limit_up…） */
+    rejectReason: text("reject_reason"),
+  },
+  (t) => [primaryKey({ columns: [t.trackingId, t.date, t.seq] })],
+);
+
+/**
+ * 决策账本（D68）：每个用户一条只追加的哈希链。
+ * hash = sha256Canonical({seq, prevHash, kind, subjectType, subjectId, asOf, payloadHash, createdAt})，
+ * 第一条的 prevHash 是 64 个 0。三张只追加的表（本表、plan_snapshots、plan_items）有 BEFORE UPDATE / DELETE 触发器。
+ */
+export const ledgerEntries = sqliteTable(
+  "ledger_entries",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    seq: integer("seq").notNull(),
+    /** plan | replay_drift | tracking_start | tracking_stop | health_transition | brief */
+    kind: text("kind").notNull(),
+    /** tracking | user */
+    subjectType: text("subject_type").notNull(),
+    subjectId: text("subject_id").notNull(),
+    asOf: text("as_of"),
+    /** plan_snapshots | brief_editions | inline */
+    payloadTable: text("payload_table").notNull(),
+    payloadId: text("payload_id"),
+    /** inline 的内容（deflate 压缩的 JSON） */
+    payloadZ: blob("payload_z", { mode: "buffer" }),
+    payloadHash: text("payload_hash").notNull(),
+    prevHash: text("prev_hash").notNull(),
+    hash: text("hash").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("ledger_user_seq").on(t.userId, t.seq),
+    index("ledger_subject").on(t.subjectType, t.subjectId, t.asOf),
+  ],
+);
+
+/**
+ * 计划快照（D68）：每晚每个跟踪的明日计划与依据，按（跟踪, 决策日）分版次只追加；第 1 版是当晚用户看到的，永不改写。
+ * 各维度的指纹都存下，任何人都能重算版次原因。
+ */
+export const planSnapshots = sqliteTable(
+  "plan_snapshots",
+  {
+    id: text("id").primaryKey(),
+    trackingId: text("tracking_id").notNull(),
+    userId: text("user_id").notNull(),
+    decisionDate: text("decision_date").notNull(),
+    planDate: text("plan_date").notNull(),
+    /** holiday_table | weekday */
+    planDateBasis: text("plan_date_basis").notNull(),
+    edition: integer("edition").notNull(),
+    /** initial | data_revision | engine_change | upgrade | exec_change | rerun_same_inputs */
+    cause: text("cause").notNull(),
+    versionId: text("version_id").notNull(),
+    specHash: text("spec_hash").notNull(),
+    dataVersion: integer("data_version"),
+    dataAsOf: text("data_as_of"),
+    engineVersion: text("engine_version").notNull(),
+    execHash: text("exec_hash").notNull(),
+    /** 输入指纹（上线前的首日计划不跑模拟，为空） */
+    inputHash: text("input_hash"),
+    hashVersion: integer("hash_version").notNull(),
+    /** 解释指纹：sha256Canonical({regime, candidates, codes})；信号模式没有选股解释，为空 */
+    explainHash: text("explain_hash"),
+    explainVersion: integer("explain_version"),
+    factorRegistryVersion: integer("factor_registry_version"),
+    regime: text("regime"),
+    exposureCurrent: real("exposure_current"),
+    exposureNext: real("exposure_next"),
+    equity: real("equity"),
+    cash: real("cash"),
+    /** 持有名次线（前 top × buffer 名），「掉出前 N 名」用；信号模式为空 */
+    band: integer("band"),
+    benchSym: text("bench_sym"),
+    /** 决策日的基准收盘（D79：计划结果回看的基准从这里起算） */
+    benchClose: real("bench_close"),
+    positionsZ: blob("positions_z", { mode: "buffer" }),
+    candidatesZ: blob("candidates_z", { mode: "buffer" }),
+    contentHash: text("content_hash").notNull(),
+    createdAt: integer("created_at").notNull().default(now),
+  },
+  (t) => [
+    uniqueIndex("plan_snapshots_edition").on(t.trackingId, t.decisionDate, t.edition),
+    index("plan_snapshots_user").on(t.userId),
+  ],
+);
+
+export const planItems = sqliteTable(
+  "plan_items",
+  {
+    snapshotId: text("snapshot_id").notNull(),
+    seq: integer("seq").notNull(),
+    code: text("code").notNull(),
+    name: text("name"),
+    side: text("side").notNull(),
+    reason: text("reason").notNull(),
+    /** ranked_out | failed_filter | take_profit | stop_loss | max_hold | delisted | exposure | entry | signal */
+    reasonDetail: text("reason_detail"),
+    rank: integer("rank"),
+    score: real("score"),
+    estPrice: real("est_price"),
+    estShares: real("est_shares"),
+    estWeight: real("est_weight"),
+    refClose: real("ref_close"),
+    curWeight: real("cur_weight"),
+    failedConditions: json<string[]>("failed_conditions"),
+    /** 当时的因子值本身（不是引用，D68） */
+    factors: json<Record<string, number | string | boolean | null>>("factors"),
+    termPct: json<Record<string, number>>("term_pct"),
+  },
+  (t) => [primaryKey({ columns: [t.snapshotId, t.seq] })],
 );
 
 export const threads = sqliteTable(

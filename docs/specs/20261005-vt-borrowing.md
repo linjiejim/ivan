@@ -373,6 +373,14 @@ etl 道认领 `etl` / `check` 前等正在跑的回测结束（不会饿死：co
 - **表里出自记忆的日期（ST 10%、各板新股窗口、两项费率）上线前要逐条对照交易所 / 港交所公告原文**，
   每行的 `cite` 写公告名；错了只改一行。
 
+> **实现备注**（S04）：
+> - 新股窗口的表按板块分（`IPO_NO_LIMIT.star / gem / main`，各自 1990 起 1 天、注册制起 5 天），用 `effective(上市日, 表)` 取 N；
+>   新股窗口先于板块判断，所以北交所也是「上市首日不设限、之后 30%」。出自记忆的行在 `cite` 里写了「待核对公告原文」。
+> - 引擎里没有前收的那天（上市首日、长期停牌后第一天）仍按原来的写法不设限；上市日早于日历或不知道时按老股算。
+> - `tickSize` 先只给出表与函数，S05 的半价差再接进成交。
+> - `describeExec` 新口径写成「开盘价成交，不计滑点；规则表第 2 版，指标第 2 版」（S05 再换前半句）。
+> - 完整重跑归因比成交假设时，先按 `resolveExec` 补齐再算指纹：S04 之前的运行卡记的是 `{v:1}`，与现在的旧口径同义，不能报「成交假设不同」。
+
 ### 5. 指标第 2 版（S04）
 
 `exec.metrics = 2`（D63），第 1 版原样保留给旧运行：
@@ -392,6 +400,16 @@ etl 道认领 `etl` / `check` 前等正在跑的回测结束（不会饿死：co
   「8 年里只有 3 年跑赢基准，超额主要来自少数年份。」
 - **界面**：主指标仍是 4 个；「更多指标」ⓘ 加索提诺、信息比率、跟踪误差、β、最长水下天数、单日 VaR(95%)、月度胜率、
   盈亏比、胜率（按完整持仓），并说明口径「从投入第一笔资金算起」或「旧口径：从首日收盘算起」。
+
+> **实现备注**（S04）：
+> - `Metrics.roundTrips` 存完整持仓的笔数（不存明细）；`riskMetrics`、`roundTrips`、`oosStart(series, months, version)` 从
+>   `@ivan/engine` 导出。界面的「盈亏比」是平均盈利 ÷ 平均亏损的绝对值（`payoff`）；`profitFactor`（盈利合计 ÷ 亏损合计）只进结果与对话。
+> - 「观测少于 30 个时为空」只管收益分布类（索提诺、跟踪误差、信息比率、β、α、VaR / ES、偏度、峰度）；溃疡指数、水下天数、
+>   月度胜率、滚动 12 个月、逐年一致性是路径与分桶统计，照常给出（滚动 12 个月不足一个窗口时为空）。`riskMetrics` 带一个
+>   `minObs` 参数只给单测用。
+> - 仓位控制把一只持仓减到 0、之后又建仓时，上一笔完整持仓按它最后一笔卖出结掉；到区间末还拿着的不算。
+> - 第 2 版「交易成本吃掉超额」的毛超额先只加回费用，S05 有了滑点成本再一并加回。
+> - 「更多指标」里新增的几行只在第 2 版的回测上显示，旧口径只多一行口径说明（旧结果没有这些数，不显示一排「--」）。
 
 ### 6. 按流动性成交（S05）
 
@@ -426,6 +444,21 @@ etl 道认领 `etl` / `check` 前等正在跑的回测结束（不会饿死：co
   `comparable`，提示词加「口径不同的回测先说明口径，不直接比数字」。对话 `run_backtest` 可带 `exec`，`query_run` 加 `what: "execution"`。
 - 冲击系数 0.5 是文献默认值，没有在 A 股 / 港股上校准，ⓘ 里写明，可以改。
 
+> **实现备注**（S05）：
+> - `describeExec` 的分隔用「，」不用「·」（设计系统：一行最多一个「·」），例如「开盘价成交，单边滑点 5bp + 半个最小价位，冲击成本（平方根，系数 0.5），
+>   单笔不超过日均成交额 10%；规则表第 2 版，指标第 2 版」；旧办法成交写「开盘价成交，不计滑点」，等于 `LEGACY_EXEC` 时再加「（旧口径）」。
+>   `isLegacyFill(exec)`（滑点 0、无价位、无冲击、无上限）在 `@ivan/core`，引擎、服务端、web 共用。
+> - 「被截小」按上限实际压低了股数算（不是「上限 < 预算」）；截到 0 手记 `capacity`（不算 `lot_zero`），退一手退到 0 记 `cash`；
+>   都不占空位。`cappedBuyShare` 的分母是过了报价、按预算算了股数的买单。旧口径的拒单也记金额与样例（只是新增字段，从不改变决定）。
+> - 按流动性成交时持仓的 `entryPrice` 是含价差的成交价（止盈止损按它算）；`costDrag` = `feeDrag` + `slipDrag`，
+>   回测页「更多指标」分两行显示。第 2 版指标的 `cost_drag` 检查把滑点也算进「交易成本」。
+> - 仓位控制的增减用 `QuoteCtx.uncapped`：付价差与冲击，但不设上限、不因日均成交额未知拒绝。
+> - `RejectReason`、`SimDiagnostics`、`RejectSample` 的类型放在 `@ivan/core`（web 要用），`fill.ts` 转出。
+>   应用库加 `runs.diagnostics` 与 `run_trades.ref / slip / part`（迁移 0002）。
+> - `compareRuns` 返回 `{ runs, comparable }`（每次带 `execText`、`rulesVersion`、`metricsVersion`；指标口径取结果里实际的版本）。
+> - 容量的 info 变体标题写「资金容量有限」，warn 仍是「容量受限」。`TextLink` 加了 `onClick` 变体给「恢复默认」。
+> - 明日计划的估算只在引擎结果里；跟踪的 `tracking_orders` 还没存这些字段（S08 的计划快照接）。
+
 ### 7. 可信度（S06）
 
 **方法**（D65）：日收益（策略, 基准）成对做平稳块自助法（Politis–Romano，平均块长 L：周度调仓 5、月度 21、季度 63，
@@ -455,6 +488,21 @@ etl 道认领 `etl` / `check` 前等正在跑的回测结束（不会饿死：co
   `kind` 为回测或扫描子回测、状态完成、区间与本次重叠 ≥ 50% 的运行，按「实际用的策略内容」去重
   （版本用 `spec_hash`，扫描子回测用 `specHashOf(specOverride)`，两边同一个 16 位函数）；重跑不算。挪一天起点不再清零，扫描计入。
   检查文案改为「这个策略在重叠的区间里试过 23 种不同设置（含参数扫描）……」。
+
+> **实现备注**（S06）：
+> - 纯函数在 `packages/engine/src/stats/`（`prng`、`normal`、`psr`、`bootstrap`、`fan`、`validation`），类型
+>   `Interval`、`Confidence`、`Fan`、`ValidationResult` 放在 `@ivan/core`（web 要用）。`Confidence` 比原设计多一个
+>   `mddMedian`（重抽样最大回撤的中位数），「回撤偏乐观」的文案要用它。`coreHash` 里的 `validation` 是 `{confidence, fan}` 整体。
+> - 线程消息 `{id, input, tasks?, seed?}` → `{id, result, validation?}`；线程、主线程退路、CLI 共用 worker 的
+>   `runSimTasks`（模拟 + 指标第 2 版时算可信度并追加检查），种子函数 `validationSeed(inputHash)` 也在那里。
+>   跟踪结算不请求可信度。扇形与区间用同一个「最近 4000 个交易日」窗口；回测不到一年时扇形只到历史长度（标题不变，图下注明）。
+> - 跟踪的扇形分位按天数 `series.length` 取（扇形第 d 天 = 从净值 1 起的第 d 个日收益；跟踪净值 = 资产 ÷ 资金，
+>   到最后一天正好 `series.length` 个日收益），不是 `series.length − 1`；超过扇形的一年后为 null；分位保留一位小数，
+>   `summary.navFanBand` 取「<5 / 5-25 / 25-50 / 50-75 / 75-95 / >95」。
+> - 主动收益波动为 0（如全程空仓）时 `psrActive` 为 null；信号模式没有完整持仓时平均段长按 21 天。
+> - `countTrials(strategyId, params, exceptSpecHash)` 的第三个参数是本次的策略内容指纹；扫描在排队时按每个取值各算一次
+>   （写进任务的 `variants[].priorVersions`，子回测存进自己的 `params.priorVersions`），同一次扫描里的兄弟取值还没跑完，不算。
+>   「新建策略从零算」写在回测页诚实检查的 ⓘ 里。
 
 ### 8. 选股解释与个股证据（S07）
 
@@ -505,6 +553,25 @@ server `GET /api/securities/:code/evidence?decisionDate&tradeDate&runId&versionI
 
 **今日选股可追溯**：`/internal/screen` 返回 `dataVersion {id, asOf}` 与 `listHash`（名单的 `sha256Canonical`），
 选股卡底部「数据版本 #812 · 校验 3f9a1c2e · 仅供研究，不构成投资建议」。
+
+> **实现备注**（S07）：
+> - `selectionSql(spec, dates, limit, {trace, noLimit})` 是唯一的构造器，每个排序项的分位表达式只生成一次，得分求和与 t 列共用；
+>   `compileSelection` 的文本逐字不变（快照测试）。`screenOn` 移到 `query/explain.ts`（取 `explainSelection` 的候选名单），
+>   候选多带一个 `close`（今日选股表要用）。`whereParts` 里市场那条的标签仍为 null，解释时它没满足就写「不在策略的市场里」。
+> - 被同行业上限截掉的代码 `passed = false`、`cappedOut = true`、原因「同行业已满 N 只」，得分与分位取同一个构造器去掉上限后的结果。
+>   `/internal/explain` 的日期同样截到已提交的截至日。证据的 asOf 与解释的日期截完后再落到交易日（`lastTradingDay`：
+>   日历上不晚于它的最后一个交易日），问周末、节假日时按前一个交易日回答，抬头的决策日也是那个交易日。
+> - 证据条目的键整份唯一：财报项带 `fin_` 前缀（`fin_np`、`fin_np_yoy`…），否则和同名因子 `np_yoy`、`debt_ratio` 撞键。
+>   港股的「生效日按法定期限推算」写在报告期那一项的标签上。`financials_seen` 只由东财财报写入，引用的来源记 `em`。
+>   金额按亿显示，币种不是本币时注明。证据里先带上 `evidenceVersion: 1`（D97），第 1 版的校验值仍是 `sha256Canonical(items)`。
+> - 近 20 个交易日的逐日状态：这个市场在 asOf 之前一条 `bar_status` 都没有（S13 之前）时值为空、注明「那时还没有逐日记录」，不写 0。
+>   行业另有两条提示：`industry_pre_snapshot`（用的是首次记录时的分类）、`industry_current`（没有快照，用当前分类）。
+> - 只给校验值没法说出「哪一项变了」：`verifyDossier` / `POST /internal/dossier/verify` 另收可选的 `factorKeys`（带策略的证据按策略因子生成，
+>   复核要用同一组）与 `items`（原来的条目，用来逐项比），返回 `{same, hash, changed}`；只给校验值时 `changed` 为空。
+> - 证据接口的 `strategy` 多带 `top`、`hold`（top × buffer），`band` = `top`（会买入）/ `buffer`（已持有就继续拿）/ `out`；
+>   信号模式的策略没有名次，加提示 `signals_mode`。卡片在三组之外多一组「质量与成长」（`quality` 组的因子）。
+> - `run_data_revised` 按设计比运行卡的数据版本号与当前已提交版本号；版本号每晚都涨，所以隔夜以后的回测都会带这条提示
+>   （措辞是「可能不同」）。S08 / S11 有了解释指纹后可以收窄成「名次真的变了才提示」。
 
 ### 9. 决策账本与计划快照（S08）
 
@@ -558,6 +625,23 @@ payload_z, payload_hash, prev_hash, hash, created_at)`，`UNIQUE(user_id, seq)`�
 
 **诚实说明**：单机自部署时，管理员能改数据库文件，哈希链证明的是「内部一致、改动能被发现」，不是第三方不可抵赖；
 导出时把链头哈希带出去才能对外证明（S11）。
+
+> **实现备注**（S08）：
+> - 快照的决策日用结算的「最后结算日」（日历上最后一个 ≤ 已提交截至日的交易日，与 S02 的 `summary.lastDate`、前缀 cut 同一个字符串），
+>   不是原始的截至日；两者通常相同。
+> - `plan_snapshots` 多一列 `band`（持有名次线 = ⌈top × buffer⌉），「掉出前 N 名（排第 31）」要用；它由策略内容决定，不进内容指纹。
+>   内容指纹里仓位系数写成 `exposure: {current, next}`（两者都空时为 `null`）。
+> - 原因文字表（`REASON_TEXT`、`REASON_DETAIL_TEXT`、`formatPlanReason`、版次原因 `PLAN_CAUSE_TEXT`）放在 `@ivan/core` 的 `plan.ts`，
+>   `lib/format.ts` 再导出：给模型看的 `planForModel`（`@ivan/ai`）与网页用同一张表。条件文字里选股解释自带的「没满足：」前缀在拼「不再满足：…」时去掉。
+> - `runForModel` 挪到 `@ivan/ai` 后不能依赖 `@ivan/db`，所以 `COMPUTE_PAUSED_TEXT` 改定义在 `@ivan/core`，`@ivan/db` 原样再导出。
+> - 信号模式没有选股解释：解释指纹为空，细分原因按成交原因（卖出的调出 / 不再满足分别记 ranked_out / failed_filter，不带名次与条件）。
+> - 上线前的精简快照：决策日按交易日历落到交易日；计划日 = 下一个交易日与上线日中较晚的那个（数据还没更新到上线日前一天时就是上线日）。
+> - `tracking_trades` 的拒单行 `amount` 是没成交的金额（想成交 − 已成交），价格、股数、费用为空。
+> - 带跟踪与日期的个股证据有那晚的快照时，返回 `planRecord`（第 1 版计划项；不在计划里但在候选名单里时给候选名次）并跳过按现在数据的名次解释
+>   （`strategy` 为空），免得同一张卡里出现两个名次。
+> - 已停止的跟踪再停（页面或确认卡）返回 409，不重复记账。上线提案的上线日也改用 `nextTradingDay`。
+> - `POST /internal/plan-outcomes` 先由 server 的 `GET /api/plans/:id/outcomes` 接出来（只读、不计额度），回溯页（S11）再显示。
+> - 休市日表只录了 2026 年（A 股、港股，待核对公告原文）：2027 年的国务院节假日安排与港交所交易日历还没发布，表里没有时按工作日推算并在界面注明。
 
 ### 10. 数字核对（S09）
 

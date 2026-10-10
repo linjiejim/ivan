@@ -25,7 +25,6 @@ import {
   todayCN,
   validateSpec,
 } from "@ivan/core";
-import { simulate } from "@ivan/engine";
 import {
   backfill,
   BACKFILL_STEPS,
@@ -43,6 +42,7 @@ import {
   SCHEMA_VERSION,
   Warehouse,
 } from "@ivan/data";
+import { runSimTasks, validationSeed } from "./sim-tasks.ts";
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -172,7 +172,11 @@ async function main() {
       });
       const t1 = Date.now();
       const hashes = hashSimInput(built.input);
-      const r = simulate(built.input);
+      // 和网页回测一样：指标第 2 版再算可信度（D65），种子来自输入指纹
+      const { result: r, validation } = runSimTasks(built.input, {
+        tasks: ["validation"],
+        seed: validationSeed(hashes.inputHash),
+      });
       const t2 = Date.now();
       const m = r.metrics;
       const p = (x: number) => `${(x * 100).toFixed(2)}%`;
@@ -201,10 +205,20 @@ async function main() {
           `样本内年化超额 ${p(r.segments.inSample.excessCagr)}，样本外（${r.segments.outOfSample.start} 起）${p(r.segments.outOfSample.excessCagr)}`,
         );
       }
+      if (validation) {
+        const c = validation.confidence;
+        const ci = (x: { est: number; lo: number; hi: number }) =>
+          `${p(x.est)}（95% 区间 ${p(x.lo)} ~ ${p(x.hi)}）`;
+        console.log(
+          `可信度（按历史日收益成段重抽样 ${c.B} 次，平均段长 ${c.blockMean} 天，种子 ${c.seed}；是区间，不是预测）：` +
+            `年化超额 ${ci(c.excessCagr)}，最大回撤 ${ci(c.maxDrawdown)}，` +
+            `跑赢基准的把握 ${c.psrActive === null ? "-" : p(c.psrActive)}`,
+        );
+      }
       for (const c of r.checks)
         console.log(`${c.level === "warn" ? "⚠️ " : "ℹ️ "} ${c.title}：${c.detail}`);
       const out = flag("out");
-      if (out) writeFileSync(out, JSON.stringify(r, null, 2));
+      if (out) writeFileSync(out, JSON.stringify(validation ? { ...r, validation } : r, null, 2));
       wh.close();
       return;
     }

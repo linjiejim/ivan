@@ -26,8 +26,12 @@ import {
   IconTracking,
   IconData,
   IconChevronDown,
+  IconEvidence,
+  IconPlan,
 } from "../components/icons.tsx";
-import { ScreenTable } from "../components/screen-table.tsx";
+import { EvidenceBody } from "../components/evidence-modal.tsx";
+import { PlanItems, PlanMeta } from "../components/plan-list.tsx";
+import { ScreenTable, ScreenTrace } from "../components/screen-table.tsx";
 import {
   Badge,
   Button,
@@ -42,7 +46,13 @@ import {
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
 import { deviationText, fmtFactor, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
-import type { RunDetail, ScreenResult, SpecChange } from "../lib/types.ts";
+import type {
+  PlanSnapshot,
+  RunDetail,
+  ScreenResult,
+  SecurityEvidence,
+  SpecChange,
+} from "../lib/types.ts";
 import { computePausedNote } from "../lib/verify.ts";
 import { TOOL_ACTIVITY } from "./activity.ts";
 
@@ -444,6 +454,7 @@ const QUERY_TITLE: Record<string, string> = {
   contributors: "盈亏贡献",
   industry: "行业",
   monthly: "月度收益",
+  execution: "成交与容量",
 };
 
 export function QueryCard({
@@ -584,6 +595,49 @@ export function QueryCard({
     );
   } else if (res.what === "monthly") {
     body = <MonthlyTable monthly={res.monthly as never} yearly={res.yearly as never} />;
+  } else if (res.what === "execution") {
+    const ex = res as unknown as {
+      exec: string | null;
+      note: string | null;
+      legacyFill: boolean;
+      rejections: Array<{ side: string; reason: string; count: number; value: number }>;
+      participation: { p50: number; p90: number; max: number } | null;
+      capacityEstimate: number | null;
+      slippageCost: number | null;
+      fees: number | null;
+    };
+    body = (
+      <div className="space-y-3 text-xs">
+        {ex.exec && <p className="text-muted">成交假设：{ex.exec}</p>}
+        {ex.note && <p className={ex.legacyFill ? "text-warn" : "text-muted"}>{ex.note}</p>}
+        {!ex.legacyFill && (
+          <MiniStats
+            items={[
+              ["容量估计", money(ex.capacityEstimate)],
+              ["参与率 90%", pct(ex.participation?.p90, 2, false)],
+              ["滑点与冲击", money(ex.slippageCost)],
+              ["费用", money(ex.fees)],
+            ]}
+          />
+        )}
+        {ex.rejections.length > 0 && (
+          <table className="tabular w-full">
+            <tbody>
+              {ex.rejections.map((x) => (
+                <tr key={`${x.side}${x.reason}`} className="border-b border-line last:border-0">
+                  <td className={cx("py-1.5", x.side === "买" ? "text-up" : "text-down")}>
+                    {x.side}
+                  </td>
+                  <td className="py-1.5 text-ink">{x.reason}</td>
+                  <td className="py-1.5 text-right text-ink-2">{x.count} 次</td>
+                  <td className="py-1.5 text-right text-muted">{money(x.value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    );
   }
   return (
     <Frame title={QUERY_TITLE[res.what] ?? res.what} icon={IconBacktest}>
@@ -653,6 +707,19 @@ export function SecurityCard({
   );
 }
 
+/** 个股证据（D67）：决策日当时可得的数据，带出处、数据版本与校验值 */
+export function EvidenceCard({ output }: { output: SecurityEvidence }) {
+  return (
+    <Frame
+      title="个股证据"
+      icon={IconEvidence}
+      info="只用决策日（成交日的前一个交易日）收盘后当时可得的数据；财报优先用当时首次见到的数值。每行标出来源和数据日，校验值可以复核。"
+    >
+      <EvidenceBody e={output} />
+    </Frame>
+  );
+}
+
 /** 工具名 → 人话 + 图标（没有卡片的工具在对话里显示成一行小字） */
 const TOOL_META: Record<string, [string, Icon]> = {
   list_factors: ["查看可用因子", IconRules],
@@ -668,10 +735,12 @@ const TOOL_META: Record<string, [string, Icon]> = {
   screen_today: ["按策略选股", IconScreen],
   screen_rules: ["按条件选股", IconScreen],
   lookup_security: ["查个股", IconScreen],
+  get_security_evidence: ["查看个股证据", IconEvidence],
   propose_tracking: ["准备上线跟踪", IconGoLive],
   get_tracking: ["读取跟踪", IconTracking],
   get_overview: ["查看看板", IconBoard],
   propose_stop_tracking: ["准备停止跟踪", IconStop],
+  get_plan: ["查看计划依据", IconPlan],
 };
 
 export function ToolChip({ name, state, error }: { name: string; state: string; error?: string }) {
@@ -755,6 +824,7 @@ export function ScreenCard({
       <div className="max-h-72 overflow-auto">
         <ScreenTable result={output} />
       </div>
+      <ScreenTrace result={output} />
     </Frame>
   );
 }
@@ -858,60 +928,93 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
   );
 }
 
-// ── 停止跟踪：模型只能提议，停不停由用户在卡片上点 ──
+// ── 停止跟踪：模型只能写草稿（D68），停不停由用户在卡片上确认 ──
 
 export function StopTrackingCard({
   output,
   send,
 }: {
   output: {
+    /** 旧消息（S08 之前）没有草稿：只显示，不能再确认 */
+    draftId?: string;
     trackingId: string;
     strategyName: string;
     startDate: string;
     days: number;
     excess: number | null;
+    reason?: string | null;
   };
   send: (text: string) => void;
 }) {
   const qc = useQueryClient();
-  const status = useQuery({
-    queryKey: ["tracking", output.trackingId],
-    queryFn: () => api.get<{ status: string }>(`/api/trackings/${output.trackingId}`),
-  });
-  const stop = useMutation({
-    mutationFn: () => api.post(`/api/trackings/${output.trackingId}/stop`),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["tracking", output.trackingId] });
-      await qc.invalidateQueries({ queryKey: ["dashboard"] });
-      send(`我停掉了（trackingId=${output.trackingId}）。`);
-    },
-  });
-  const stopped = status.data?.status === "stopped";
   return (
     <Frame
       title="停止跟踪"
       icon={IconStop}
-      right={stopped ? <Badge>已停止</Badge> : <Badge tone="warn">待你确认</Badge>}
+      right={output.draftId ? <DraftBadge draftId={output.draftId} /> : undefined}
     >
       <p className="text-sm text-ink">
         「{output.strategyName}」<span className="font-mono text-xs">{output.startDate}</span> 起
         {output.days ? `，已跟踪 ${output.days} 天，跟踪超额 ${pct(output.excess)}` : ""}。
       </p>
-      <p className="mt-1 text-xs text-muted">停止后不再每日结算，历史记录都保留。</p>
-      {!stopped && (
+      {output.reason && <p className="mt-1 text-xs text-ink-2">停止原因：{output.reason}</p>}
+      <p className="mt-1 text-xs text-muted">
+        停止后不再每日结算，历史记录都保留；会记进决策账本。
+      </p>
+      {output.draftId && (
         <div className="mt-3.5 border-t border-line pt-3">
-          <Button
-            size="sm"
-            variant="danger"
-            icon={IconStop}
-            loading={stop.isPending}
-            onClick={() => stop.mutate()}
-          >
-            确认停止
-          </Button>
-          <ErrorNote error={stop.error} />
+          <DraftActions
+            draftId={output.draftId}
+            confirmLabel="确认停止"
+            confirmIcon={IconStop}
+            onConfirmed={async () => {
+              await qc.invalidateQueries({ queryKey: ["tracking", output.trackingId] });
+              send(`我停掉了（trackingId=${output.trackingId}）。`);
+            }}
+          />
         </div>
       )}
+    </Frame>
+  );
+}
+
+// ── 明日计划与依据（get_plan，D68） ──
+
+export function PlanCard({
+  output,
+}: {
+  output: { trackingId: string; strategyName: string; market: string; plan: PlanSnapshot };
+}) {
+  const p = output.plan;
+  return (
+    <Frame
+      title={
+        <>
+          「{output.strategyName}」的计划
+          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+            决策日 {p.decisionDate}
+          </span>
+        </>
+      }
+      icon={IconPlan}
+      info="按规则在决策日收盘后算出的模拟计划；每项的 ⓘ 是当时的名次、得分、因子分位与估算，存的是当时的值，以后数据修订也不会改写。"
+      right={
+        <span className="font-normal text-muted">
+          第 <span className="tabular">{p.edition}</span> 版
+        </span>
+      }
+    >
+      <p className="mb-1.5 text-xs text-muted">
+        <PlanMeta plan={p} />
+      </p>
+      {p.items.length ? (
+        <PlanItems plan={p} trackingId={output.trackingId} market={output.market} />
+      ) : (
+        <p className="text-xs text-muted">没有计划中的买卖，持仓照旧。</p>
+      )}
+      <p className="mt-2 border-t border-line pt-2 text-right text-2xs text-muted">
+        仅供研究，不构成投资建议
+      </p>
     </Frame>
   );
 }

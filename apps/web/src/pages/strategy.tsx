@@ -11,6 +11,7 @@ import { DiffView } from "../components/diff-view.tsx";
 import {
   IconAI,
   IconBacktest,
+  IconChevronDown,
   IconChevronRight,
   IconCompare,
   IconEdit,
@@ -22,13 +23,14 @@ import {
   IconScreen,
   IconTracking,
 } from "../components/icons.tsx";
-import { ScreenTable } from "../components/screen-table.tsx";
+import { ScreenTable, ScreenTrace } from "../components/screen-table.tsx";
 import { SpecEditor } from "../components/spec-editor.tsx";
 import {
   Badge,
   Button,
   Callout,
   Card,
+  Checkbox,
   CheckBadges,
   cx,
   DataTable,
@@ -36,11 +38,13 @@ import {
   ErrorNote,
   Field,
   Figure,
+  Info,
   Input,
   LiveDot,
   Modal,
   PageHeader,
   PageSkeleton,
+  Select,
   Skeleton,
   Tabs,
   Tag,
@@ -66,6 +70,88 @@ export interface BacktestPreset {
   exec?: ExecConfig;
 }
 
+/** 单笔上限的可选值（不限 / 5% / 10% / 20%）；预填了别的值时也列出来 */
+const PARTICIPATION_CHOICES = [null, 0.05, 0.1, 0.2] as const;
+
+/**
+ * 成交假设（D64）：默认收起，展开后可改单边滑点、半个最小价位、冲击成本与单笔上限；
+ * 默认值直接取 @ivan/core 的 defaultExec（纯函数，不另开接口）；「恢复默认」连规则表与指标版本一起恢复。
+ */
+function ExecFields({
+  market,
+  exec,
+  onChange,
+}: {
+  market: Market;
+  exec: ExecConfig;
+  onChange: (e: ExecConfig) => void;
+}) {
+  const choices: Array<number | null> = [...PARTICIPATION_CHOICES];
+  if (!choices.includes(exec.participation)) choices.push(exec.participation);
+  const slipOk = exec.slippageBps >= 0 && exec.slippageBps <= 200;
+  return (
+    <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-4">
+      <Field
+        label="单边滑点（bp）"
+        hint="买价加、卖价减；1bp = 0.01%"
+        error={slipOk ? undefined : "单边滑点要在 0–200 bp 之间"}
+      >
+        <Input
+          type="number"
+          value={exec.slippageBps}
+          min={0}
+          max={200}
+          step={1}
+          onChange={(e) => onChange({ ...exec, slippageBps: Number(e.target.value) })}
+        />
+      </Field>
+      <Field label="单笔不超过日均成交额" hint="按决策日的 20 日均成交额；没有成交额数据的股票不买">
+        <Select
+          className="w-full"
+          value={exec.participation === null ? "" : String(exec.participation)}
+          onChange={(e) =>
+            onChange({ ...exec, participation: e.target.value ? Number(e.target.value) : null })
+          }
+        >
+          {choices.map((p) => (
+            <option key={String(p)} value={p === null ? "" : String(p)}>
+              {p === null ? "不限" : `${Number((p * 100).toFixed(1))}%`}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <div className="col-span-2 flex flex-wrap items-center gap-x-5 gap-y-2">
+        <Checkbox
+          label="加上半个最小价位"
+          checked={exec.tickSpread}
+          onChange={(e) => onChange({ ...exec, tickSpread: e.target.checked })}
+        />
+        <span className="inline-flex items-center gap-1">
+          <Checkbox
+            label="计入冲击成本"
+            checked={exec.impact !== "none"}
+            onChange={(e) =>
+              onChange(
+                e.target.checked
+                  ? { ...exec, impact: "sqrt", impactEta: exec.impactEta || 0.5 }
+                  : { ...exec, impact: "none", impactEta: 0 },
+              )
+            }
+          />
+          <Info label="冲击成本">
+            冲击 = 系数 × 日波动 × √(成交金额 ÷ 日均成交额)，系数{" "}
+            {exec.impact === "none" ? 0.5 : exec.impactEta}。0.5 是文献里的默认值，没有在 A
+            股、港股上校准过，只作粗略估计。
+          </Info>
+        </span>
+        <TextLink className="ml-auto" onClick={() => onChange(defaultExec(market))}>
+          恢复默认
+        </TextLink>
+      </div>
+    </div>
+  );
+}
+
 export function BacktestDialog({
   versionId,
   market,
@@ -84,7 +170,8 @@ export function BacktestDialog({
   const [end, setEnd] = useState(preset?.end ?? today);
   const [capital, setCapital] = useState(preset?.capital ?? 1_000_000);
   const [oos, setOos] = useState(preset?.oosMonths ?? 12);
-  const exec = preset?.exec ?? defaultExec(market);
+  const [exec, setExec] = useState<ExecConfig>(preset?.exec ?? defaultExec(market));
+  const [execOpen, setExecOpen] = useState(false);
   const navigate = useNavigate();
   const qc = useQueryClient();
   const run = useMutation({
@@ -158,6 +245,18 @@ export function BacktestDialog({
         收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
         <div className="mt-1">成交假设：{describeExec(exec)}</div>
       </Callout>
+      <div className="mt-4">
+        <button
+          type="button"
+          aria-expanded={execOpen}
+          onClick={() => setExecOpen(!execOpen)}
+          className="inline-flex items-center gap-1 text-xs font-medium text-ink-2 transition-colors hover:text-ink"
+        >
+          {execOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+          成交假设
+        </button>
+        {execOpen && <ExecFields market={market} exec={exec} onChange={setExec} />}
+      </div>
       <ErrorNote error={run.error} />
     </Modal>
   );
@@ -634,7 +733,10 @@ export function StrategyPage() {
                 ))}
               </div>
             ) : screen.data ? (
-              <ScreenTable result={screen.data} spec={version.spec} />
+              <>
+                <ScreenTable result={screen.data} spec={version.spec} />
+                {screen.data.rows.length > 0 && <ScreenTrace result={screen.data} />}
+              </>
             ) : (
               <ErrorNote error={screen.error} />
             )}

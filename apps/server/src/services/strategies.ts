@@ -14,11 +14,20 @@ import {
   validateSpec,
 } from "@ivan/core";
 import { specHashOf } from "@ivan/core/node";
-import { drafts, newId, runs, strategies, strategyVersions, trackings } from "@ivan/db";
+import {
+  appendLedger,
+  drafts,
+  newId,
+  runs,
+  strategies,
+  strategyVersions,
+  trackings,
+} from "@ivan/db";
 import { and, desc, eq, inArray, max } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
 import { applyPatch, type PatchOp } from "../lib/jsonpatch.ts";
+import { stopTracking } from "./trackings.ts";
 
 export interface VersionView {
   id: string;
@@ -378,7 +387,8 @@ export function trackingExec(
 
 export type ConfirmResult =
   | { kind: "strategy"; strategyId: string; versionId: string }
-  | { kind: "tracking"; trackingId: string };
+  | { kind: "tracking"; trackingId: string }
+  | { kind: "tracking_stop"; trackingId: string };
 
 /**
  * 用户确认草稿（只能经 POST /api/drafts/:id/confirm 调用，带用户 Cookie）。
@@ -425,20 +435,48 @@ export function confirmDraft(userId: string, draftId: string): ConfirmResult {
     const { strategy, version } = getVersion(userId, p.versionId);
     const execConfig = trackingExec(userId, p.baselineRunId ?? null, version.spec.market);
     const trackingId = newId("t_");
-    db.insert(trackings)
-      .values({
-        id: trackingId,
-        userId,
-        strategyId: strategy.id,
-        versionId: version.id,
-        market: version.spec.market,
-        startDate: p.startDate,
-        capital: p.capital,
-        baselineRunId: p.baselineRunId ?? null,
-        execConfig: execConfig as unknown as Record<string, unknown>,
+    const h = env().app;
+    // 上线与上线留痕（D68 tracking_start）在同一个事务里：先拿写锁再读账本链尾
+    h.sqlite
+      .transaction(() => {
+        db.insert(trackings)
+          .values({
+            id: trackingId,
+            userId,
+            strategyId: strategy.id,
+            versionId: version.id,
+            market: version.spec.market,
+            startDate: p.startDate,
+            capital: p.capital,
+            baselineRunId: p.baselineRunId ?? null,
+            execConfig: execConfig as unknown as Record<string, unknown>,
+          })
+          .run();
+        appendLedger(h, {
+          userId,
+          kind: "tracking_start",
+          subjectType: "tracking",
+          subjectId: trackingId,
+          asOf: p.startDate,
+          payloadTable: "inline",
+          payload: {
+            trackingId,
+            versionId: version.id,
+            specHash: version.specHash,
+            capital: p.capital,
+            startDate: p.startDate,
+            baselineRunId: p.baselineRunId ?? null,
+            exec: execConfig,
+          },
+        });
       })
-      .run();
+      .immediate();
     result = { kind: "tracking", trackingId };
+  } else if (d.kind === "tracking_stop") {
+    // 停止跟踪只能经这张确认卡（或页面上的停止按钮），对话工具只写草稿（D68、验收 14）
+    const p = d.payload as { trackingId: string; reason?: string | null };
+    stopTracking(userId, p.trackingId, p.reason ?? null);
+    result = { kind: "tracking_stop", trackingId: p.trackingId };
   } else {
     throw new AppError(400, `未知草稿类型 ${d.kind}`);
   }

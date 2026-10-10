@@ -2,11 +2,11 @@
  * 结算的指纹与漂移归因（D57）：每晚存前缀指纹，下一晚按上一晚的最后结算日重算再比；
  * 「周五休市、周四是本周最后一个交易日」的边界上前缀也稳定。
  */
-import { StrategySpecSchema } from "@ivan/core";
+import { type Fan, StrategySpecSchema } from "@ivan/core";
 import { HASH_VERSION } from "@ivan/data";
 import { seedSyntheticMarket } from "@ivan/data/testing";
-import { trackingDays, trackings } from "@ivan/db";
-import { ENGINE_VERSION } from "@ivan/engine";
+import { newId, packJson, runs, trackingDays, trackings, unpackJson } from "@ivan/db";
+import { ENGINE_VERSION, fanPercentile } from "@ivan/engine";
 import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeJobContext, makeTestEnv, seedTracking } from "../testing/harness.ts";
@@ -154,5 +154,76 @@ describe("结算指纹与漂移归因", () => {
   it("现有跟踪的成交假设默认是旧口径", () => {
     const row = t.env.app.db.select().from(trackings).where(eq(trackings.id, trackingId)).get()!;
     expect(row.execConfig).toEqual({ v: 1 });
+  });
+});
+
+describe("跟踪净值在基准回测扇形里的分位（D65）", () => {
+  /** 一条基准回测：扇形五条分位线每天各涨 −0.2% / −0.1% / 0 / +0.1% / +0.2% */
+  function baselineRun(o: { fan: boolean }): string {
+    const id = newId("r_");
+    const days = Array.from({ length: 60 }, (_, k) => Math.round(((k + 1) * 243) / 60));
+    const line = (g: number) => days.map((d) => (1 + g) ** d);
+    const fan: Fan = {
+      horizon: 243,
+      days,
+      p5: line(-0.002),
+      p25: line(-0.001),
+      p50: line(0),
+      p75: line(0.001),
+      p95: line(0.002),
+      mdd: { p5: -0.3, p50: -0.15, p95: -0.05 },
+      probLoss: 0.35,
+    };
+    const tr = t.env.app.db.select().from(trackings).where(eq(trackings.id, trackingId)).get()!;
+    t.env.app.db
+      .insert(runs)
+      .values({
+        id,
+        userId: "u_test",
+        strategyId: tr.strategyId,
+        versionId: tr.versionId,
+        params: {},
+        status: "done",
+        seriesZ: packJson([]),
+        validationZ: o.fan ? packJson(fan) : null,
+      })
+      .run();
+    return id;
+  }
+
+  it("基准回测有扇形：存下按绝对净值的分位与档位；和跑赢回测同期分开存", async () => {
+    const runId = baselineRun({ fan: true });
+    t.env.app.db
+      .update(trackings)
+      .set({ baselineRunId: runId })
+      .where(eq(trackings.id, trackingId))
+      .run();
+    await settle();
+    const s = summary() as Summary & { navFanPercentile: number | null; navFanBand: string };
+    const tr = t.env.app.db.select().from(trackings).where(eq(trackings.id, trackingId)).get()!;
+    const days = t.env.app.db
+      .select()
+      .from(trackingDays)
+      .where(eq(trackingDays.trackingId, trackingId))
+      .all();
+    const fan = unpackJson<Fan>(
+      t.env.app.db.select().from(runs).where(eq(runs.id, runId)).get()!.validationZ,
+    )!;
+    const expected = fanPercentile(fan, days.length, tr.lastNav!)!;
+    expect(s.navFanPercentile).toBe(expected.percentile);
+    expect(s.navFanBand).toBe(expected.band);
+    expect(s.navFanPercentile).toBeGreaterThanOrEqual(5);
+    expect(s.navFanPercentile).toBeLessThanOrEqual(95);
+  });
+
+  it("基准回测没有扇形（旧口径）：为 null", async () => {
+    const runId = baselineRun({ fan: false });
+    t.env.app.db
+      .update(trackings)
+      .set({ baselineRunId: runId })
+      .where(eq(trackings.id, trackingId))
+      .run();
+    await settle();
+    expect(summary()).toMatchObject({ navFanPercentile: null, navFanBand: null });
   });
 });

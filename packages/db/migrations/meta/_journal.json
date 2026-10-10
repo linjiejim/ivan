@@ -15,6 +15,34 @@
       "when": 1791194807564,
       "tag": "0001_run_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791214086763,
+      "tag": "0002_liquidity_fills",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791215640694,
+      "tag": "0003_validation",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791218914732,
+      "tag": "0004_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791218920752,
+      "tag": "0005_ledger_triggers",
+      "breakpoints": true
     }
   ]
 }

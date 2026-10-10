@@ -3,10 +3,12 @@
  * 月度收益、个股与行业归因、期末持仓、交易明细、样本内外收进下方分页，次要指标与复现信息收进 ⓘ。
  * 参数扫描显示各取值的结果与「参数脆弱」检查。
  * 复现（D57）：「复核数据」只比输入指纹（排队任务，轮询到完成）；「完整重跑」新建一次重跑，比结果指纹。
+ * 成交与容量（D64）：拒单统计、买入参与率、容量估计、滑点与费用，旧成交假设的回测明说结果偏乐观。
+ * 可信度（D65）：各项按历史重抽样的 95% 区间、跑赢基准的把握、一年净值扇形（按需加载）；是区间，不是预测。
  */
-import { defaultExec, describeExec, isLegacyExec } from "@ivan/core";
+import { defaultExec, describeExec, isLegacyExec, isLegacyFill } from "@ivan/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import {
@@ -18,6 +20,7 @@ import {
   useThemeVersion,
 } from "../components/charts/echart.tsx";
 import { NavChart } from "../components/charts/nav-chart.tsx";
+import { EvidenceButton } from "../components/evidence-modal.tsx";
 import { MonthlyTable, PnlBars } from "../components/charts/small.tsx";
 import {
   IconAI,
@@ -56,7 +59,7 @@ import {
   Button,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { money, NA, num, pct, tone } from "../lib/format.ts";
+import { money, NA, num, pct, REASON_TEXT, tone } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
 import {
   computePausedNote,
@@ -66,7 +69,11 @@ import {
   verifyBadgeState,
   verifyInFlight,
 } from "../lib/verify.ts";
-import type { RunDetail, RunVerify, Trade } from "../lib/types.ts";
+import type { Interval, RejectReason, RunDetail, RunVerify, Trade } from "../lib/types.ts";
+
+const FanChart = lazy(() =>
+  import("../components/charts/fan-chart.tsx").then((m) => ({ default: m.FanChart })),
+);
 
 function useRun(id: string) {
   return useQuery({
@@ -195,18 +202,6 @@ function ReproCallout({ r }: { r: RunDetail }) {
   );
 }
 
-const REASON: Record<string, string> = {
-  entry: "建仓",
-  rebalance: "调出",
-  filtered: "不再满足条件",
-  take_profit: "止盈",
-  stop_loss: "止损",
-  max_hold: "到期",
-  signal: "信号",
-  delisted: "退市",
-  exposure: "仓位控制",
-};
-
 function Trades({ runId }: { runId: string }) {
   const [page, setPage] = useState(0);
   const size = 50;
@@ -240,6 +235,9 @@ function Trades({ runId }: { runId: string }) {
             <Th align="right">费用</Th>
             <Th align="right">盈亏</Th>
             <Th>原因</Th>
+            <Th className="w-8">
+              <span className="sr-only">证据</span>
+            </Th>
           </tr>
         </thead>
         <tbody>
@@ -257,7 +255,24 @@ function Trades({ runId }: { runId: string }) {
                   {t.side === "buy" ? "买" : "卖"}
                 </Badge>
               </Td>
-              <Td align="right">{num(t.price, 3)}</Td>
+              <Td align="right">
+                <span className="inline-flex items-center gap-1">
+                  {num(t.price, 3)}
+                  {t.slip ? (
+                    <Info label="参考价">
+                      <InfoRows
+                        rows={[
+                          ["参考价（开盘）", num(t.ref ?? null, 3)],
+                          ["价差与冲击", money(t.slip)],
+                          ...(t.part
+                            ? ([["占日均成交额", pct(t.part, 2, false)]] as Array<[string, string]>)
+                            : []),
+                        ]}
+                      />
+                    </Info>
+                  ) : null}
+                </span>
+              </Td>
               <Td align="right">{money(t.amount)}</Td>
               <Td align="right" className="text-muted">
                 {num(t.fee, 2)}
@@ -266,8 +281,12 @@ function Trades({ runId }: { runId: string }) {
                 {t.pnl === null || t.pnl === undefined ? "" : money(t.pnl)}
               </Td>
               <Td className="text-ink-2">
-                {REASON[t.reason] ?? t.reason}
+                {REASON_TEXT[t.reason] ?? t.reason}
                 {t.holdDays ? <span className="text-muted">，持有 {t.holdDays} 天</span> : ""}
+              </Td>
+              <Td className="py-0">
+                {/* 成交日的前一个交易日是决策日（D67） */}
+                <EvidenceButton code={t.code} tradeDate={t.date} runId={runId} />
               </Td>
             </tr>
           ))}
@@ -617,6 +636,8 @@ export function RunPage() {
     );
   }
   if (!m) return <ErrorNote error={new Error("结果缺失")} />;
+  // 指标第 2 版（D63）才有风险指标与完整持仓统计；旧口径的回测只显示原来那几项
+  const risk = (m.metricsVersion ?? 1) === 2 ? (m.risk ?? null) : null;
   return (
     <div className="space-y-6">
       {header}
@@ -663,6 +684,7 @@ export function RunPage() {
             诚实检查没有发现需要注意的问题
             <Info>
               引擎按固定阈值检查：样本外是否明显变差、收益是否集中在少数股票或行业、交易是否太少、是否调参调太多次、费用是否吃掉太多收益。
+              调参次数只数同一个策略在重叠区间里试过的不同设置（含参数扫描），新建一个策略会从零算。
             </Info>
           </span>
         )}
@@ -672,14 +694,34 @@ export function RunPage() {
             <InfoRows
               rows={[
                 ["总收益", pct(m.totalReturn)],
-                ["胜率（卖出盈利的比例）", m.winRate === null ? NA : pct(m.winRate, 0, false)],
+                [
+                  risk ? "胜率（按完整持仓）" : "胜率（卖出盈利的比例）",
+                  m.winRate === null ? NA : pct(m.winRate, 0, false),
+                ],
+                ...(risk ? ([["盈亏比", num(m.payoff ?? null)]] as Array<[string, string]>) : []),
                 ["平均持有", m.avgHoldDays ? `${m.avgHoldDays.toFixed(0)} 天` : NA],
                 ["买入笔数", String(m.buys)],
                 ["年化换手", `${m.turnover.toFixed(1)} 倍`],
-                ["费用拖累", `${pct(m.costDrag, 2, false)}/年`],
+                ...(m.slipDrag !== undefined
+                  ? ([
+                      ["费用拖累", `${pct(m.feeDrag, 2, false)}/年`],
+                      ["滑点与冲击拖累", `${pct(m.slipDrag, 2, false)}/年`],
+                    ] as Array<[string, string]>)
+                  : ([["费用拖累", `${pct(m.costDrag, 2, false)}/年`]] as Array<[string, string]>)),
                 ["年化波动", pct(m.volatility, 1, false)],
                 ...(m.avgExposure !== undefined
                   ? ([["平均股票仓位", pct(m.avgExposure, 0, false)]] as Array<[string, string]>)
+                  : []),
+                ...(risk
+                  ? ([
+                      ["索提诺", num(risk.sortino)],
+                      ["信息比率", num(risk.infoRatio)],
+                      ["跟踪误差", pct(risk.trackingError, 1, false)],
+                      ["β", num(risk.beta)],
+                      ["最长水下天数（交易日）", String(risk.maxUnderwaterDays)],
+                      ["单日 VaR(95%)", pct(risk.var95, 2, false)],
+                      ["月度胜率", pct(risk.monthlyHitRate, 0, false)],
+                    ] as Array<[string, string]>)
                   : []),
                 ...(r.segments?.outOfSample
                   ? ([
@@ -689,6 +731,9 @@ export function RunPage() {
                   : []),
               ]}
             />
+            <p className="mt-2 border-t border-line pt-2 text-muted">
+              {risk ? "口径：从投入第一笔资金算起（含首日买入费用）" : "旧口径：从首日收盘算起"}
+            </p>
           </Info>
         </span>
       </div>
@@ -714,7 +759,199 @@ export function RunPage() {
   );
 }
 
-type DetailTab = "monthly" | "stocks" | "industry" | "positions" | "trades" | "segments";
+type DetailTab =
+  | "monthly"
+  | "stocks"
+  | "industry"
+  | "positions"
+  | "trades"
+  | "execution"
+  | "confidence"
+  | "segments";
+
+const REJECT_TEXT: Record<RejectReason, string> = {
+  suspended: "停牌",
+  limit_up: "涨停开盘",
+  limit_down: "跌停开盘",
+  capacity: "超过成交额上限",
+  lot_zero: "不够一手",
+  cash: "现金不足",
+  no_liquidity: "没有成交额数据",
+};
+
+/** 成交与容量（D64）：拒单统计（旧成交假设也有）、买入参与率、容量估计、滑点与费用 */
+function Execution({ run: r }: { run: RunDetail }) {
+  const m = r.metrics!;
+  const d = r.diagnostics;
+  const legacyFill = r.exec ? isLegacyFill(r.exec) : true;
+  const rows = Object.entries(d?.rejections ?? {}).sort((a, b) => b[1].count - a[1].count);
+  const cap = r.exec?.participation ?? null;
+  const items: Array<[string, string, string?]> = legacyFill
+    ? []
+    : [
+        [
+          "买入参与率",
+          d?.participation
+            ? `中位 ${pct(d.participation.p50, 2, false)}，90% ${pct(d.participation.p90, 2, false)}，最大 ${pct(d.participation.max, 1, false)}`
+            : NA,
+          "成交金额占决策日 20 日均成交额的比例（建仓与信号买入）",
+        ],
+        [
+          "容量估计",
+          d?.capacityEstimate ? `约 ${money(d.capacityEstimate)}` : NA,
+          cap !== null
+            ? `按单笔不超过日均成交额 ${pct(cap, 0, false)} 估算：资金 × ${pct(cap, 0, false)} ÷ 买入参与率的 90 分位。只是粗略量级。`
+            : "没设单笔上限，不估容量。",
+        ],
+        [
+          "滑点与冲击合计",
+          `${money(m.slippageCost ?? null)}（${pct(m.slipDrag ?? null, 2, false)}/年）`,
+          "成交价与开盘价之差 × 股数，买卖都算；冲击系数是文献默认值，没有在 A 股、港股上校准。",
+        ],
+        ["费用合计", `${money(m.fees)}（${pct(m.feeDrag ?? m.costDrag, 2, false)}/年）`],
+      ];
+  return (
+    <div className="space-y-4">
+      {r.exec && (
+        <p className="text-xs text-muted">
+          成交假设：<span className="text-ink-2">{describeExec(r.exec)}</span>
+        </p>
+      )}
+      {legacyFill && (
+        <Callout tone="warn">这次回测用的是旧成交假设（开盘价成交、不计滑点），结果偏乐观</Callout>
+      )}
+      {!d ? (
+        <Empty title="这次回测早于成交诊断" className="border-0">
+          重新回测一次就能看到拒单与容量。
+        </Empty>
+      ) : (
+        <>
+          {items.length > 0 && (
+            <dl className="grid gap-x-6 gap-y-3 @3xl:grid-cols-2">
+              {items.map(([label, value, info]) => (
+                <div key={label}>
+                  <dt className="flex items-center gap-1 text-xs text-muted">
+                    {label}
+                    {info && <Info label={label}>{info}</Info>}
+                  </dt>
+                  <dd className="tabular mt-0.5 text-sm font-medium text-ink">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {!legacyFill && (d.advUnknownBuys || d.sigmaFallbacks) ? (
+            <p className="text-xs text-muted">
+              {d.advUnknownBuys ? `有 ${d.advUnknownBuys} 笔买单没有日均成交额数据。` : ""}
+              {d.sigmaFallbacks
+                ? `有 ${d.sigmaFallbacks} 次报价缺波动率，冲击按 2.5% 的日波动估。`
+                : ""}
+            </p>
+          ) : null}
+          {rows.length ? (
+            <DataTable>
+              <thead>
+                <tr>
+                  <Th>原因</Th>
+                  <Th align="right">次数</Th>
+                  <Th align="right">
+                    <span className="inline-flex items-center gap-1">
+                      金额
+                      <Info label="金额">
+                        没成交的金额。买单按预算算，截小的按没买到的部分；卖单顺延的每天记一次，按当天市值算。
+                      </Info>
+                    </span>
+                  </Th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(([key, v]) => {
+                  const [side, reason] = key.split(":") as ["buy" | "sell", RejectReason];
+                  return (
+                    <tr key={key}>
+                      <Td>
+                        <Badge tone={side === "buy" ? "up" : "down"}>
+                          {side === "buy" ? "买" : "卖"}
+                        </Badge>
+                        <span className="ml-2 text-ink">{REJECT_TEXT[reason] ?? reason}</span>
+                      </Td>
+                      <Td align="right">{v.count}</Td>
+                      <Td align="right" className="text-ink-2">
+                        {money(v.value)}
+                      </Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </DataTable>
+          ) : (
+            <p className="text-sm text-muted">没有买不进或卖不出的单。</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** 「{点估计}（95% 区间 {下沿} ~ {上沿}）」 */
+function ciText(x: Interval, fmt: (v: number) => string): string {
+  return `${fmt(x.est)}（95% 区间 ${fmt(x.lo)} ~ ${fmt(x.hi)}）`;
+}
+
+/** 可信度（D65）：按历史重抽样的区间，不是预测；不说「盈利概率」 */
+function Confidence({ run: r }: { run: RunDetail }) {
+  const v = r.validation!;
+  const ratio = (x: number) => num(x);
+  const rows: Array<[string, string]> = [
+    ["年化收益", ciText(v.cagr, (x) => pct(x))],
+    ["年化超额", ciText(v.excessCagr, (x) => pct(x))],
+    ["夏普", ciText(v.sharpe, ratio)],
+    ["信息比率", ciText(v.ir, ratio)],
+    ["最大回撤", ciText(v.maxDrawdown, (x) => pct(x, 1, false))],
+  ];
+  return (
+    <div className="space-y-4">
+      <p className="flex items-center gap-1 text-xs text-muted">
+        按历史重抽样的 95% 区间
+        <Info label="可信度">
+          按历史日收益成段重抽样 {v.B} 次（平均段长 {v.blockMean} 天，种子 {v.seed}
+          ）。这是区间，不是预测。
+          {v.n < r.series.length && ` 只用了最近 ${v.n} 个交易日。`}
+        </Info>
+      </p>
+      <dl className="grid gap-x-6 gap-y-3 @3xl:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-xs text-muted">{label}</dt>
+            <dd className="tabular mt-0.5 text-sm font-medium text-ink">{value}</dd>
+          </div>
+        ))}
+        <div>
+          <dt className="flex items-center gap-1 text-xs text-muted">
+            按历史重抽样，跑赢基准的把握
+            <Info label="跑赢基准的把握">
+              主动收益（策略日收益减基准日收益）的概率夏普比（PSR），按偏度与峰度修正；日收益不到 30
+              个时不算。
+            </Info>
+          </dt>
+          <dd className="tabular mt-0.5 text-sm font-medium text-ink">
+            {pct(v.psrActive, 0, false)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-muted">超额为正的重抽样占比</dt>
+          <dd className="tabular mt-0.5 text-sm font-medium text-ink">
+            {pct(v.probExcessPositive, 0, false)}
+          </dd>
+        </div>
+      </dl>
+      {r.fan && (
+        <Suspense fallback={<Skeleton className="h-[260px] w-full" />}>
+          <FanChart fan={r.fan} />
+        </Suspense>
+      )}
+    </div>
+  );
+}
 
 /** 细节分页：一次只看一块，不用往下翻一长页 */
 function Details({ run: r }: { run: RunDetail }) {
@@ -731,7 +968,9 @@ function Details({ run: r }: { run: RunDetail }) {
     { value: "industry", label: "行业" },
     { value: "positions", label: "期末持仓" },
     { value: "trades", label: "交易明细" },
+    { value: "execution", label: "成交与容量" },
   ];
+  if (r.validation) items.push({ value: "confidence", label: "可信度" });
   if (r.segments?.outOfSample) items.push({ value: "segments", label: "样本内外" });
   return (
     <section className="rounded-xl border border-line bg-surface shadow-[var(--edge)]">
@@ -786,13 +1025,15 @@ function Details({ run: r }: { run: RunDetail }) {
                   {r.final.positions.map((p) => (
                     <span
                       key={p.code}
-                      className="inline-flex h-7 items-center gap-2 rounded-lg px-2.5 text-xs ring-1 ring-line ring-inset"
+                      className="inline-flex h-8 items-center gap-2 rounded-lg pr-0.5 pl-2.5 text-xs ring-1 ring-line ring-inset"
                     >
                       <span className="text-ink">{p.name}</span>
                       <span className="tabular text-muted">{pct(p.weight, 0, false)}</span>
                       <span className={cx("tabular font-medium", tone(p.ret))}>
                         {pct(p.ret, 0)}
                       </span>
+                      {/* 持仓快照的日期当作成交日：看它前一个交易日收盘后的证据 */}
+                      <EvidenceButton code={p.code} tradeDate={r.final!.date} runId={r.id} />
                     </span>
                   ))}
                 </div>
@@ -804,6 +1045,8 @@ function Details({ run: r }: { run: RunDetail }) {
             <Empty title="没有期末持仓数据" className="border-0" />
           ))}
         {tab === "trades" && <Trades runId={r.id} />}
+        {tab === "execution" && <Execution run={r} />}
+        {tab === "confidence" && r.validation && <Confidence run={r} />}
         {tab === "segments" && r.segments && (
           <div>
             <p className="mb-2 text-xs text-muted">

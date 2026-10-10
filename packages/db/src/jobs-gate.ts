@@ -21,5 +21,5 @@ export function computeBlocked(sqlite: Database.Database): { kind: string; since
   return row ? { kind: row.kind, since: row.since } : null;
 }
 
-/** 暂停回测时给用户看的一句话 */
-export const COMPUTE_PAUSED_TEXT = "行情正在更新，回测会在更新完成后开始";
+/** 暂停回测时给用户看的一句话（定义在 @ivan/core，模型摘要也用它） */
+export { COMPUTE_PAUSED_TEXT } from "@ivan/core";

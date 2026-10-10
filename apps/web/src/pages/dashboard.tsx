@@ -52,6 +52,7 @@ import {
   MARKET_TEXT,
   NA,
   pct,
+  REASON_TEXT,
   tone,
 } from "../lib/format.ts";
 import type { StrategyLine } from "../lib/multi-series.ts";
@@ -539,12 +540,18 @@ function PlanCard({
                   {s.orders[0]?.planDate} 开盘
                 </span>
               </div>
-              <div className="flex flex-wrap gap-1.5 pl-4">
+              <div className="flex flex-wrap gap-x-3 gap-y-1.5 pl-4">
                 {s.orders.map((o) => (
-                  <Badge key={`${o.side}-${o.code}`} tone={o.side === "buy" ? "up" : "down"}>
-                    <span className="opacity-70">{o.side === "buy" ? "买" : "卖"}</span>
-                    {o.name ?? o.code}
-                  </Badge>
+                  <span key={`${o.side}-${o.code}`} className="inline-flex items-center gap-1.5">
+                    <Badge tone={o.side === "buy" ? "up" : "down"}>
+                      <span className="opacity-70">{o.side === "buy" ? "买" : "卖"}</span>
+                      {o.name ?? o.code}
+                    </Badge>
+                    {/* 计划原因（D68）：掉出前 N 名、不再满足哪条、止盈止损… */}
+                    <span className="text-2xs text-muted">
+                      {o.reasonText ?? REASON_TEXT[o.reason] ?? o.reason}
+                    </span>
+                  </span>
                 ))}
               </div>
             </div>

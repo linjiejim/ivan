@@ -1,27 +1,37 @@
 /** 服务端接口的返回形状（与 apps/server/src/services 保持一致）。 */
 import type {
   Check,
+  Confidence,
   ExecConfig,
+  Fan,
   FactorDef,
+  Interval,
   Market,
   Metrics,
   OpenPosition,
   PendingOrder,
   PeriodMetrics,
+  RejectReason,
   RunCard,
   SeriesPoint,
+  SimDiagnostics,
   StrategySpec,
   Trade,
 } from "@ivan/core";
 
 export type {
   Check,
+  Confidence,
   ExecConfig,
+  Fan,
   FactorDef,
+  Interval,
   Market,
   Metrics,
+  RejectReason,
   RunCard,
   SeriesPoint,
+  SimDiagnostics,
   StrategySpec,
   Trade,
 };
@@ -68,6 +78,9 @@ export interface RunHeadline {
   sharpe: number;
   winRate: number | null;
   buys: number;
+  /** 信息比率、索提诺（指标第 2 版才有，D63）；旧口径与 S04 之前的摘要没有 */
+  ir?: number | null;
+  sortino?: number | null;
 }
 
 export interface RunSummary {
@@ -133,6 +146,11 @@ export interface RunDetail extends RunSummary {
   verify: RunVerify | null;
   /** 成交假设（旧运行按旧口径解析）；读不懂时为 null */
   exec: ExecConfig | null;
+  /** 成交诊断（D64）：拒单统计、参与率、容量估计；早于 S05 的回测没有 */
+  diagnostics: SimDiagnostics | null;
+  /** 可信度（D65）：各项 95% 区间、跑赢基准的把握与一年净值扇形；只有指标第 2 版的新回测有 */
+  validation: Confidence | null;
+  fan: Fan | null;
   metrics: Metrics | null;
   segments: { inSample: PeriodMetrics; outOfSample: PeriodMetrics | null } | null;
   attribution: {
@@ -184,6 +202,9 @@ export interface TrackingView {
 
 /** 结算写的跟踪摘要（只列界面用到的字段） */
 export type TrackingSummary = Record<string, unknown> & {
+  /** 按绝对净值（不扣基准）在基准回测重抽样扇形里的分位（D65）；基准没有扇形或跟踪超过一年时为 null */
+  navFanPercentile?: number | null;
+  navFanBand?: "<5" | "5-25" | "25-50" | "50-75" | "75-95" | ">95" | null;
   replay?: {
     compared: number;
     navDrift: number;
@@ -264,6 +285,9 @@ export interface Dashboard {
       name: string | null;
       side: string;
       reason: string;
+      /** 快照里的细分原因文字（D68）：「掉出前 15 名（排第 31）」；早于账本的计划只有粗原因 */
+      reasonText?: string;
+      rank?: number | null;
     }>;
   }>;
   recentRuns: RunSummary[];
@@ -293,6 +317,68 @@ export interface ScreenResult {
     close: number | null;
     factors: Record<string, unknown>;
   }>;
+  /** 今日选股可追溯（D67）：读的数据版本与名单指纹 */
+  dataVersion?: { id: number | null; asOf: string | null };
+  listHash?: string;
+}
+
+// ── 个股证据（D67）：决策日当时可得的数据，每项带出处与数据日 ──
+
+export interface EvidenceItem {
+  group: "price" | "valuation" | "financial" | "status" | "quality";
+  key: string;
+  label: string;
+  value: number | string | boolean | null;
+  unit?: string;
+  asOf: string;
+  availDate: string;
+  ref: {
+    table: string;
+    key: Record<string, string | number>;
+    src: string | null;
+    ver: number | null;
+  };
+  note?: string;
+}
+
+export interface EvidenceCaveat {
+  id: string;
+  level: "info" | "warn";
+  title: string;
+}
+
+export interface SecurityEvidence {
+  /** 那晚第 1 版计划里这只股票的记录（带跟踪与日期且那晚有快照时，D68）；旧接口没有这个字段 */
+  planRecord?: PlanRecord | null;
+  dossier: {
+    evidenceVersion: number;
+    code: string;
+    name: string | null;
+    market: "A" | "HK";
+    asOf: string;
+    dataDate: string;
+    dataVersion: { id: number | null; asOf: string | null };
+    items: EvidenceItem[];
+    caveats: EvidenceCaveat[];
+    hash: string;
+  };
+  decision: { decisionDate: string; tradeDate: string | null };
+  strategy: {
+    source: "run" | "version" | "tracking";
+    versionId: string;
+    name: string;
+    date: string;
+    regime: "strong" | "weak" | null;
+    passed: boolean;
+    failed: string[];
+    rank: number | null;
+    score: number | null;
+    termPct: Record<string, number> | null;
+    band: "top" | "buffer" | "out" | null;
+    top: number;
+    hold: number;
+  } | null;
+  caveats: EvidenceCaveat[];
 }
 
 export interface SpecChange {
@@ -314,3 +400,73 @@ export type ProposeResult =
   | { ok: false; errors: string[] };
 
 export type { FactorDef as Factor };
+
+// ── 计划快照（D68） ──
+
+export type PlanDateBasis = "holiday_table" | "weekday";
+
+export interface PlanItem {
+  seq: number;
+  code: string;
+  name: string | null;
+  side: string;
+  reason: string;
+  reasonDetail: string | null;
+  reasonText: string;
+  rank: number | null;
+  score: number | null;
+  estPrice: number | null;
+  estShares: number | null;
+  estWeight: number | null;
+  refClose: number | null;
+  curWeight: number | null;
+  failedConditions: string[] | null;
+  factors: Record<string, number | string | boolean | null> | null;
+  termPct: Record<string, number> | null;
+}
+
+export interface PlanSnapshot {
+  id: string;
+  trackingId: string;
+  decisionDate: string;
+  planDate: string;
+  planDateBasis: PlanDateBasis | string;
+  edition: number;
+  cause: string;
+  causeText: string;
+  versionId: string;
+  dataVersion: number | null;
+  dataAsOf: string | null;
+  engineVersion: string;
+  regime: string | null;
+  exposure: { current: number | null; next: number | null } | null;
+  equity: number | null;
+  cash: number | null;
+  band: number | null;
+  benchSym: string | null;
+  benchClose: number | null;
+  contentHash: string;
+  createdAt: number;
+  items: PlanItem[];
+}
+
+export interface PlanRecord {
+  snapshotId: string;
+  edition: number;
+  decisionDate: string;
+  planDate: string;
+  dataAsOf: string | null;
+  dataVersion: number | null;
+  band: number | null;
+  inPlan: boolean;
+  side: string | null;
+  reason: string | null;
+  reasonDetail: string | null;
+  reasonText: string;
+  rank: number | null;
+  score: number | null;
+  termPct: Record<string, number> | null;
+  failedConditions: string[] | null;
+  factors: Record<string, number | string | boolean | null> | null;
+  estWeight: number | null;
+}

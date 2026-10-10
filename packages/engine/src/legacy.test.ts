@@ -64,6 +64,24 @@ describe("金标准夹具确实走到要盯的分支", () => {
     );
   });
 
+  it("旧口径也记拒单（D64）：基础夹具丙开盘涨停买不进，记进 buy:limit_up，金标准指纹不变", () => {
+    const r = simulate(LEGACY_FIXTURES.base!());
+    expect(sha256Canonical(legacyView(r))).toBe(golden.base);
+    expect(r.diagnostics!.rejections["buy:limit_up"]).toMatchObject({ count: 1 });
+    expect(r.diagnostics!.samples).toContainEqual(
+      expect.objectContaining({
+        code: "000003.SZ",
+        side: "buy",
+        reason: "limit_up",
+        filledValue: 0,
+      }),
+    );
+    // 参与率、容量这些只在按流动性成交时有；旧口径的成交记录没有参考价与滑点
+    expect(r.diagnostics).not.toHaveProperty("participation");
+    expect(r.trades.some((t) => "ref" in t || "slip" in t)).toBe(false);
+    expect(r.metrics).not.toHaveProperty("slippageCost");
+  });
+
   it("港股：每个费率日前后都有成交", () => {
     const r = simulate(hkFixture());
     for (const d of ["2021-08-01", "2022-01-01", "2023-01-01", "2023-11-17"]) {

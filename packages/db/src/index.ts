@@ -8,12 +8,14 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deflateSync, inflateSync } from "node:zlib";
 import * as schema from "./schema.ts";
 
 export * from "./schema.ts";
 export { COMPUTE_PAUSED_TEXT, computeBlocked, WAREHOUSE_WRITERS } from "./jobs-gate.ts";
 export { schema };
+export { newId, packJson, unpackJson } from "./util.ts";
+export * from "./ledger.ts";
+export * from "./plans.ts";
 
 const MIGRATIONS = resolve(fileURLToPath(new URL("..", import.meta.url)), "migrations");
 
@@ -33,20 +35,4 @@ export function openAppDb(path: string, opts: { migrate?: boolean } = {}): AppDb
   const db = drizzle(sqlite, { schema });
   if (opts.migrate !== false) migrate(db, { migrationsFolder: MIGRATIONS });
   return { sqlite, db };
-}
-
-/** 大 JSON（净值序列、持仓快照）压缩存储 */
-export function packJson(v: unknown): Buffer {
-  return deflateSync(Buffer.from(JSON.stringify(v)));
-}
-
-export function unpackJson<T>(b: Buffer | null | undefined): T | null {
-  if (!b) return null;
-  return JSON.parse(inflateSync(b).toString("utf8")) as T;
-}
-
-export function newId(prefix = ""): string {
-  const t = Date.now().toString(36);
-  const r = Math.random().toString(36).slice(2, 10);
-  return `${prefix}${t}${r}`;
 }

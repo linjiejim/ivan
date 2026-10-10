@@ -59,3 +59,17 @@ export function ScreenTable({ result, spec }: { result: ScreenResult; spec?: Str
     </DataTable>
   );
 }
+
+/** 今日选股可追溯（D67）：读的数据版本与名单指纹 */
+export function ScreenTrace({ result }: { result: ScreenResult }) {
+  return (
+    <p className="mt-2 border-t border-line pt-2 text-2xs text-muted">
+      {result.listHash ? (
+        <span className="font-mono">
+          数据版本 #{result.dataVersion?.id ?? NA} · 校验 {result.listHash.slice(0, 8)} ·{" "}
+        </span>
+      ) : null}
+      仅供研究，不构成投资建议
+    </p>
+  );
+}

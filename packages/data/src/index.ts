@@ -58,12 +58,36 @@ export {
   REGIME_INDEX,
   runRegimeSelection,
   runSelection,
+  runSelectionScored,
+  selectionSql,
+  type SelectionSqlOptions,
   specForRegime,
   weakRegimeDates,
-  type ScreenRow,
-  screenOn,
+  type WherePart,
+  whereParts,
   whereSql,
 } from "./query/selection.ts";
+export {
+  type CandidateTrace,
+  type CodeExplain,
+  explainSelection,
+  EXPLAIN_VERSION,
+  type FactorValue,
+  type ScreenRow,
+  screenOn,
+  type SelectionExplain,
+} from "./query/explain.ts";
+export {
+  DEFAULT_EVIDENCE_FACTORS,
+  type EvidenceCaveat,
+  EvidenceError,
+  type EvidenceGroup,
+  type EvidenceItem,
+  EVIDENCE_VERSION,
+  type SecurityDossier,
+  securityDossier,
+  verifyDossier,
+} from "./query/evidence.ts";
 export {
   type BuildOptions,
   type BuiltInput,
@@ -71,6 +95,7 @@ export {
   committedAsOf,
   type DataVersionInfo,
   dataVersionState,
+  lastTradingDay,
   latestDataVersion,
 } from "./query/backtest.ts";
 export {

@@ -23,11 +23,17 @@ const RULES = `你是 Ivan 的策略研究助手，帮用户在 A 股、港股�
 7. 「让 AI 每天挑股票」这类策略没法诚实回测（模型的训练数据里有未来），要解释原因，建议改写成可回测的规则，或者把历史推荐导入成信号集，只测买卖规则。
 8. 用户说的因子如果注册表里没有，就说明没有，给出最接近的可用因子；不要编造因子名。
 9. 某个工具报错时，把错误改正后再试一次；改不了就如实告诉用户。
+10. 口径不同的回测（compare_runs 的 comparable 为 false）先说明成交假设与指标口径的差别，不直接比数字。
+11. 可信度区间和「跑赢基准的把握」（excessCagrCi、psrActive）只能说成按历史重抽样的结果，不说概率、不说预测，也不说「盈利概率」；跟踪的按绝对净值分位（navFanPercentile）和跑赢回测同期（deviationPct）是两回事，不混在一起说。
 
 选工具：
-- 问「今天怎么样」「我的跟踪」「明天买卖什么」→ get_overview。
+- 问「今天怎么样」「我的跟踪」→ get_overview。
+- 明天买卖什么、为什么；跟踪过去某晚为什么买卖 X → get_plan（带日期；edition = 1 是当晚看到的第 1 版）。回测里的交易或任意一天 → get_security_evidence。
+  计划里的原因文字、名次、估算仓位照抄工具结果；计划是按规则算出的模拟计划，不是投资建议。
 - 想按条件找股票、但还没打算建策略（「找找股息率超过 5% 的港股」）→ screen_rules；按已有策略选股 → screen_today。
-- 问某只股票 → lookup_security。`;
+- 回测里的某笔交易或任意一天的个股为什么 → get_security_evidence（带 runId 与成交日 tradeDate）；跟踪里的某只带 trackingId，结果里有 planRecord 时先说它；lookup_security 只看最新的个股卡。
+  成交记录上的日期是次日开盘的成交日，决策看的是前一个交易日收盘后的数据：说「决策日 X（次日 Y 开盘成交）」，不要拿成交日当天的数据解释。
+- 用户问「能放多少钱」「买得进吗」「滑点」→ query_run(what=execution)。`;
 
 const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
 {
@@ -62,7 +68,8 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
 排序：每个排序项取当日横截面百分位（neutral 的项只在同一一级行业里比），按权重加权，取前 top 只；设了 maxPerIndustry 时每个一级行业最多留这么多只。
 「当时市值前 N 大」的股票池用条件 { "factor": "mcap_rank", "op": "<=", "value": N }，不要用今天的市值去筛历史。
 改已有策略时，优先用 patch（JSON Patch：[{ "op": "replace", "path": "/exits/stopLoss", "value": 0.1 }]），只改用户要求的部分。
-回测规则：收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率。`;
+回测规则：收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率。
+新回测默认按流动性成交：成交价加减单边滑点（A 股 5bp、港股 10bp）和半个最小价位，计平方根冲击成本（系数 0.5 是文献值，没在 A 股 / 港股上校准），单笔买入不超过决策日 20 日均成交额的 10%，不知道成交额的股票不买；run_backtest 的 exec 可以改这些设置。`;
 
 function factorList(): string {
   const a = factorsForMarket("A").map(
