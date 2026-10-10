@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PRESETS } from "./presets.ts";
-import { describeSpec, validateSpec } from "./strategy.ts";
+import { benchmarksOf, describeSpec, validateSpec } from "./strategy.ts";
 
 describe("预设模板", () => {
   it.each(PRESETS.map((p) => [p.id, p] as const))("%s 能通过校验并生成描述", (_id, p) => {
@@ -67,5 +67,43 @@ describe("仓位控制与大盘切换（D52、D53）", () => {
     const text = describeSpec(v.spec!).join("\n");
     expect(text).toMatch(/排序（沪深300在 200 日均线上方）：市盈率 TTM越低越好×1/);
     expect(text).toMatch(/排序（沪深300在 200 日均线下方）：市净率（行业内比）越低越好×2/);
+  });
+});
+
+describe("新基准与港股通股票池（D75、D77）", () => {
+  const a = {
+    name: "x",
+    market: "A",
+    rank: { terms: [{ factor: "pe_ttm", weight: 1, better: "low" }], top: 10 },
+  };
+  const hk = { ...a, market: "HK" };
+
+  it("不带新字段的旧策略照常通过；A 股可以选中证 500 / 1000 / 红利全收益", () => {
+    expect(validateSpec(a).errors).toEqual([]);
+    expect(validateSpec({ ...a, benchmark: "csi300" }).errors).toEqual([]);
+    for (const b of ["csi500", "csi1000", "csi_div"]) {
+      const v = validateSpec({ ...a, benchmark: b });
+      expect(v.errors).toEqual([]);
+      expect(describeSpec(v.spec!).join("\n")).toMatch(/基准：中证(500|1000|红利)全收益/);
+    }
+    expect(benchmarksOf("A")).toEqual(["csi300", "sse", "csi500", "csi1000", "csi_div"]);
+    expect(benchmarksOf("HK")).toEqual(["hsi", "hscei"]);
+  });
+
+  it("中证 500 用在港股策略上被拒；不认识的基准被拒", () => {
+    expect(validateSpec({ ...hk, benchmark: "csi500" }).errors.join("\n")).toMatch(
+      /基准「中证500全收益」和策略市场不一致/,
+    );
+    expect(validateSpec({ ...a, benchmark: "nope" }).ok).toBe(false);
+  });
+
+  it("港股通筛选只用于港股；描述里写明只选港股通标的", () => {
+    expect(validateSpec({ ...a, universe: { hkConnect: true } }).errors.join("\n")).toMatch(
+      /港股通筛选只适用于港股策略/,
+    );
+    const v = validateSpec({ ...hk, universe: { hkConnect: true } });
+    expect(v.errors).toEqual([]);
+    expect(describeSpec(v.spec!)[0]).toMatch(/只选港股通标的/);
+    expect(validateSpec({ ...hk, universe: { hkConnect: false } }).ok).toBe(false);
   });
 });

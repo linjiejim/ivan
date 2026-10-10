@@ -27,7 +27,9 @@ export {
   type BackfillStep,
   beginDataVersion,
   commitDataVersion,
+  compareAdjVolume,
   daily,
+  type DailyOptions,
   type DailyResult,
   type DataVersionKind,
   type DataVersionStatus,
@@ -46,8 +48,36 @@ export {
   upsertSnapshot,
 } from "./etl/snapshots.ts";
 export { computeFactors } from "./etl/factors.ts";
-export { INDEXES, latestTradeDates } from "./etl/reference.ts";
+export {
+  fillProvisionalTr,
+  INDEXES,
+  latestTradeDates,
+  PROVISIONAL_PAIRS,
+  updateIndexes,
+} from "./etl/reference.ts";
+export { HK_CONNECT_SH_COLUMN } from "./etl/securities.ts";
 export * from "./compute/adjust.ts";
+export { adjFromFactors, CaliberError, toIvanBars, toRefActions } from "./compute/normalize.ts";
+export * from "./sources/types.ts";
+export {
+  ADAPTERS,
+  chainOf,
+  DEFAULT_CHAINS,
+  INVALID_CHAIN_TEXT,
+  resolveChain,
+  type ResolvedChain,
+} from "./sources/registry.ts";
+export {
+  type Attempt,
+  attemptsOf,
+  ChainError,
+  type ChainResult,
+  FetchLedger,
+  fetchWithChain,
+  type LedgerFailure,
+  type SourcesLedger,
+  summarizeAttempts,
+} from "./sources/chain.ts";
 export * from "./compute/financials.ts";
 export * from "./compute/series.ts";
 export * from "./compute/names.ts";
@@ -55,10 +85,15 @@ export * from "./compute/stock-factors.ts";
 export {
   compileSelection,
   conditionSql,
+  type HkConnectList,
+  loadHkConnect,
   REGIME_INDEX,
   runRegimeSelection,
   runSelection,
   runSelectionScored,
+  type SelectionContext,
+  selectionContext,
+  SelectionDataError,
   selectionSql,
   type SelectionSqlOptions,
   specForRegime,
@@ -96,11 +131,51 @@ export {
   type DataVersionInfo,
   dataVersionState,
   lastTradingDay,
+  type FetchSourcesSummary,
+  lastFetchSources,
   latestDataVersion,
 } from "./query/backtest.ts";
+export {
+  BENCH_MISMATCH,
+  benchFirstDate,
+  benchFirstDates,
+  benchMismatchCaveat,
+  dividendWeightShare,
+  selectedMedianMcapRank,
+} from "./query/bench.ts";
 export {
   HASH_VERSION,
   type HashRule,
   hashSimInput,
   type InputHashes,
 } from "./query/input-hash.ts";
+export {
+  acceptMissingFromEnv,
+  assessCompleteness,
+  type Completeness,
+  type CompletenessInput,
+  IncompleteDataError,
+  type MissingReason,
+  missingThreshold,
+  RetryableEtlError,
+  SOFT_STEP_LABEL,
+  type SoftOutcome,
+  type SoftStep,
+  type SoftStepStatus,
+} from "./etl/completeness.ts";
+export {
+  type HygieneCtx,
+  type Issue,
+  type IssueRule,
+  type IssueSeverity,
+  validateBars,
+} from "./compute/hygiene.ts";
+export {
+  committedMissingCritical,
+  type DataIssueRow,
+  type DataQuality,
+  dataQuality,
+  resolveDataIssue,
+  runProvenance,
+  softStepStatus,
+} from "./query/data-health.ts";

@@ -4,3 +4,4 @@
 export { type FakeRequest, type FakeRoute, FakeHttp, loadFixture } from "./fake-http.ts";
 export { type SeedOptions, type SeedStock, seedSyntheticMarket, syntheticCalendar } from "./seed.ts";
 export { downgradeWarehouseToV2 } from "./warehouse.ts";
+export { A_INDEX_SECIDS, emDailyRoute, emSecidOf } from "./nightly.ts";

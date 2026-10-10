@@ -213,6 +213,13 @@ async function purgeHkRmbCounters(ctx: EtlContext): Promise<number> {
   return codes.length;
 }
 
+/**
+ * 沪港通标的的列名（D77）：探针 hk.connect.columns 核实之前为 null，只记深港通名单；
+ * 核实后填上列名，就和 hk_connect_sz 一样每晚记 hk_connect_sh（值「是」记 Y），港股通股票池取两者的并集；
+ * 同时把 hk_connect_sh 加进 CAPTURE_ATTRS.HK，管理页的采集情况才看得到。
+ */
+export const HK_CONNECT_SH_COLUMN: string | null = null;
+
 export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: number }> {
   const [info, profile] = await Promise.all([
     emQuery(ctx.http, {
@@ -220,7 +227,8 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
       host: "sec",
       // GANGGUTONGBIAODISHEN = 港股通（深）标的：只是深港通名单，不能当成「港股通」整体（D61）
       columns:
-        "SECUCODE,SECURITY_NAME_ABBR,SECURITY_TYPE,BOARD,TRADE_UNIT,LISTING_DATE,GANGGUTONGBIAODISHEN",
+        "SECUCODE,SECURITY_NAME_ABBR,SECURITY_TYPE,BOARD,TRADE_UNIT,LISTING_DATE,GANGGUTONGBIAODISHEN" +
+        (HK_CONNECT_SH_COLUMN ? `,${HK_CONNECT_SH_COLUMN}` : ""),
       pageSize: 5000,
     }),
     emQuery(ctx.http, {
@@ -234,6 +242,8 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
   const rows: SecurityRow[] = [];
   const connectSz = new Map<string, string | null>();
   let connectSeen = false;
+  const connectSh = new Map<string, string | null>();
+  let connectShSeen = false;
   for (const r of info) {
     const code = String(r.SECUCODE);
     if (!/^\d{5}\.HK$/.test(code) || !HK_TYPES.has(String(r.SECURITY_TYPE))) continue;
@@ -256,6 +266,11 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
     const flag = str(r.GANGGUTONGBIAODISHEN);
     if (flag !== null) connectSeen = true;
     connectSz.set(code, flag === "是" ? "Y" : "N");
+    if (HK_CONNECT_SH_COLUMN) {
+      const sh = str(r[HK_CONNECT_SH_COLUMN]);
+      if (sh !== null) connectShSeen = true;
+      connectSh.set(code, sh === "是" ? "Y" : "N");
+    }
   }
   await purgeHkRmbCounters(ctx);
   const current = new Set(rows.map((r) => r.code));
@@ -286,6 +301,10 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
   // 整批都拿不到这一列（接口改了）时不记，免得把整个名单记成「不是」
   if (connectSeen) capture.hk_connect_sz = connectSz;
   else ctx.log("证券资料里没有深港通标记（GANGGUTONGBIAODISHEN），这次不记深港通名单");
+  if (HK_CONNECT_SH_COLUMN) {
+    if (connectShSeen) capture.hk_connect_sh = connectSh;
+    else ctx.log(`证券资料里没有沪港通标记（${HK_CONNECT_SH_COLUMN}），这次不记沪港通名单`);
+  }
   await captureAttrs(ctx, "HK", capture);
   ctx.log(`港股证券表：${rows.length} 只在市普通股`);
   return { total: rows.length };

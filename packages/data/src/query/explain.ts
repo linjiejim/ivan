@@ -14,7 +14,15 @@ import {
   type StrategySpec,
 } from "@ivan/core";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
-import { col, selectionSql, specForRegime, weakRegimeDates, whereParts } from "./selection.ts";
+import {
+  col,
+  type SelectionContext,
+  selectionContext,
+  selectionSql,
+  specForRegime,
+  weakRegimeDates,
+  whereParts,
+} from "./selection.ts";
 
 /** 选股解释的版本：定义在 @ivan/core 的 versions.ts，这里原样再导出 */
 export { EXPLAIN_VERSION };
@@ -108,10 +116,12 @@ export async function explainSelection(
     ? (await weakRegimeDates(wh, specIn.market, [date], regimeOn.ma)).has(date)
     : false;
   const spec = specForRegime(specIn, weak);
+  // 港股通股票池（D77）：名单和回测同一份；没有名单时抛 SelectionDataError
+  const sctx = await selectionContext(wh, spec);
   const terms = spec.rank!.terms;
   const keys = termKeys(terms);
   const cols = factorCols(spec);
-  const sel = selectionSql(spec, [date], o.limit, { trace: true });
+  const sel = selectionSql(spec, [date], o.limit, { ...sctx, trace: true });
   const rows = await wh.all<Record<string, unknown>>(
     `WITH picked AS (${sel})
      SELECT p.code, p.score, ${terms.map((_, i) => `p.t${i}`).join(", ")}, s.name AS sec_name,
@@ -130,7 +140,9 @@ export async function explainSelection(
     factors: pickFactors(r, cols),
     close: (r.bar_close as number | null) ?? null,
   }));
-  const codes = o.codes?.length ? await explainCodes(wh, spec, date, o.codes, keys, cols) : [];
+  const codes = o.codes?.length
+    ? await explainCodes(wh, spec, date, o.codes, keys, cols, sctx)
+    : [];
   return {
     version: EXPLAIN_VERSION,
     date,
@@ -149,9 +161,10 @@ async function explainCodes(
   codesIn: readonly string[],
   keys: readonly string[],
   cols: readonly string[],
+  sctx: SelectionContext,
 ): Promise<CodeExplain[]> {
   const codes = [...new Set(codesIn)];
-  const parts = whereParts(spec);
+  const parts = whereParts(spec, sctx);
   const rankFactors = [...new Set(spec.rank!.terms.map((t) => col(t.factor)))];
   const names = new Map(
     (
@@ -177,7 +190,11 @@ async function explainCodes(
   let uncapped: Map<string, Record<string, unknown>> | null = null;
   const rankedAll = async () =>
     (ranked ??= new Map(
-      (await wh.all<Record<string, unknown>>(selectionSql(spec, [date], 0, { trace: true, noLimit: true }))).map(
+      (
+        await wh.all<Record<string, unknown>>(
+          selectionSql(spec, [date], 0, { ...sctx, trace: true, noLimit: true }),
+        )
+      ).map(
         (r, i) => [String(r.code), { rank: i + 1, row: r }],
       ),
     ));
@@ -186,6 +203,7 @@ async function explainCodes(
       (
         await wh.all<Record<string, unknown>>(
           selectionSql({ ...spec, rank: { ...spec.rank!, maxPerIndustry: undefined } }, [date], 0, {
+            ...sctx,
             trace: true,
             noLimit: true,
           }),

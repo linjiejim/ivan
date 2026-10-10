@@ -1,5 +1,5 @@
 /**
- * 管理页（spec §10、§11）：用户与额度、邀请码、数据状态与手动触发任务、今日用量、近 14 天 LLM 用量。
+ * 管理页（spec §10、§11）：用户与额度、邀请码、数据状态与手动触发任务、数据质量（D74）、今日用量、近 14 天 LLM 用量。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { todayCN } from "@ivan/core";
@@ -7,6 +7,7 @@ import { useState } from "react";
 import {
   IconBrief,
   IconCheck,
+  IconChecks,
   IconClock,
   IconData,
   IconInvite,
@@ -38,10 +39,19 @@ import {
   Th,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { captureLines, openVersionText, versionStatusBadge } from "../lib/data-status.ts";
+import {
+  captureLines,
+  issueRuleText,
+  openVersionText,
+  qualitySentence,
+  retryBannerText,
+  softAlerts,
+  sourcesLines,
+  versionStatusBadge,
+} from "../lib/data-status.ts";
 import { dateTime, MARKET_TEXT, NA } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { DataStatus } from "../lib/types.ts";
+import type { DataQuality, DataStatus } from "../lib/types.ts";
 import { quotaPatch } from "../lib/verify.ts";
 
 interface AdminUser {
@@ -218,6 +228,99 @@ function ResetPasswordDialog({ user, onClose }: { user: AdminUser | null; onClos
   );
 }
 
+/**
+ * 数据质量（D74）：近 7 天按规则统计的拦截与标记、问题最多的代码、未解决的问题；每条可以「标为已核对」。
+ * 拒收 = warn，标记 = neutral。
+ */
+export function DataQualityCard({ quality }: { quality: DataQuality | null }) {
+  const qc = useQueryClient();
+  const resolve = useMutation({
+    mutationFn: (id: number) => api.post(`/api/admin/data-issues/${id}/resolve`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-data"] }),
+  });
+  return (
+    <Card
+      title="数据质量"
+      icon={IconChecks}
+      subtitle={quality ? qualitySentence(quality) : "行情服务没有运行，暂时看不到"}
+      info="写入日线前的体检：价格关系不对、成交量为负、日期不是交易日的日线不入库（拦下），这只股票这天按缺失处理；其余异常只标记，不影响写入。不同来源对不上时只标记，不自动改。标为已核对后不再计入回测的「数据问题」提示。"
+    >
+      {quality && (
+        <div className="space-y-4">
+          {quality.byRule.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {quality.byRule.map((r) => (
+                <Badge
+                  key={`${r.rule}-${r.severity}`}
+                  tone={r.severity === "reject" ? "warn" : "neutral"}
+                >
+                  {issueRuleText(r.rule)} {r.n}
+                  {r.severity === "reject" ? " 拦下" : r.open ? ` 待核 ${r.open}` : ""}
+                </Badge>
+              ))}
+            </div>
+          )}
+          {quality.topCodes.length > 0 && (
+            <p className="text-xs text-ink-2">
+              问题最多：
+              {quality.topCodes
+                .slice(0, 5)
+                .map((c) => `${c.name ?? c.code}（${c.code}）${c.n} 处`)
+                .join("、")}
+            </p>
+          )}
+          <ErrorNote error={resolve.error} />
+          {quality.open.length ? (
+            <DataTable minWidth={640}>
+              <thead>
+                <tr>
+                  <Th>日期</Th>
+                  <Th>股票</Th>
+                  <Th>问题</Th>
+                  <Th>说明</Th>
+                  <Th />
+                </tr>
+              </thead>
+              <tbody>
+                {quality.open.map((o) => (
+                  <tr key={o.id}>
+                    <Td className="font-mono text-[12px] whitespace-nowrap text-muted">{o.date}</Td>
+                    <Td className="whitespace-nowrap">
+                      <span className="text-ink">{o.name ?? o.code}</span>{" "}
+                      <span className="font-mono text-[12px] text-muted">{o.code}</span>
+                    </Td>
+                    <Td>
+                      <Badge tone={o.severity === "reject" ? "warn" : "neutral"}>
+                        {issueRuleText(o.rule)}
+                      </Badge>
+                    </Td>
+                    <Td className="text-xs text-ink-2">
+                      <span className="line-clamp-2">{o.detail ?? ""}</span>
+                    </Td>
+                    <Td align="right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={IconCheck}
+                        loading={resolve.isPending && resolve.variables === o.id}
+                        onClick={() => resolve.mutate(o.id)}
+                      >
+                        标为已核对
+                      </Button>
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </DataTable>
+          ) : (
+            <p className="text-sm text-muted">没有待核的数据问题。</p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function AdminPage() {
   usePageTitle("管理");
   const me = useMe();
@@ -235,7 +338,10 @@ export function AdminPage() {
   });
   const data = useQuery({
     queryKey: ["admin-data"],
-    queryFn: () => api.get<{ status: DataStatus; jobs: JobRow[] }>("/api/admin/data"),
+    queryFn: () =>
+      api.get<{ status: DataStatus; quality: DataQuality | null; jobs: JobRow[] }>(
+        "/api/admin/data",
+      ),
     enabled: isAdmin,
     refetchInterval: 5000,
   });
@@ -322,6 +428,12 @@ export function AdminPage() {
             行情正在更新，回测会在更新完成后开始（{dateTime(status.computePaused.since)} 起）
           </Callout>
         )}
+        {/* 辅助数据连续 3 晚失败（D73）：沿用的是旧数据，回测与跟踪也会带提示 */}
+        {status?.markets.flatMap(softAlerts).map((text) => (
+          <Callout key={text} tone="warn" icon={IconWarn} className="mb-4">
+            {text}
+          </Callout>
+        ))}
         <div className="grid gap-3 sm:grid-cols-2">
           {status?.markets.map((m) => {
             const last = versionStatusBadge(m.lastVersionStatus);
@@ -331,6 +443,8 @@ export function AdminPage() {
                   {MARKET_TEXT[m.market]}
                   {m.lastEtl?.status === "failed" ? (
                     <Badge tone="warn">最近一次更新失败</Badge>
+                  ) : m.lastEtl?.retryAt ? (
+                    <Badge tone="warn">等自动重试</Badge>
                   ) : status.workerUp ? (
                     <span className="inline-flex items-center gap-1 text-down">
                       <LiveDot />
@@ -353,6 +467,18 @@ export function AdminPage() {
                     <LiveDot />
                     {openVersionText(m.openVersion)}
                   </div>
+                )}
+                {retryBannerText(m) && (
+                  <div className="mt-1 text-2xs text-warn">{retryBannerText(m)}</div>
+                )}
+                {m.sources && (
+                  <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-2xs">
+                    {sourcesLines(m.sources, todayCN()).map((l) => (
+                      <li key={l.text} className={l.tone === "warn" ? "text-warn" : "text-ink-2"}>
+                        {l.text}
+                      </li>
+                    ))}
+                  </ul>
                 )}
                 {m.capture && (
                   <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-2xs">
@@ -411,6 +537,8 @@ export function AdminPage() {
           </DataTable>
         ) : null}
       </Card>
+
+      <DataQualityCard quality={data.data?.quality ?? null} />
 
       <Card title="邀请码" icon={IconInvite} subtitle="一次性，14 天有效；把注册链接发给朋友">
         <form

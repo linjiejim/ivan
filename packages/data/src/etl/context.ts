@@ -1,5 +1,6 @@
 import type { DateStr, Market } from "@ivan/core";
 import type { HttpLike } from "../http.ts";
+import type { FetchLedger } from "../sources/chain.ts";
 import type { Warehouse } from "../warehouse/db.ts";
 
 export type LogFn = (msg: string) => void;
@@ -13,6 +14,8 @@ export interface EtlContext {
   progress?: (fraction: number, note?: string) => void;
   /** 当前打开的数据版本号（D60）：写入方给每行盖章（表尾的 ver 列）；不在版本里写（调试命令）时为空 */
   ver?: number;
+  /** 这次任务的取数台账（D72）：夜间增量与回填才有，提交数据版本时写进 data_versions.sources */
+  ledger?: FetchLedger;
 }
 
 export interface SecurityRow {

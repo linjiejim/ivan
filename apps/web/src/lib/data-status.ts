@@ -1,10 +1,20 @@
 /**
  * 管理页数据卡的显示规则（纯函数，单测覆盖）：上一个数据版本的状态徽标、正在更新的版本、
- * 点时数据的采集情况（D60、D61）。
+ * 点时数据的采集情况、最近一晚的取数来源（D60、D61、D72）；自动重跑横幅、辅助数据连续失败、
+ * 数据质量一句话、运行的行情来源（D73、D74）。
  */
-import { addDays, type DateStr } from "@ivan/core";
-import { dateTime } from "./format.ts";
-import type { DataCapture } from "./types.ts";
+import {
+  addDays,
+  BAR_SOURCE_TEXT,
+  type DateStr,
+  ISSUE_RULE_TEXT,
+  nowHmCN,
+  type RunProvenance,
+  SOFT_FAILING_ALERT,
+  SOFT_STEP_LABEL,
+} from "@ivan/core";
+import { dateTime, MARKET_TEXT } from "./format.ts";
+import type { DataCapture, DataQuality, DataSources, DataStatus } from "./types.ts";
 
 /** 上一个结束的数据版本：完整 / 不完整 / 失败 / 休市 */
 export function versionStatusBadge(
@@ -71,4 +81,93 @@ export function captureLines(capture: DataCapture, today: DateStr): CaptureLine[
     tone: "neutral",
   });
   return out;
+}
+
+/**
+ * 最近一晚的取数来源：「今晚东财 120 只、腾讯 5230 只（回退 3 次）」；不是今天的写上日期。
+ * 腾讯 = 腾讯日 K + 批量报价，批量报价另起一行细注；整条链都没拿到的只数单列成 warn。
+ */
+export function sourcesLines(s: DataSources | null | undefined, today: DateStr): CaptureLine[] {
+  if (!s) return [];
+  const em = s.served.em ?? 0;
+  const txq = s.served.txq ?? 0;
+  const tx = (s.served.tx ?? 0) + txq;
+  const when = s.date === today || !s.date ? "今晚" : `${s.date.slice(5)} 那晚`;
+  const out: CaptureLine[] = [
+    { text: `${when}东财 ${em} 只、腾讯 ${tx} 只（回退 ${s.fallbacks} 次）`, tone: "neutral" },
+  ];
+  if (txq) out.push({ text: `腾讯里 ${txq} 只来自批量报价`, tone: "neutral" });
+  if (s.failed) out.push({ text: `${s.failed} 只日线所有数据源都没拿到`, tone: "warn" });
+  return out;
+}
+
+type MarketStatus = DataStatus["markets"][number];
+
+/**
+ * 排着队等自动重跑（D73）时的横幅：「A 股今天的数据没更新完整：…。18:15 自动重试（第 1/2 次）」；
+ * 不在等重跑时为 null。
+ */
+export function retryBannerText(m: MarketStatus): string | null {
+  const e = m.lastEtl;
+  if (!e || e.status !== "queued" || !e.retryAt) return null;
+  const reason = (e.error ?? "").replace(/[。.]$/, "");
+  return (
+    `${MARKET_TEXT[m.market] ?? m.market}今天的数据没更新完整${reason ? `：${reason}` : ""}。` +
+    `${nowHmCN(new Date(e.retryAt))} 自动重试（第 ${e.attempt ?? 1}/2 次）`
+  );
+}
+
+/** 辅助数据连续失败（≥ 3 晚）的提示：「A 股「财报与股本」已经连续 3 晚没更新成功，沿用的是旧数据」 */
+export function softAlerts(m: MarketStatus): string[] {
+  return (m.soft ?? [])
+    .filter((s) => s.failingNights >= SOFT_FAILING_ALERT)
+    .map(
+      (s) =>
+        `${MARKET_TEXT[m.market] ?? m.market}「${SOFT_STEP_LABEL[s.step as keyof typeof SOFT_STEP_LABEL] ?? s.step}」已经连续 ${s.failingNights} 晚没更新成功，沿用的是旧数据`,
+    );
+}
+
+export const issueRuleText = (rule: string) => ISSUE_RULE_TEXT[rule] ?? rule;
+
+/**
+ * 数据质量一句话：「近 7 天拦下 3 根异常日线（价格关系不对 2、日期不是交易日 1），标记 11 处待核」。
+ * 拦下 = 近 N 天被拒收的；待核 = 近 N 天标记里还没解决的。
+ */
+export function qualitySentence(q: DataQuality): string {
+  const rejects = q.byRule.filter((r) => r.severity === "reject");
+  const nReject = rejects.reduce((a, r) => a + r.n, 0);
+  const nFlag = q.byRule.filter((r) => r.severity !== "reject").reduce((a, r) => a + r.open, 0);
+  if (!nReject && !nFlag) return `近 ${q.days} 天没有发现数据问题`;
+  const parts = [
+    nReject
+      ? `拦下 ${nReject} 根异常日线（${rejects.map((r) => `${issueRuleText(r.rule)} ${r.n}`).join("、")}）`
+      : "没有拦下异常日线",
+  ];
+  if (nFlag) parts.push(`标记 ${nFlag} 处待核`);
+  return `近 ${q.days} 天${parts.join("，")}`;
+}
+
+const pctText = (x: number) => `${(x * 100).toFixed(1).replace(/\.0$/, "")}%`;
+
+/**
+ * 运行的行情来源（复现信息 ⓘ）：「行情来源：东方财富 97.1%、腾讯 2.9%（来源未记录 0.3%）；缺失 0 天」。
+ * 腾讯日 K 与腾讯报价合并；来源未记录的只在有时写。
+ */
+export function provenanceText(p: RunProvenance): string {
+  return `行情来源：${provenanceValue(p)}`;
+}
+
+/** 同上，不带「行情来源：」（复现信息里作为一行的值） */
+export function provenanceValue(p: RunProvenance): string {
+  if (!p.total) return `没有读到日线；缺失 ${p.gapDays} 天`;
+  const rows = new Map<string, number>();
+  for (const [src, n] of Object.entries(p.bySource)) {
+    if (src === "unknown") continue;
+    const name = BAR_SOURCE_TEXT[src] ?? src;
+    rows.set(name, (rows.get(name) ?? 0) + n);
+  }
+  const known = [...rows].map(([name, n]) => `${name} ${pctText(n / p.total)}`).join("、");
+  const unknown = p.unknownRows ? `来源未记录 ${pctText(p.unknownRows / p.total)}` : "";
+  const head = known ? (unknown ? `${known}（${unknown}）` : known) : unknown;
+  return `${head}；缺失 ${p.gapDays} 天`;
 }

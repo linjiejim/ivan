@@ -491,6 +491,10 @@ export const jobs = sqliteTable(
     createdAt: integer("created_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
+    /** 不早于这个时间（毫秒）才认领：自动重跑的夜间更新（D73）；空 = 随时 */
+    notBefore: integer("not_before"),
+    /** 第几次自动重跑（0 = 原任务，最多 2） */
+    attempt: integer("attempt").notNull().default(0),
   },
   (t) => [index("jobs_status").on(t.status, t.createdAt), index("jobs_user").on(t.userId)],
 );

@@ -397,3 +397,22 @@ export interface ValidationResult {
 
 /** 夜间更新写库期间暂停回测（D60）时给用户与模型看的一句话（worker 的 jobs 闸门、server、模型摘要共用） */
 export const COMPUTE_PAUSED_TEXT = "行情正在更新，回测会在更新完成后开始";
+
+/**
+ * 一次运行的行情来源（S13，D73）：面板（入选过的股票、回测区间）里各来源的日线行数、缺失与数据问题。
+ * 写进运行卡 data.provenance；只是报告，不进输入指纹。
+ */
+export interface RunProvenance {
+  /** 按行级来源代码（em / tx / txq …；来源未记录的行记在 unknown）计的日线行数 */
+  bySource: Record<string, number>;
+  total: number;
+  /** 来源未记录的行数（第 3 版之前写进来的） */
+  unknownRows: number;
+  /** 面板代码在区间里记为缺失（整条链没拿到、被体检拒收）的天数（按代码 × 日期计） */
+  gapDays: number;
+  gapCodes: number;
+  /** 入选过的股票在区间里未解决的数据问题 */
+  issues: { reject: number; flag: number };
+  /** 被 ETL_ACCEPT_MISSING 放行过的面板代码 */
+  accepted: string[];
+}

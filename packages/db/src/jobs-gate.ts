@@ -8,16 +8,23 @@ import type Database from "better-sqlite3";
 /** 会写行情仓的任务 */
 export const WAREHOUSE_WRITERS: ReadonlySet<string> = new Set(["etl", "check"]);
 
-/** 排队或在跑的第一个写库任务（null = 没有，compute 道可以认领） */
-export function computeBlocked(sqlite: Database.Database): { kind: string; since: number } | null {
+/**
+ * 排队或在跑的第一个写库任务（null = 没有，compute 道可以认领）。
+ * 排着队等自动重跑、还没到时间的（not_before 在未来，D73）不算：等重跑的 45 分钟里回测照常。
+ */
+export function computeBlocked(
+  sqlite: Database.Database,
+  now: number = Date.now(),
+): { kind: string; since: number } | null {
   const kinds = [...WAREHOUSE_WRITERS].map((k) => `'${k}'`).join(",");
   const row = sqlite
     .prepare(
       `SELECT kind, coalesce(started_at, created_at) AS since FROM jobs
        WHERE kind IN (${kinds}) AND status IN ('running', 'queued')
+         AND (status = 'running' OR not_before IS NULL OR not_before <= ?)
        ORDER BY created_at LIMIT 1`,
     )
-    .get() as { kind: string; since: number } | undefined;
+    .get(now) as { kind: string; since: number } | undefined;
   return row ? { kind: row.kind, since: row.since } : null;
 }
 

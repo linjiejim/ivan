@@ -1,9 +1,16 @@
 /**
  * 简报两处线上修正（D70、D78）：休市不说「今天」，开市日更新失败不说休市；简报永久保留。
+ * 自动重跑（D73）：排队等重跑时说数据没更新；重跑成功而当天的简报已写过时再排一次简报。
  */
 import { type BriefFacts, checkGrounding, collectEvidence, factsForModel } from "@ivan/ai";
 import { StrategySpecSchema } from "@ivan/core";
-import { seedSyntheticMarket } from "@ivan/data/testing";
+import {
+  A_INDEX_SECIDS,
+  emDailyRoute,
+  emSecidOf,
+  FakeHttp,
+  seedSyntheticMarket,
+} from "@ivan/data/testing";
 import {
   briefEditions,
   briefs,
@@ -19,6 +26,7 @@ import { asc, eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { fakeJobContext, makeTestEnv, seedTracking } from "../testing/harness.ts";
 import { briefJob } from "./brief.ts";
+import { etlJob } from "./etl.ts";
 
 const spec = StrategySpecSchema.parse({
   name: "低估值",
@@ -280,5 +288,110 @@ describe("夜间简报", () => {
         /append-only/,
       );
     });
+  });
+});
+
+describe("自动重跑与简报（D73、D78）", () => {
+  it("开市日失败、排着队等自动重跑：不说休市，staleMarkets 里有 A 股", async () => {
+    const { env } = await setup("2026-10-09", DAYS);
+    addEtlJob(env.app, {
+      status: "failed",
+      createdAt: at("2026-10-09", 17),
+      error: "A 股有 12 只股票今天的日线没拿到，已停止更新，以免被当成停牌",
+    });
+    env.app.db
+      .insert(jobs)
+      .values({
+        id: newId("j_"),
+        kind: "etl",
+        payload: { market: "A" },
+        status: "queued",
+        createdAt: at("2026-10-09", 17) + 60_000,
+        notBefore: at("2026-10-09", 18),
+        attempt: 1,
+      })
+      .run();
+    await briefJob(fakeJobContext("brief"));
+    const { content, facts } = briefOf(env.app, "2026-10-09");
+    expect(facts.marketDay).toEqual({ A: "stale" });
+    expect(facts.staleMarkets).toContain("A");
+    expect(content).not.toContain("休市");
+    expect(content).toContain("A 股今天的数据没更新成功");
+  });
+
+  it("重跑成功而今天的简报已经写过：再排一次简报，加一版", async () => {
+    const codes = ["600001.SH", "600002.SH", "600003.SH"];
+    const http = new FakeHttp([
+      { match: /qt\.gtimg\.cn/, status: 500 },
+      emDailyRoute({
+        ...A_INDEX_SECIDS,
+        ...Object.fromEntries(codes.map((c, k) => [emSecidOf(c), 10 + k])),
+      }),
+    ]);
+    const t = await makeTestEnv({ today: "2026-10-09", http });
+    cleanup = t.cleanup;
+    await seedSyntheticMarket(t.env.wh, {
+      market: "A",
+      start: "2026-09-21",
+      days: 14,
+      stocks: codes.map((code, k) => ({ code, name: `股${k}`, close: () => 10 + k })),
+    });
+    seedTracking(t.env.app, { spec, startDate: "2026-10-12" });
+    // 今天的第一版简报（说着数据没更新）
+    addEtlJob(t.env.app, { status: "failed", createdAt: at("2026-10-09", 17), error: "闸门没过" });
+    await briefJob(fakeJobContext("brief"));
+    t.env.app.db
+      .insert(jobs)
+      .values({
+        id: newId("j_"),
+        kind: "brief",
+        payload: {},
+        status: "done",
+        createdAt: at("2026-10-09", 19),
+        finishedAt: at("2026-10-09", 19) + 1000,
+      })
+      .run();
+    const r = await etlJob(fakeJobContext("etl", { market: "A" }, { attempt: 1 }));
+    expect(r).toMatchObject({
+      tradingDay: true,
+      latest: "2026-10-09",
+      attempt: 1,
+      briefAgain: true,
+    });
+    const queued = t.env.app.db.select().from(jobs).where(eq(jobs.status, "queued")).all();
+    expect(queued.map((j) => j.kind)).toEqual(["brief"]);
+    await briefJob(fakeJobContext("brief"));
+    const eds = t.env.app.db.select().from(briefEditions).orderBy(asc(briefEditions.edition)).all();
+    expect(eds.map((e) => e.edition)).toEqual([1, 2]);
+    expect((eds[1]!.facts as unknown as BriefFacts).marketDay).toEqual({ A: "traded" });
+  });
+
+  it("第一次就成功（attempt 0）不加简报", async () => {
+    const http = new FakeHttp([
+      { match: /qt\.gtimg\.cn/, status: 500 },
+      emDailyRoute({ ...A_INDEX_SECIDS, [emSecidOf("600001.SH")]: 10 }),
+    ]);
+    const t = await makeTestEnv({ today: "2026-10-09", http });
+    cleanup = t.cleanup;
+    await seedSyntheticMarket(t.env.wh, {
+      market: "A",
+      start: "2026-09-21",
+      days: 14,
+      stocks: [{ code: "600001.SH", name: "甲", close: () => 10 }],
+    });
+    t.env.app.db
+      .insert(jobs)
+      .values({
+        id: newId("j_"),
+        kind: "brief",
+        payload: {},
+        status: "done",
+        createdAt: at("2026-10-09", 19),
+        finishedAt: at("2026-10-09", 19),
+      })
+      .run();
+    const r = await etlJob(fakeJobContext("etl", { market: "A" }));
+    expect(r.briefAgain).toBeUndefined();
+    expect(t.env.app.db.select().from(jobs).where(eq(jobs.status, "queued")).all()).toEqual([]);
   });
 });

@@ -11,14 +11,28 @@ export const BOARDS_BY_MARKET: Record<Market, readonly string[]> = {
   HK: ["hk_main", "hk_gem"],
 };
 
+/**
+ * 比较基准（D24、D75）：sym 是 index_bars 里的指数。DSL 的 benchmark 枚举由这里的键生成，只能往里加。
+ * 中证 500 / 1000 / 红利是中证官网的全收益指数（H00905 / H00852 / H00922），中小盘与红利策略用它们比更贴切。
+ */
 export const BENCHMARKS = {
   csi300: { market: "A", sym: "csi300_tr", label: "沪深300全收益", withDividends: true },
   sse: { market: "A", sym: "sse", label: "上证指数（不含分红）", withDividends: false },
+  csi500: { market: "A", sym: "csi500_tr", label: "中证500全收益", withDividends: true },
+  csi1000: { market: "A", sym: "csi1000_tr", label: "中证1000全收益", withDividends: true },
+  csi_div: { market: "A", sym: "csi_div_tr", label: "中证红利全收益", withDividends: true },
   hsi: { market: "HK", sym: "hsi_tr", label: "恒指（盈富基金含分红）", withDividends: true },
   hscei: { market: "HK", sym: "hscei_tr", label: "国企指数（02828 含分红）", withDividends: true },
 } as const;
 export type BenchmarkKey = keyof typeof BENCHMARKS;
 export const DEFAULT_BENCHMARK: Record<Market, BenchmarkKey> = { A: "csi300", HK: "hsi" };
+const BENCHMARK_KEYS = Object.keys(BENCHMARKS) as [BenchmarkKey, ...BenchmarkKey[]];
+
+/** 某个市场能选的基准（编辑器下拉、提示词共用），默认基准排第一 */
+export function benchmarksOf(market: Market): BenchmarkKey[] {
+  const keys = BENCHMARK_KEYS.filter((k) => BENCHMARKS[k].market === market);
+  return [DEFAULT_BENCHMARK[market], ...keys.filter((k) => k !== DEFAULT_BENCHMARK[market])];
+}
 
 const factorKey = z.string().min(1).max(40);
 
@@ -76,6 +90,8 @@ export const StrategySpecSchema = z
             exclude: z.array(z.string().min(1).max(40)).max(80).optional(),
           })
           .optional(),
+        /** 只选港股通标的（D77，只用于港股）：按决策日当时的名单，首次记录之前用首次名单 */
+        hkConnect: z.literal(true).optional(),
       })
       .default({ exclude: ["st", "new_listing"] }),
     filters: z.array(ConditionSchema).max(30).default([]),
@@ -150,7 +166,7 @@ export const StrategySpecSchema = z
         minCommission: z.number().min(0).max(100).optional(),
       })
       .optional(),
-    benchmark: z.enum(["csi300", "sse", "hsi", "hscei"]).optional(),
+    benchmark: z.enum(BENCHMARK_KEYS).optional(),
   })
   .superRefine((s, ctx) => {
     const issue = (path: (string | number)[], message: string) =>
@@ -204,6 +220,9 @@ export const StrategySpecSchema = z
       if (!boards.includes(b))
         issue(["universe", "boards", i], `板块「${b}」不属于该市场，可选：${boards.join(" / ")}。`);
     });
+    if (s.universe.hkConnect && s.market !== "HK") {
+      issue(["universe", "hkConnect"], "港股通筛选只适用于港股策略。");
+    }
     if (s.benchmark && BENCHMARKS[s.benchmark].market !== s.market) {
       issue(["benchmark"], `基准「${BENCHMARKS[s.benchmark].label}」和策略市场不一致。`);
     }
@@ -231,6 +250,25 @@ export function validateSpec(input: unknown): SpecValidation {
 export function benchmarkOf(spec: StrategySpec): BenchmarkKey {
   return spec.benchmark ?? DEFAULT_BENCHMARK[spec.market];
 }
+
+/**
+ * 基准在回测起点能不能用（D75）：起点前一个交易日（anchor）要有基准数据，否则就是拿一条平线比。
+ * first = 这个基准在行情仓里的首个数据日（一行都没有为 null）。能用返回 null，不能用返回给用户看的原因。
+ * server 提交前（没有交易日历，anchor 取起点前一天）与 buildSimInput 共用这段文字。
+ */
+export function benchUnavailableText(
+  key: BenchmarkKey,
+  first: string | null,
+  anchor: string,
+): string | null {
+  const label = BENCHMARKS[key].label;
+  if (!first) return `基准「${label}」还没有数据，等今晚行情更新后再试`;
+  if (first > anchor) return `基准「${label}」从 ${first} 才有数据，请把起点设在这之后，或换个基准`;
+  return null;
+}
+
+/** 港股通股票池（D77）一行名单都没有时的原因：server 提交前与 worker 选股共用 */
+export const HK_CONNECT_MISSING_TEXT = "港股通名单还没有记录，等今晚证券表刷新后再试";
 
 /**
  * 策略用到的因子（筛选、排序与弱势时的排序），按出现顺序去重：选股解释与个股证据取因子值用（D67）。
@@ -290,6 +328,7 @@ export function describeSpec(s: StrategySpec): string[] {
     u.minMcap ? `，市值 ≥ ${u.minMcap} 亿` : "",
     u.industries?.include?.length ? `，只看${u.industries.include.join("、")}` : "",
     u.industries?.exclude?.length ? `，不看${u.industries.exclude.join("、")}` : "",
+    u.hkConnect ? "，只选港股通标的" : "",
   ].join("");
   lines.push(`股票池：${scope}`);
   if (s.mode === "signals") {

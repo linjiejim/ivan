@@ -3,8 +3,12 @@
  * 回测不破坏任何数据，可以直接执行，但受额度与队列限制（spec §9）。
  */
 import {
+  addDays,
   type Attribution,
   type BacktestParams,
+  BENCHMARKS,
+  benchmarkOf,
+  benchUnavailableText,
   type Check,
   type Confidence,
   canonicalJson,
@@ -18,6 +22,7 @@ import {
   resolveExec,
   isDateStr,
   isLegacyFill,
+  HK_CONNECT_MISSING_TEXT,
   type HoldingSnapshot,
   type Metrics,
   type PeriodMetrics,
@@ -45,6 +50,7 @@ import { AppError, notFound } from "../lib/errors.ts";
 import { applyPatch } from "../lib/jsonpatch.ts";
 import { consume } from "../lib/quota.ts";
 import { worker } from "../lib/worker-client.ts";
+import type { DataStatus } from "./dashboard.ts";
 import { getVersion, versionNOf } from "./strategies.ts";
 
 export const MAX_ACTIVE_JOBS = 3;
@@ -82,6 +88,48 @@ export function normalizeParams(
     throw e;
   }
   return { start, end, capital, oosMonths, exec };
+}
+
+/** 提交前校验用的 /internal/data-status（缓存 60 秒）；worker 不在时为 null */
+const DATA_STATUS_TTL_MS = 60_000;
+let statusCache: { at: number; value: DataStatus } | null = null;
+
+/** 测试与新版本提交后用：清掉 data-status 缓存 */
+export function clearDataStatusCache(): void {
+  statusCache = null;
+}
+
+async function cachedDataStatus(): Promise<DataStatus | null> {
+  if (statusCache && Date.now() - statusCache.at < DATA_STATUS_TTL_MS) return statusCache.value;
+  try {
+    const value = await worker.get<DataStatus>("/internal/data-status");
+    statusCache = { at: Date.now(), value };
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 提交前校验数据（D75、D77）：起点前一个交易日没有基准数据、港股通股票池没有名单时直接 400，
+ * 不排任务、不扣额度。worker 不在或接口没给这些字段时跳过，worker 建输入时还会再查一次
+ * （缓存过期前最多放过一次，由 buildSimInput 拦下）。
+ */
+export async function checkDataReady(specs: readonly StrategySpec[], start: string): Promise<void> {
+  const status = await cachedDataStatus();
+  if (!status) return;
+  for (const spec of specs) {
+    const m = status.markets?.find((x) => x.market === spec.market);
+    if (!m) continue;
+    if (spec.universe.hkConnect && m.hkConnect === null)
+      throw new AppError(400, HK_CONNECT_MISSING_TEXT);
+    const key = benchmarkOf(spec);
+    const sym = BENCHMARKS[key].sym;
+    if (!m.benchFirstDates || !(sym in m.benchFirstDates)) continue;
+    // 没有交易日历：首个数据日 ≥ 起点就说明起点前一个交易日没有基准（指数日期都是交易日）
+    const why = benchUnavailableText(key, m.benchFirstDates[sym] ?? null, addDays(start, -1));
+    if (why) throw new AppError(400, why);
+  }
 }
 
 /** 排队中 / 运行中的任务数（复核不算：它另有「一人同时一个」的限制） */
@@ -152,14 +200,15 @@ export function countTrials(
   return keys.size;
 }
 
-export function enqueueBacktest(
+export async function enqueueBacktest(
   userId: string,
   versionId: string,
   input: RunParamsInput = {},
-): { runId: string; jobId: string } {
+): Promise<{ runId: string; jobId: string }> {
   const { db } = env().app;
   const { strategy, version } = getVersion(userId, versionId);
   const params = normalizeParams(input, version.spec.market);
+  await checkDataReady([version.spec], params.start);
   if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
     throw new AppError(429, `同时排队的任务最多 ${MAX_ACTIVE_JOBS} 个，等前面的跑完再来`);
   }
@@ -187,12 +236,12 @@ export function enqueueBacktest(
 }
 
 /** 参数扫描：一个参数取 2–8 个值，各跑一次（不产生新版本），子回测挂在一个父记录下。 */
-export function enqueueSweep(
+export async function enqueueSweep(
   userId: string,
   versionId: string,
   sweep: { path: string; values: unknown[]; label?: string },
   input: RunParamsInput = {},
-): { runId: string; jobId: string; variants: number } {
+): Promise<{ runId: string; jobId: string; variants: number }> {
   const { db } = env().app;
   const { strategy, version } = getVersion(userId, versionId);
   if (!/^\/[\w/-]+$/.test(sweep.path))
@@ -218,6 +267,10 @@ export function enqueueSweep(
       priorVersions: countTrials(strategy.id, params, specHashOf(v.spec)),
     });
   }
+  await checkDataReady(
+    variants.map((v) => v.spec),
+    params.start,
+  );
   if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
     throw new AppError(429, `同时排队的任务最多 ${MAX_ACTIVE_JOBS} 个，等前面的跑完再来`);
   }

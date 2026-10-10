@@ -13,7 +13,29 @@ import {
   szseNameChanges,
   szseRecordCount,
 } from "./sources/exchanges.ts";
+import { emIndexKline, emKline } from "./sources/emkline.ts";
 import { indexKline, klineOnce, klineRange } from "./sources/tencent.ts";
+import type { SourceId } from "./sources/types.ts";
+
+/**
+ * 探针的抓取节奏（D31）：串行、同一域名两次请求间隔 0.6 秒。原来并发 4、间隔 50 毫秒，
+ * 跑一次探针就可能把东财或腾讯的 IP 封掉几个小时。单测守着这几个数。
+ */
+export const PROBE_PACING = {
+  concurrencyPerHost: 1,
+  minIntervalMs: 600,
+  mapConcurrency: 1,
+  sampleCodes: 10,
+} as const;
+
+/** A 股日线的检查顺序与夜间默认链一致（D27、D72）：东财优先，腾讯作为第二条事实 */
+export const PROBE_A_BARS_ORDER: readonly SourceId[] = ["eastmoney", "tencent"];
+
+const probeHttp = () =>
+  new Http({
+    concurrencyPerHost: PROBE_PACING.concurrencyPerHost,
+    minIntervalMs: PROBE_PACING.minIntervalMs,
+  });
 
 export type ProbeStatus = "ok" | "warn" | "fail";
 
@@ -52,21 +74,35 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
   {
     id: "a.bars",
     area: "A 股",
-    title: "A 股日线（腾讯，不复权 + 后复权）",
+    title: "A 股日线（东财优先，腾讯备用）",
     async run(http, ctx) {
-      const raw = await klineRange(http, "600519.SH", "raw", "2001-01-01", "2003-12-31");
-      const hfq = await klineOnce(http, "600519.SH", "hfq", "2016-01-04", "2016-01-08");
-      const rawSame = await klineOnce(http, "600519.SH", "raw", "2016-01-04", "2016-01-08");
-      const cap = await klineOnce(http, "600519.SH", "raw", "2016-01-01", ctx.today);
-      const factor = hfq[0] && rawSame[0] ? hfq[0].close / rawSame[0].close : NaN;
+      const facts: string[] = [];
+      let ok = false;
+      for (const src of PROBE_A_BARS_ORDER) {
+        if (src === "eastmoney") {
+          // 东财一次请求整段历史；涨跌额给出交易所参考前收（D31）
+          const early = await emKline(http, "600519.SH", "raw", "2001-01-01", "2003-12-31");
+          const all = await emKline(http, "600519.SH", "raw", "2016-01-01", ctx.today);
+          ok ||= early.bars.length > 0 && all.bars.length > 0;
+          facts.push(
+            `东财：600519 不复权最早 ${early.bars[0]?.date ?? "无"}（上市 2001-08-27）；2016 至今一次请求 ${all.bars.length} 条，带成交额与涨跌额`,
+          );
+        } else {
+          const hfq = await klineOnce(http, "600519.SH", "hfq", "2016-01-04", "2016-01-08");
+          const rawSame = await klineOnce(http, "600519.SH", "raw", "2016-01-04", "2016-01-08");
+          const cap = await klineOnce(http, "600519.SH", "raw", "2016-01-01", ctx.today);
+          const factor = hfq[0] && rawSame[0] ? hfq[0].close / rawSame[0].close : NaN;
+          ok ||= hfq.length > 0 && rawSame.length > 0;
+          facts.push(
+            `腾讯（备用）：2016-01-04 后复权收盘 ${hfq[0]?.close}，不复权 ${rawSame[0]?.close}，比值 ${factor.toFixed(4)}；单次最多 ${cap.length} 条，要按窗口分段`,
+          );
+        }
+      }
       return {
-        status: raw.length && hfq.length ? "ok" : "fail",
-        facts: [
-          `600519 不复权最早 ${raw[0]?.date ?? "无"}（上市 2001-08-27）`,
-          `后复权可取：2016-01-04 hfq 收盘 ${hfq[0]?.close}，不复权 ${rawSame[0]?.close}，复权因子 ${factor.toFixed(4)}`,
-          `单次请求上限：2016 至今一次只返回 ${cap.length} 条（${cap[0]?.date} 起），需要按窗口分段`,
-        ],
-        conclusion: "日线存不复权 OHLC + 复权因子（hfq/raw），按 800 自然日窗口分段回填。",
+        status: ok ? "ok" : "fail",
+        facts,
+        conclusion:
+          "日线存不复权 OHLC + 等比复权因子；东财为主（一次请求、串行 0.6 秒），腾讯为备（有 WAF，按 800 自然日窗口分段）。",
       };
     },
   },
@@ -447,16 +483,25 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
   {
     id: "idx.price",
     area: "指数与汇率",
-    title: "价格指数（腾讯）",
+    title: "价格指数（东财优先，腾讯备用）",
     async run(http) {
-      const syms = ["sh000300", "sh000001", "sz399006", "hkHSI", "hkHSCEI"];
+      // 与夜间指数链同序（D72）：东财 secid 在前，腾讯原始代码作为第二条事实
+      const syms: Array<[string, string]> = [
+        ["1.000300", "sh000300"],
+        ["1.000001", "sh000001"],
+        ["0.399006", "sz399006"],
+        ["100.HSI", "hkHSI"],
+        ["100.HSCEI", "hkHSCEI"],
+      ];
       const facts: string[] = [];
       let ok = 0;
-      for (const s of syms) {
-        const bars = await indexKline(http, s, "2013-01-01", "2013-01-31");
+      for (const [em] of syms) {
+        const bars = await emIndexKline(http, em, "2013-01-01", "2013-01-31");
         if (bars.length) ok++;
-        facts.push(`${s}：2013-01 ${bars.length} 条`);
+        facts.push(`东财 ${em}：2013-01 ${bars.length} 条`);
       }
+      const backup = await indexKline(http, syms[0]![1], "2013-01-01", "2013-01-31");
+      facts.push(`腾讯（备用）${syms[0]![1]}：2013-01 ${backup.length} 条`);
       return { status: ok === syms.length ? "ok" : "warn", facts };
     },
   },
@@ -480,6 +525,45 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
     },
   },
   {
+    // 只在命令行（pnpm ivan probe）里跑：核对 S14 新加基准的中证全收益代码与东财价格指数 secid（D75），R4 上线前确认
+    id: "idx.tri.more",
+    area: "指数与汇率",
+    title: "中证 500 / 1000 / 红利（全收益与价格指数）",
+    async run(http, ctx) {
+      const from = addDays(ctx.today, -21);
+      const tri: Array<[string, string]> = [
+        ["H00905", "中证500全收益"],
+        ["H00852", "中证1000全收益"],
+        ["H00922", "中证红利全收益"],
+      ];
+      const price: Array<[string, string]> = [
+        ["1.000905", "中证500"],
+        ["1.000852", "中证1000"],
+        ["1.000922", "中证红利"],
+      ];
+      const facts: string[] = [];
+      const got: string[] = [];
+      for (const [code, label] of tri) {
+        const rows = await csindexHistory(http, code, from, ctx.today).catch(() => []);
+        facts.push(`中证官网 ${code} ${label}：近 21 天 ${rows.length} 条${rows.length ? `，最新 ${rows.at(-1)!.date}` : ""}`);
+        if (rows.length) got.push(code);
+      }
+      for (const [secid, label] of price) {
+        const rows = await emIndexKline(http, secid, from, ctx.today).catch(() => []);
+        facts.push(`东财 ${secid} ${label}：近 21 天 ${rows.length} 条`);
+        if (rows.length) got.push(secid);
+      }
+      const all = tri.length + price.length;
+      return {
+        status: got.length === all ? "ok" : got.length ? "warn" : "fail",
+        facts,
+        conclusion: got.length
+          ? `有数据：${got.join("、")}${got.length < all ? "；没数据的代码要先核对再上线（INDEXES 里改代码）" : ""}`
+          : "六个代码都没取到数据，新基准先不要上线",
+      };
+    },
+  },
+  {
     id: "fx",
     area: "指数与汇率",
     title: "人民币汇率中间价",
@@ -495,23 +579,21 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
   {
     id: "throughput",
     area: "吞吐",
-    title: "抓取吞吐（并发 4）",
+    title: "抓取吞吐（串行，0.6 秒间隔）",
     async run(_http, ctx) {
-      const http = new Http({ concurrencyPerHost: 4, minIntervalMs: 50 });
+      // 按夜间实际节奏测（D31）：串行、0.6 秒间隔，不冒封 IP 的风险
+      const http = probeHttp();
       const codes = [
         "600519.SH", "000001.SZ", "000858.SZ", "601318.SH", "600036.SH", "300750.SZ",
         "002415.SZ", "600276.SH", "000333.SZ", "601888.SH", "688981.SH", "002594.SZ",
-        "600900.SH", "601166.SH", "000651.SZ", "600030.SH", "300059.SZ", "002475.SZ",
-        "601012.SH", "000725.SZ",
-      ];
+      ].slice(0, PROBE_PACING.sampleCodes);
       let t0 = Date.now();
-      await mapLimit(codes, 8, async (c) => {
-        await klineOnce(http, c, "raw", "2016-01-01", "2018-03-10");
-        await klineOnce(http, c, "hfq", "2016-01-01", "2018-03-10");
-      });
-      const kRate = (codes.length * 2) / ((Date.now() - t0) / 1000);
+      await mapLimit(codes, PROBE_PACING.mapConcurrency, (c) =>
+        emKline(http, c, "raw", "2016-01-01", ctx.today),
+      );
+      const kRate = codes.length / ((Date.now() - t0) / 1000);
       t0 = Date.now();
-      await mapLimit(codes, 8, (c) =>
+      await mapLimit(codes, PROBE_PACING.mapConcurrency, (c) =>
         emQuery(http, {
           report: "RPT_F10_FINANCE_MAINFINADATA",
           host: "sec",
@@ -527,7 +609,7 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
       return {
         status: "ok",
         facts: [
-          `腾讯日 K ${kRate.toFixed(1)} 次/秒，东财 ${eRate.toFixed(1)} 次/秒`,
+          `东财日 K ${kRate.toFixed(1)} 次/秒，东财数据中心 ${eRate.toFixed(1)} 次/秒（${codes.length} 只，串行）`,
           ...stats,
         ],
       };
@@ -536,7 +618,7 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
 ];
 
 export async function runProbe(onProgress?: (c: ProbeCheck) => void): Promise<ProbeReport> {
-  const http = new Http({ concurrencyPerHost: 4, minIntervalMs: 50 });
+  const http = probeHttp();
   const ctx: ProbeContext = { today: todayCN() };
   const checks: ProbeCheck[] = [];
   for (const c of CHECKS) {
@@ -559,22 +641,20 @@ export async function runProbe(onProgress?: (c: ProbeCheck) => void): Promise<Pr
   };
 }
 
-/** 回填耗时估算：2013 年起（留出 5 年给估值分位），不复权 + 后复权两套日线。 */
+/** 回填耗时估算：2013 年起（留出 5 年给估值分位）；东财日 K 一次请求整段，港股多一次后复权。 */
 function estimateBackfill(ctx: ProbeContext): string[] {
-  const years = Number(ctx.today.slice(0, 4)) - 2013 + 1;
-  const windows = Math.ceil((years * 365) / 800);
   const aStocks = (ctx.aListedNow ?? 5500) + (ctx.aDelistedSince2013 ?? 300);
   const hkStocks = ctx.hkEquities ?? 2600;
-  const kRate = ctx.klineReqPerSec ?? 10;
+  const kRate = ctx.klineReqPerSec ?? 1.5;
   const eRate = ctx.emReqPerSec ?? 5;
-  const aK = aStocks * windows * 2;
-  const hkK = hkStocks * (windows + Math.ceil((years * 250) / 640));
+  const aK = aStocks;
+  const hkK = hkStocks * 2;
   const aE = aStocks * 3; // 主要指标 + 股本 + 公司资料
   const hkE = hkStocks * 2;
   const kMin = (aK + hkK) / kRate / 60;
   const eMin = (aE + hkE) / eRate / 60;
   return [
-    `A 股约 ${aStocks} 只（在市 + 2013 年后退市），港股约 ${hkStocks} 只；日线窗口 ${windows} 段/只/复权口径`,
+    `A 股约 ${aStocks} 只（在市 + 2013 年后退市），港股约 ${hkStocks} 只；东财日 K A 股每只 1 次请求（不复权 + 涨跌额），港股 2 次（不复权 + 后复权）`,
     `日线请求约 ${(aK + hkK).toLocaleString()} 次，按实测 ${kRate.toFixed(1)} 次/秒约 ${kMin.toFixed(0)} 分钟`,
     `东财逐股请求约 ${(aE + hkE).toLocaleString()} 次，按实测 ${eRate.toFixed(1)} 次/秒约 ${eMin.toFixed(0)} 分钟`,
     `两类请求走不同域名可并行，全量回填预计 ${Math.max(kMin, eMin).toFixed(0)}–${(kMin + eMin).toFixed(0)} 分钟；可断点续跑`,

@@ -24,7 +24,7 @@ import { env } from "./env.ts";
 import { AppError, forbidden } from "./lib/errors.ts";
 import { QUOTA_KINDS, type QuotaKind, quotaOf, usageToday } from "./lib/quota.ts";
 import { worker } from "./lib/worker-client.ts";
-import { dashboard, dataStatus } from "./services/dashboard.ts";
+import { dashboard, type DataQuality, dataStatus } from "./services/dashboard.ts";
 import { exportTracking, listEntries, planOn, verifyUser } from "./services/ledger.ts";
 import { getSnapshot, listSnapshots, planOutcomes } from "./services/plans.ts";
 import { securityEvidence } from "./services/evidence.ts";
@@ -188,7 +188,7 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       oosMonths?: number;
       exec?: unknown;
     }>(c);
-    return c.json(enqueueBacktest(user(c).id, b.versionId, b));
+    return c.json(await enqueueBacktest(user(c).id, b.versionId, b));
   });
   app.post("/api/runs/sweep", async (c) => {
     const b = await body<{
@@ -200,7 +200,7 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       end?: string;
       exec?: unknown;
     }>(c);
-    return c.json(enqueueSweep(user(c).id, b.versionId, b, b));
+    return c.json(await enqueueSweep(user(c).id, b.versionId, b, b));
   });
   app.post("/api/runs/compare", async (c) => {
     const { ids } = await body<{ ids: string[] }>(c);
@@ -531,8 +531,13 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   app.get("/api/admin/data", async (c) => {
     admin(c);
     const { db } = env().app;
+    const status = await dataStatus();
     return c.json({
-      status: await dataStatus(),
+      status,
+      // 数据质量（D74）：worker 没跑时为空，不让整页出错
+      quality: status.workerUp
+        ? await worker.get<DataQuality>("/internal/data-quality?days=7").catch(() => null)
+        : null,
       jobs: db
         .select()
         .from(jobs)
@@ -541,6 +546,13 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
         .limit(30)
         .all(),
     });
+  });
+  /** 管理员把一条数据问题标为已核对（D74） */
+  app.post("/api/admin/data-issues/:id/resolve", async (c) => {
+    admin(c);
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id <= 0) throw new AppError(400, "数据问题编号不对");
+    return c.json(await worker.post(`/internal/data-issues/${id}/resolve`, {}));
   });
   app.post("/api/admin/etl", async (c) => {
     admin(c);

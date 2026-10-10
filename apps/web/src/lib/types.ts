@@ -249,7 +249,17 @@ export interface DataStatus {
     market: string;
     asOf: string | null;
     dataVersion: number | null;
-    lastEtl: { status: string; finishedAt: number | null; error: string | null } | null;
+    /**
+     * 最近一次 etl 任务。排着队等自动重跑时（D73）：status = queued，retryAt 是重跑时间（毫秒），
+     * attempt 是第几次，error 是上一次失败的原因
+     */
+    lastEtl: {
+      status: string;
+      finishedAt: number | null;
+      error: string | null;
+      attempt?: number;
+      retryAt?: number | null;
+    } | null;
     /** 今天的状态（D78）：已更新 / 休市 / 没更新 / 进行中 */
     day?: "traded" | "closed" | "stale" | "pending";
     /** 正在写的数据版本（D60）；startedAt 是毫秒时间戳 */
@@ -258,6 +268,15 @@ export interface DataStatus {
     lastVersionStatus?: string | null;
     /** 点时数据的采集情况（D61） */
     capture?: DataCapture;
+    /** 最近一晚的取数来源（D72） */
+    sources?: DataSources | null;
+    /** 辅助数据最近成功的日子与连续失败的晚数（D73） */
+    soft?: Array<{
+      step: string;
+      lastOkDate: string | null;
+      failingNights: number;
+      firstFailDate: string | null;
+    }>;
   }>;
   /** 行情仓维护中（还没升级，D76）：非空时 worker 不排任务、不认领 */
   maintenance?: string | null;
@@ -266,6 +285,52 @@ export interface DataStatus {
   workerUp: boolean;
   /** 这个用户的跟踪最近一次结算失败的（D70，只有看板给） */
   settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
+}
+
+/** 管理页「数据质量」卡（D74） */
+export interface DataQuality {
+  days: number;
+  /** 近 N 天新出现的问题：按规则与级别计，open = 其中还没解决的 */
+  byRule: Array<{ rule: string; severity: string; n: number; open: number }>;
+  topCodes: Array<{ code: string; name: string | null; n: number }>;
+  /** 最新 50 条未解决的问题 */
+  open: Array<{
+    id: number;
+    code: string;
+    name: string | null;
+    date: string;
+    rule: string;
+    severity: string;
+    detail: string | null;
+  }>;
+  lastVersions: Array<{
+    id: number;
+    market: string;
+    status: string;
+    date: string | null;
+    expected: number | null;
+    updated: number | null;
+    noTrade: number | null;
+    missing: number;
+    missingCritical: number;
+    accepted: number;
+    reasons: string[];
+  }>;
+}
+
+/** 最近一晚夜间增量的取数来源（D72）：served 的键是行级来源代码 em 东财、tx 腾讯日 K、txq 腾讯报价 */
+export interface DataSources {
+  versionId: number;
+  status: string;
+  /** 这一晚的日期 */
+  date: string | null;
+  served: Record<string, number>;
+  /** 首选来源没给、换下一家才拿到的次数 */
+  fallbacks: number;
+  /** 整条链都没拿到的股票数 */
+  failed: number;
+  empty: number;
+  index: Record<string, string>;
 }
 
 /** 点时数据的采集情况（D61）：属性快照与财报首见留底 */

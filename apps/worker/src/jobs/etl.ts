@@ -1,18 +1,72 @@
 /**
  * 夜间 ETL（spec §8）：增量更新行情仓 → 交易日才结算该市场的跟踪。失败则中止后续步骤并记录。
+ *
+ * 完整性闸门（D73）：运行中跟踪的持仓与明日计划是 critical，缺了只让相关跟踪显示「数据未更新」；
+ * 闸门没过、或开市了但指数日 K 还没有今天（可重跑的失败）时 45 分钟后自动再排一次，最多 2 次。
+ * 排着队等重跑期间市场当日状态是「没更新」（market-day.ts）。重跑成功而当天的简报已经写过时再排一次简报（加一版）。
  */
-import type { Market } from "@ivan/core";
-import { daily } from "@ivan/data";
-import { etlContext } from "../env.ts";
-import type { JobContext } from "../runner.ts";
-import { settleMarket } from "./settle.ts";
+import { MARKET_LABEL, type Market, nowHmCN, todayCN } from "@ivan/core";
+import { acceptMissingFromEnv, daily } from "@ivan/data";
+import { jobs } from "@ivan/db";
+import { and, eq } from "drizzle-orm";
+import { env, etlContext, todayOf } from "../env.ts";
+import { enqueue, type JobContext } from "../runner.ts";
+import { criticalCodes, settleMarket } from "./settle.ts";
+
+/** 自动重跑最多几次 */
+export const ETL_MAX_RETRIES = 2;
+/** 隔多久重跑 */
+export const ETL_RETRY_DELAY_MS = 45 * 60_000;
+
+function retryable(e: unknown): boolean {
+  return !!e && typeof e === "object" && (e as { retryable?: unknown }).retryable === true;
+}
+
+/** 今天（北京时间）已经跑完过简报 */
+function briefDoneToday(): boolean {
+  const today = todayOf();
+  return env()
+    .app.db.select({ finishedAt: jobs.finishedAt })
+    .from(jobs)
+    .where(and(eq(jobs.kind, "brief"), eq(jobs.status, "done")))
+    .all()
+    .some((j) => j.finishedAt !== null && todayCN(new Date(j.finishedAt)) === today);
+}
 
 export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> {
   const market = (ctx.job.payload.market === "HK" ? "HK" : "A") as Market;
+  const attempt = ctx.job.attempt ?? 0;
   const etl = etlContext(ctx.log, (f, note) => ctx.progress(f * 0.8, note));
-  const r = await daily(etl, market);
+  let r: Awaited<ReturnType<typeof daily>>;
+  try {
+    r = await daily(etl, market, {
+      critical: criticalCodes(market),
+      acceptMissing: acceptMissingFromEnv(),
+    });
+  } catch (e) {
+    if (retryable(e) && attempt < ETL_MAX_RETRIES) {
+      const notBefore = Date.now() + ETL_RETRY_DELAY_MS;
+      enqueue("etl", { market, retryOf: ctx.job.id }, null, { notBefore, attempt: attempt + 1 });
+      ctx.log(
+        `${MARKET_LABEL[market]}${nowHmCN(new Date(notBefore))} 自动重试（第 ${attempt + 1}/${ETL_MAX_RETRIES} 次）`,
+      );
+    }
+    throw e;
+  }
   if (!r.tradingDay) return { market, tradingDay: false, latest: r.latest };
   ctx.progress(0.85, "结算跟踪");
-  const s = await settleMarket(market, ctx);
-  return { market, tradingDay: true, latest: r.latest, dataVersion: r.dataVersion, ...s };
+  const s = await settleMarket(market, ctx, { staleCodes: r.completeness?.missingCritical ?? [] });
+  // 重跑成功时，当天的简报如果已经写过（还说着「数据没更新」），再排一次，加一版（S10）
+  const briefAgain = attempt > 0 && briefDoneToday();
+  if (briefAgain) enqueue("brief", {});
+  return {
+    market,
+    tradingDay: true,
+    latest: r.latest,
+    dataVersion: r.dataVersion,
+    missingCritical: r.completeness?.missingCritical ?? [],
+    ...(attempt > 0 ? { attempt } : {}),
+    ...(briefAgain ? { briefAgain: true } : {}),
+    ...s,
+  };
 }

@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { captureLines, openVersionText, versionStatusBadge } from "./data-status.ts";
+import {
+  captureLines,
+  openVersionText,
+  provenanceText,
+  qualitySentence,
+  retryBannerText,
+  softAlerts,
+  sourcesLines,
+  versionStatusBadge,
+} from "./data-status.ts";
+import type { DataQuality, DataStatus } from "./types.ts";
 
 describe("versionStatusBadge", () => {
   it("四种结束状态", () => {
@@ -55,5 +65,133 @@ describe("captureLines", () => {
       { text: "深港通名单还没有开始记录", tone: "neutral" },
       { text: "财报首见留底 1200 条，近 7 天新增 30", tone: "neutral" },
     ]);
+  });
+});
+
+describe("sourcesLines", () => {
+  const base = {
+    versionId: 7,
+    status: "ok",
+    date: "2026-10-20",
+    served: { em: 120, tx: 3, txq: 5227 },
+    fallbacks: 3,
+    failed: 0,
+    empty: 0,
+    index: { sse: "em" },
+  };
+
+  it("今晚：东财 N 只、腾讯 M 只（含批量报价）与回退次数，批量报价另起一行", () => {
+    expect(sourcesLines(base, "2026-10-20")).toEqual([
+      { text: "今晚东财 120 只、腾讯 5230 只（回退 3 次）", tone: "neutral" },
+      { text: "腾讯里 5227 只来自批量报价", tone: "neutral" },
+    ]);
+  });
+
+  it("不是今天的写上日期；有没拿到的股票时单列成 warn；没有台账时不显示", () => {
+    const lines = sourcesLines(
+      { ...base, served: { em: 3 }, fallbacks: 0, failed: 2 },
+      "2026-10-21",
+    );
+    expect(lines).toEqual([
+      { text: "10-20 那晚东财 3 只、腾讯 0 只（回退 0 次）", tone: "neutral" },
+      { text: "2 只日线所有数据源都没拿到", tone: "warn" },
+    ]);
+    expect(sourcesLines(null, "2026-10-21")).toEqual([]);
+    expect(sourcesLines(undefined, "2026-10-21")).toEqual([]);
+  });
+});
+
+const market = (o: Partial<DataStatus["markets"][number]>): DataStatus["markets"][number] => ({
+  market: "A",
+  asOf: "2026-10-08",
+  dataVersion: 9,
+  lastEtl: null,
+  ...o,
+});
+
+describe("retryBannerText（D73）", () => {
+  it("排着队等自动重跑：原因、北京时间几点、第几次", () => {
+    const m = market({
+      lastEtl: {
+        status: "queued",
+        finishedAt: null,
+        error: "A 股有 12 只股票今天的日线没拿到，已停止更新，以免被当成停牌",
+        attempt: 1,
+        retryAt: Date.parse("2026-10-09T18:15:00+08:00"),
+      },
+    });
+    expect(retryBannerText(m)).toBe(
+      "A 股今天的数据没更新完整：A 股有 12 只股票今天的日线没拿到，已停止更新，以免被当成停牌。18:15 自动重试（第 1/2 次）",
+    );
+    expect(
+      retryBannerText(market({ lastEtl: { status: "failed", finishedAt: 1, error: "x" } })),
+    ).toBeNull();
+  });
+});
+
+describe("softAlerts（D73）", () => {
+  it("连续失败 3 晚以上才提示", () => {
+    const m = market({
+      market: "HK",
+      soft: [
+        {
+          step: "fundamentals",
+          lastOkDate: "2026-10-05",
+          failingNights: 3,
+          firstFailDate: "2026-10-06",
+        },
+        { step: "fx", lastOkDate: "2026-10-07", failingNights: 2, firstFailDate: "2026-10-08" },
+      ],
+    });
+    expect(softAlerts(m)).toEqual(["港股「财报与股本」已经连续 3 晚没更新成功，沿用的是旧数据"]);
+  });
+});
+
+describe("qualitySentence（D74）", () => {
+  const q = (byRule: DataQuality["byRule"]): DataQuality => ({
+    days: 7,
+    byRule,
+    topCodes: [],
+    open: [],
+    lastVersions: [],
+  });
+  it("拦下按规则分列，标记只数待核的", () => {
+    expect(
+      qualitySentence(
+        q([
+          { rule: "ohlc", severity: "reject", n: 2, open: 2 },
+          { rule: "calendar", severity: "reject", n: 1, open: 0 },
+          { rule: "limit_breach", severity: "flag", n: 9, open: 8 },
+          { rule: "stale_print", severity: "flag", n: 3, open: 3 },
+        ]),
+      ),
+    ).toBe("近 7 天拦下 3 根异常日线（价格关系不对 2、日期不是交易日 1），标记 11 处待核");
+    expect(qualitySentence(q([{ rule: "adj_jump", severity: "flag", n: 1, open: 1 }]))).toBe(
+      "近 7 天没有拦下异常日线，标记 1 处待核",
+    );
+    expect(qualitySentence(q([]))).toBe("近 7 天没有发现数据问题");
+  });
+});
+
+describe("provenanceText（S13）", () => {
+  it("东方财富、腾讯（日 K 与报价合并）占比；来源未记录只在有时写；缺失天数", () => {
+    const base = { gapDays: 0, gapCodes: 0, issues: { reject: 0, flag: 0 }, accepted: [] };
+    expect(
+      provenanceText({
+        ...base,
+        bySource: { em: 971, tx: 9, txq: 20 },
+        total: 1000,
+        unknownRows: 0,
+      }),
+    ).toBe("行情来源：东方财富 97.1%、腾讯 2.9%；缺失 0 天");
+    expect(
+      provenanceText({
+        ...base,
+        bySource: { em: 500, unknown: 500 },
+        total: 1000,
+        unknownRows: 500,
+        gapDays: 3,
+      }),
+    ).toBe("行情来源：东方财富 50%（来源未记录 50%）；缺失 3 天");
   });
 });

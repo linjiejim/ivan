@@ -24,6 +24,7 @@ import {
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildTools, evidenceForModel } from "./agent/tools.ts";
 import { createApp } from "./app.ts";
+import { clearDataStatusCache } from "./services/runs.ts";
 import { createAuth, migrateAuth } from "./auth.ts";
 import { setEnvForTest } from "./env.ts";
 import { registerChat, setChatModelForTest } from "./routes/chat.ts";
@@ -2246,3 +2247,212 @@ function insertSnapshot(
   });
   return id;
 }
+
+describe("数据质量（D74）", () => {
+  it("管理页数据接口带数据质量；标为已核对只有管理员能做，转给 worker", async () => {
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      calls.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
+      const reply = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+      if (url.pathname === "/internal/data-status")
+        return reply({ markets: [], maintenance: null });
+      if (url.pathname === "/internal/data-quality")
+        return reply({
+          days: 7,
+          byRule: [{ rule: "ohlc", severity: "reject", n: 1, open: 1 }],
+          topCodes: [],
+          open: [],
+          lastVersions: [],
+        });
+      if (url.pathname === "/internal/data-issues/3/resolve")
+        return reply({ id: 3, resolvedVer: 9, resolvedBy: "admin" });
+      return reply({ error: "没有" }, 404);
+    });
+    try {
+      const d = await call("/api/admin/data", { cookie: admin });
+      expect(d.status).toBe(200);
+      expect(d.json.quality).toMatchObject({ byRule: [{ rule: "ohlc", n: 1 }] });
+      const inv = await call("/api/admin/invites", { body: { note: "dq" }, cookie: admin });
+      const user = await signUp("dq@test.local", String(inv.json.code));
+      expect(
+        (await call("/api/admin/data-issues/3/resolve", { method: "POST", cookie: user.cookie }))
+          .status,
+      ).toBe(403);
+      const ok = await call("/api/admin/data-issues/3/resolve", { method: "POST", cookie: admin });
+      expect(ok.json).toEqual({ id: 3, resolvedVer: 9, resolvedBy: "admin" });
+      expect(
+        (await call("/api/admin/data-issues/x/resolve", { method: "POST", cookie: admin })).status,
+      ).toBe(400);
+      expect(calls).toContain("GET /internal/data-quality?days=7");
+      expect(calls).toContain("POST /internal/data-issues/3/resolve");
+      expect(calls.filter((c) => c.includes("resolve"))).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("提交前校验基准与港股通名单（D75、D77）", () => {
+  /** 假 worker：data-status 给 A 股各基准首个数据日、港股通名单（null = 没有记录）；记下请求 */
+  function fakeWorker(o: { hkConnect: { attrs: string[]; firstDate: string } | null }) {
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      calls.push(url.pathname);
+      const reply = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+      if (url.pathname === "/internal/data-status")
+        return reply({
+          markets: [
+            {
+              market: "A",
+              asOf: "2026-09-30",
+              dataVersion: 5,
+              lastEtl: null,
+              benchFirstDates: {
+                csi300_tr: "2013-01-04",
+                sse: "2013-01-04",
+                csi500_tr: "2013-01-04",
+                csi1000_tr: "2014-10-17",
+                csi_div_tr: null,
+              },
+            },
+            {
+              market: "HK",
+              asOf: "2026-09-30",
+              dataVersion: 5,
+              lastEtl: null,
+              benchFirstDates: { hsi_tr: "2013-01-02", hscei_tr: "2013-01-02" },
+              hkConnect: o.hkConnect,
+            },
+          ],
+          maintenance: null,
+          computePaused: null,
+        });
+      return reply({ ok: true });
+    });
+    return calls;
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearDataStatusCache();
+  });
+
+  const backtestsToday = () =>
+    (
+      handle.sqlite
+        .prepare(
+          `SELECT coalesce(sum(backtests), 0) AS n FROM usage_daily WHERE user_id = ? AND day = ?`,
+        )
+        .get(adminId, todayCN()) as { n: number }
+    ).n;
+  const clearJobs = () =>
+    handle.sqlite.prepare(`UPDATE jobs SET status = 'done' WHERE user_id = ?`).run(adminId);
+
+  async function versionOf(spec: Record<string, unknown>): Promise<string> {
+    const d = await call("/api/drafts", { body: { spec }, cookie: admin });
+    expect(d.status).toBe(200);
+    const c = await call(`/api/drafts/${d.json.draftId}/confirm`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(c.status).toBe(200);
+    return String(c.json.versionId);
+  }
+  const rank = { terms: [{ factor: "pe_ttm", weight: 1, better: "low" }], top: 5 };
+
+  it("中证1000 起点早于首个数据日：400、不排任务、不扣额度；之后的起点照常排队", async () => {
+    clearJobs();
+    fakeWorker({ hkConnect: null });
+    const versionId = await versionOf({ name: "小盘", market: "A", rank, benchmark: "csi1000" });
+    const used = backtestsToday();
+    const runs0 = count("runs");
+    const jobs0 = count("jobs");
+    const bad = await call("/api/runs", {
+      body: { versionId, start: "2014-06-03" },
+      cookie: admin,
+    });
+    expect(bad.status).toBe(400);
+    expect(String(bad.json.error)).toBe(
+      "基准「中证1000全收益」从 2014-10-17 才有数据，请把起点设在这之后，或换个基准",
+    );
+    // 起点就是首个数据日：前一个交易日还没有基准，同样拒绝
+    const same = await call("/api/runs", {
+      body: { versionId, start: "2014-10-17" },
+      cookie: admin,
+    });
+    expect(same.status).toBe(400);
+    // 参数扫描同样在扣额度之前拦下
+    const sweep = await call("/api/runs/sweep", {
+      body: { versionId, path: "/rank/top", values: [3, 5], start: "2014-06-03" },
+      cookie: admin,
+    });
+    expect(sweep.status).toBe(400);
+    expect(backtestsToday()).toBe(used);
+    expect(count("runs")).toBe(runs0);
+    expect(count("jobs")).toBe(jobs0);
+
+    const ok = await call("/api/runs", { body: { versionId, start: "2015-01-05" }, cookie: admin });
+    expect(ok.status).toBe(200);
+    expect(backtestsToday()).toBe(used + 1);
+    clearJobs();
+  });
+
+  it("基准一行都没有：「还没有数据」", async () => {
+    clearJobs();
+    fakeWorker({ hkConnect: null });
+    const versionId = await versionOf({ name: "红利", market: "A", rank, benchmark: "csi_div" });
+    const used = backtestsToday();
+    const r = await call("/api/runs", { body: { versionId, start: "2020-01-02" }, cookie: admin });
+    expect(r.status).toBe(400);
+    expect(String(r.json.error)).toBe("基准「中证红利全收益」还没有数据，等今晚行情更新后再试");
+    expect(backtestsToday()).toBe(used);
+  });
+
+  it("港股通股票池没有名单：400、不扣额度；有名单时照常排队", async () => {
+    clearJobs();
+    const spec = { name: "港股通", market: "HK", universe: { hkConnect: true }, rank };
+    fakeWorker({ hkConnect: null });
+    const versionId = await versionOf(spec);
+    const used = backtestsToday();
+    const r = await call("/api/runs", { body: { versionId, start: "2020-01-02" }, cookie: admin });
+    expect(r.status).toBe(400);
+    expect(String(r.json.error)).toBe("港股通名单还没有记录，等今晚证券表刷新后再试");
+    expect(backtestsToday()).toBe(used);
+
+    vi.unstubAllGlobals();
+    clearDataStatusCache();
+    fakeWorker({ hkConnect: { attrs: ["hk_connect_sz"], firstDate: "2026-06-01" } });
+    const ok = await call("/api/runs", { body: { versionId, start: "2020-01-02" }, cookie: admin });
+    expect(ok.status).toBe(200);
+    expect(backtestsToday()).toBe(used + 1);
+    clearJobs();
+  });
+
+  it("data-status 缓存 60 秒；worker 不在时不拦（交给 worker 建输入时再查）", async () => {
+    clearJobs();
+    const calls = fakeWorker({ hkConnect: null });
+    const versionId = await versionOf({ name: "沪深300", market: "A", rank });
+    expect(
+      (await call("/api/runs", { body: { versionId, start: "2020-01-02" }, cookie: admin })).status,
+    ).toBe(200);
+    expect(
+      (await call("/api/runs", { body: { versionId, start: "2020-01-02" }, cookie: admin })).status,
+    ).toBe(200);
+    expect(calls.filter((p) => p === "/internal/data-status")).toHaveLength(1);
+    clearJobs();
+    vi.unstubAllGlobals();
+    clearDataStatusCache();
+    const v2 = await versionOf({ name: "红利2", market: "A", rank, benchmark: "csi_div" });
+    expect(
+      (await call("/api/runs", { body: { versionId: v2, start: "2020-01-02" }, cookie: admin }))
+        .status,
+    ).toBe(200);
+    clearJobs();
+  });
+});

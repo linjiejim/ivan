@@ -8,7 +8,7 @@
 import type { DateStr } from "./dates.ts";
 import type { ExecConfig } from "./exec.ts";
 import type { Market } from "./market.ts";
-import type { SimResult } from "./backtest.ts";
+import type { RunProvenance, SimResult } from "./backtest.ts";
 
 export type RunCardKind = "backtest" | "sweep_child" | "reproduce";
 
@@ -31,8 +31,8 @@ export interface RunCard {
     priceHash: string;
     benchHash: string;
     caveatsHash: string;
-    /** 行情来源占比（S13） */
-    provenance?: unknown;
+    /** 行情来源占比、缺失与数据问题（S13）；S13 之前的运行没有 */
+    provenance?: RunProvenance;
   };
   /** 可信度的自助法种子（S06，来自 inputHash） */
   seeds: { validation: number | null };

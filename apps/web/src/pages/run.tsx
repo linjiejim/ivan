@@ -59,6 +59,7 @@ import {
   Button,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
+import { provenanceValue } from "../lib/data-status.ts";
 import { money, NA, num, pct, REASON_TEXT, REJECT_TEXT, tone } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
 import {
@@ -85,7 +86,7 @@ function useRun(id: string) {
 
 const short = (h: string | null | undefined) => (h ? h.slice(0, 8) : NA);
 
-/** 复现信息（ⓘ）：区间、资金、策略指纹、数据版本、引擎、成交假设、输入指纹、运行卡指纹 */
+/** 复现信息（ⓘ）：区间、资金、策略指纹、数据版本、行情来源（S13）、引擎、成交假设、输入指纹、运行卡指纹 */
 function ReproRows({ r }: { r: RunDetail }) {
   return (
     <InfoRows
@@ -101,6 +102,10 @@ function ReproRows({ r }: { r: RunDetail }) {
           "数据截至",
           r.dataAsOf ? `${r.dataAsOf}${r.dataVersion ? `（#${r.dataVersion}）` : ""}` : NA,
         ],
+        // 早于 S13 的回测没有来源记录，不显示这一行
+        ...(r.card?.data.provenance
+          ? [["行情来源", provenanceValue(r.card.data.provenance)] as [string, string]]
+          : []),
         ["引擎", r.engineVersion ?? NA],
         ["成交假设", r.exec ? describeExec(r.exec) : NA],
         [

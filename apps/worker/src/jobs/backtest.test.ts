@@ -366,6 +366,35 @@ describe("完整重跑（kind = reproduce）", () => {
     expect(repro.cardHash).not.toBe(runOf(runId).cardHash);
   });
 
+  it("入选过的股票后来多了一条数据问题：逐笔一致，只是提示项不同（S13）", async () => {
+    const { runId } = seedRun(t.env.app);
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const card = runOf(runId).card as unknown as RunCard;
+    expect(card.data.provenance).toMatchObject({
+      bySource: { unknown: expect.any(Number) },
+      gapDays: 0,
+    });
+    const traded = t.env.app.sqlite
+      .prepare(`SELECT code FROM run_trades WHERE run_id = ? LIMIT 1`)
+      .get(runId) as { code: string };
+    await t.env.wh.run(
+      `INSERT INTO data_issues (ver, dataset, code, date, rule, severity, detail, src)
+       VALUES (1, 'bars', $c, DATE '2025-04-01', 'stale_print', 'flag', '开高低收量与前一天完全相同', 'em')`,
+      { c: traded.code },
+    );
+    const reproId = seedReproduce(runId);
+    await backtestJob(fakeJobContext("backtest", { runId: reproId }));
+    expect(runOf(runId).verify).toMatchObject({
+      sameInput: true,
+      sameResult: true,
+      reportSame: false,
+    });
+    const repro = runOf(reproId).card as unknown as RunCard;
+    expect(repro.data.provenance!.issues).toEqual({ reject: 0, flag: 1 });
+    expect(repro.data.caveatsHash).not.toBe(card.data.caveatsHash);
+    expect(repro.data.inputHash).toBe(card.data.inputHash);
+  });
+
   it("改了一根 K 线：结果不同，原因是数据修订", async () => {
     const { runId } = seedRun(t.env.app);
     await backtestJob(fakeJobContext("backtest", { runId }));

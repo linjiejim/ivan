@@ -45,7 +45,8 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
     "boards": ["main","gem","star"],           // 可选；A 股 main/gem/star，港股 hk_main/hk_gem；不写 = 全部
     "exclude": ["st","new_listing","loss"],    // 排除 ST（港股无）/ 次新 / 亏损
     "minMcap": 100,                            // 可选，亿（本币）
-    "industries": { "include": ["银行"], "exclude": ["房地产"] }  // 可选
+    "industries": { "include": ["银行"], "exclude": ["房地产"] },  // 可选
+    "hkConnect": true                          // 可选，只用于港股：只选港股通标的（内地投资者能买到的）
   },
   "filters": [                                 // 全部满足
     { "factor": "roe_ttm", "op": ">=", "value": 12 },
@@ -63,11 +64,13 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
   "rebalance": { "every": "week" | "month" | "quarter", "buffer": 1.5 },  // 掉出前 top×buffer 名才卖
   "sizing": { "method": "equal", "maxWeight": 0.2 },       // 等权；可选单只上限
   "exits": { "takeProfit": 0.3, "stopLoss": 0.15, "maxHoldDays": 120, "dropWhenFiltered": true },
-  "benchmark": "csi300" | "sse" | "hsi" | "hscei",          // 可选；A 默认 csi300（全收益），港股默认 hsi
+  "benchmark": "csi300" | "sse" | "csi500" | "csi1000" | "csi_div" | "hsi" | "hscei",  // 可选；A 默认 csi300（全收益），港股默认 hsi
   "signals": { "datasetId": "sig_xxx", "maxPositions": 10 }  // 仅信号模式
 }
 排序：每个排序项取当日横截面百分位（neutral 的项只在同一一级行业里比），按权重加权，取前 top 只；设了 maxPerIndustry 时每个一级行业最多留这么多只。
 「当时市值前 N 大」的股票池用条件 { "factor": "mcap_rank", "op": "<=", "value": N }，不要用今天的市值去筛历史。
+港股策略可以加 universe.hkConnect: true，只选港股通标的（按决策日当时的名单）。
+基准：csi500 / csi1000 / csi_div 是中证500 / 中证1000 / 中证红利全收益。中小盘策略（回测提示「基准可能不匹配」或持仓市值排名靠后）可以建议换成中证500 或中证1000，以股息率排序为主的建议中证红利；只在提案里改 benchmark，由用户确认，不要自己换了基准再说跑赢。
 改已有策略时，优先用 patch（JSON Patch：[{ "op": "replace", "path": "/exits/stopLoss", "value": 0.1 }]），只改用户要求的部分。
 回测规则：收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率。
 新回测默认按流动性成交：成交价加减单边滑点（A 股 5bp、港股 10bp）和半个最小价位，计平方根冲击成本（系数 0.5 是文献值，没在 A 股 / 港股上校准），单笔买入不超过决策日 20 日均成交额的 10%，不知道成交额的股票不买；run_backtest 的 exec 可以改这些设置。`;

@@ -64,6 +64,7 @@ export async function makeTestEnv(
 export function fakeJobContext(
   kind: string,
   payload: Record<string, unknown> = {},
+  opts: { attempt?: number } = {},
 ): JobContext & { logs: string[]; progressCalls: Array<{ fraction: number; note?: string }> } {
   const logs: string[] = [];
   const progressCalls: Array<{ fraction: number; note?: string }> = [];
@@ -80,6 +81,8 @@ export function fakeJobContext(
     createdAt: Date.now(),
     startedAt: Date.now(),
     finishedAt: null,
+    notBefore: null,
+    attempt: opts.attempt ?? 0,
   };
   return {
     job,

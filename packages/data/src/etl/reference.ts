@@ -4,11 +4,13 @@
 import { addDays, type DateStr, type Market } from "@ivan/core";
 import { mapLimit } from "../http.ts";
 import { centralParity } from "../sources/chinamoney.ts";
-import { csindexHistory } from "../sources/csindex.ts";
 import { emQuery, str } from "../sources/eastmoney.ts";
 import { szseNameChanges } from "../sources/exchanges.ts";
-import { indexKline, klineRange } from "../sources/tencent.ts";
-import { emIndexKline, emKline } from "../sources/emkline.ts";
+import { klineRange } from "../sources/tencent.ts";
+import { emKline } from "../sources/emkline.ts";
+import { fetchWithChain } from "../sources/chain.ts";
+import { chainFor, chainOf } from "../sources/registry.ts";
+import { type IndexBar, type SourceId, srcCode, type SrcCode } from "../sources/types.ts";
 import { decomposeHfq } from "../compute/adjust.ts";
 import type { EtlContext } from "./context.ts";
 
@@ -30,6 +32,13 @@ export const INDEXES: Record<
 > = {
   csi300_tr: { market: "A", label: "沪深300全收益", source: "csindex", id: "H00300" },
   csi300: { market: "A", label: "沪深300", source: "index", id: "1.000300", tencentSym: "sh000300" },
+  // 中证 500 / 1000 / 红利（D75）：全收益走中证官网，价格孪生用来临时补齐晚发布的全收益
+  csi500_tr: { market: "A", label: "中证500全收益", source: "csindex", id: "H00905" },
+  csi500: { market: "A", label: "中证500", source: "index", id: "1.000905", tencentSym: "sh000905" },
+  csi1000_tr: { market: "A", label: "中证1000全收益", source: "csindex", id: "H00852" },
+  csi1000: { market: "A", label: "中证1000", source: "index", id: "1.000852", tencentSym: "sh000852" },
+  csi_div_tr: { market: "A", label: "中证红利全收益", source: "csindex", id: "H00922" },
+  csi_div: { market: "A", label: "中证红利", source: "index", id: "1.000922", tencentSym: "sh000922" },
   sse: { market: "A", label: "上证指数", source: "index", id: "1.000001", tencentSym: "sh000001" },
   chinext: { market: "A", label: "创业板指", source: "index", id: "0.399006", tencentSym: "sz399006" },
   hsi_tr: { market: "HK", label: "恒指（盈富基金 02800 含分红）", source: "etf", id: "02800.HK" },
@@ -38,33 +47,57 @@ export const INDEXES: Record<
   hscei: { market: "HK", label: "恒生国企指数", source: "index", id: "100.HSCEI", tencentSym: "hkHSCEI" },
 };
 
+/** 行情仓的历史起点：回填默认从这天起，新加的指数第一次更新也从这天拉全 */
+export const DEFAULT_SINCE = "2013-01-01";
+
+/** 全收益指数晚发布（D24）：用价格孪生的涨跌临时补齐的配对 [全收益, 价格] */
+export const PROVISIONAL_PAIRS: Record<Market, ReadonlyArray<readonly [string, string]>> = {
+  A: [
+    ["csi300_tr", "csi300"],
+    ["csi500_tr", "csi500"],
+    ["csi1000_tr", "csi1000"],
+    ["csi_div_tr", "csi_div"],
+  ],
+  HK: [
+    ["hsi_tr", "hsi"],
+    ["hscei_tr", "hscei"],
+  ],
+};
+
 /** 交易日历来源：A 股看上证，港股看恒指。 */
 const CALENDAR_INDEX: Record<Market, string> = { A: "sse", HK: "hsi" };
 
 /** 指数来源：csi 中证官网、em 东财、tx 腾讯 */
-type IndexSource = "csi" | "em" | "tx";
+type IndexSource = SrcCode;
 
 async function fetchIndex(
   ctx: EtlContext,
   sym: string,
   from: DateStr,
   to: DateStr,
-): Promise<{ bars: Array<{ date: DateStr; close: number }>; src: IndexSource }> {
+): Promise<{ bars: IndexBar[]; src: IndexSource }> {
   const def = INDEXES[sym]!;
-  if (def.source === "csindex") {
-    return { bars: await csindexHistory(ctx.http, def.id, from, to), src: "csi" };
+  if (def.source !== "etf") {
+    // 价格指数走指数链（D72，默认东财在前、腾讯在后）；全收益指数只有中证官网一家
+    const symOf: Partial<Record<SourceId, string>> =
+      def.source === "csindex" ? { csindex: def.id } : { eastmoney: def.id, tencent: def.tencentSym };
+    const base =
+      def.source === "csindex"
+        ? chainOf("index", def.market, ["csindex"], true)
+        : chainFor("index", def.market, ctx.log);
+    const chain = { ...base, adapters: base.adapters.filter((a) => symOf[a.id]) };
+    const sctx = { http: ctx.http, today: ctx.today, log: ctx.log };
+    const r = await fetchWithChain(
+      chain,
+      `指数 ${def.label}`,
+      (a) => a.indexBars!(sctx, symOf[a.id]!, from, to),
+      (b) => !b.length,
+      ctx.http,
+    );
+    ctx.ledger?.recordIndex(sym, r);
+    return { bars: r.value, src: srcCode(r.servedBy, "index") };
   }
   const useTencent = process.env.KLINE_SOURCE === "tencent";
-  if (def.source === "index") {
-    if (!useTencent) {
-      try {
-        return { bars: await emIndexKline(ctx.http, def.id, from, to), src: "em" };
-      } catch (e) {
-        if (!def.tencentSym || ctx.http.isBlocked("web.ifzq.gtimg.cn")) throw e;
-      }
-    }
-    return { bars: await indexKline(ctx.http, def.tencentSym!, from, to), src: "tx" };
-  }
   // ETF：总收益序列 = 不复权收盘 × 等比因子（从上市或 from 起算，只看涨跌）
   if (!useTencent) {
     try {
@@ -103,10 +136,21 @@ export async function updateIndexes(
   from: DateStr,
 ): Promise<{ calendarLast: DateStr | null }> {
   const syms = Object.keys(INDEXES).filter((s) => INDEXES[s]!.market === market);
+  // 库里一行都没有的指数（新加的基准，D75）：这次从 DEFAULT_SINCE 拉全，不用停 worker 跑回填
+  const stored = new Set(
+    (
+      await ctx.wh.all<{ sym: string }>(
+        `SELECT DISTINCT sym FROM index_bars WHERE sym IN (${syms.map((x) => `'${x}'`).join(", ")})`,
+      )
+    ).map((r) => r.sym),
+  );
+  const empty = new Set(syms.filter((sym) => !stored.has(sym) && from > DEFAULT_SINCE));
+  for (const sym of empty) ctx.log(`指数 ${sym} 第一次更新，从 ${DEFAULT_SINCE} 补齐`);
+  const fromOf = (sym: string) => (empty.has(sym) ? DEFAULT_SINCE : from);
   // 日历指数必须成功；其他指数（全收益、ETF）失败时跳过，下次再补
   const fetched = await mapLimit(syms, 3, async (sym) => {
     try {
-      const got = await fetchIndex(ctx, sym, from, ctx.today);
+      const got = await fetchIndex(ctx, sym, fromOf(sym), ctx.today);
       let bars = got.bars;
       if (INDEXES[sym]!.source === "etf" && bars.length) {
         const anchor = await ctx.wh.one<{ date: string; close: number }>(
@@ -129,7 +173,7 @@ export async function updateIndexes(
       if (!bars.length) continue;
       await ctx.wh.run(`DELETE FROM index_bars WHERE sym = $s AND date >= $f::DATE`, {
         s: sym,
-        f: from,
+        f: fromOf(sym),
       });
       await ctx.wh.append(
         "index_bars",
@@ -142,9 +186,10 @@ export async function updateIndexes(
         m: market,
         f: from,
       });
+      // 日历指数第一次更新时拉的是全段，日历只换 from 起的部分
       await ctx.wh.append(
         "trade_calendar",
-        cal.bars.map((b) => [market, b.date, ver]),
+        cal.bars.filter((b) => b.date >= from).map((b) => [market, b.date, ver]),
       );
     }
   });
@@ -161,19 +206,18 @@ export async function updateIndexes(
  * 全收益指数晚发布（D24）：日历里有、全收益还没有的日子，用价格指数涨跌临时补齐并标 provisional，
  * 下次拿到真实值时覆盖。
  */
-async function fillProvisionalTr(ctx: EtlContext, market: Market): Promise<void> {
-  const pairs = market === "A" ? [["csi300_tr", "csi300"]] : [["hsi_tr", "hsi"], ["hscei_tr", "hscei"]];
-  for (const [tr, price] of pairs) {
+export async function fillProvisionalTr(ctx: EtlContext, market: Market): Promise<void> {
+  for (const [tr, price] of PROVISIONAL_PAIRS[market]) {
     await ctx.wh.exclusive(async () => {
-      await ctx.wh.run(`DELETE FROM index_bars WHERE sym = $tr AND provisional`, { tr: tr! });
+      await ctx.wh.run(`DELETE FROM index_bars WHERE sym = $tr AND provisional`, { tr });
       const lastTr = await ctx.wh.one<{ date: string; close: number }>(
         `SELECT date::VARCHAR AS date, close FROM index_bars WHERE sym = $tr ORDER BY date DESC LIMIT 1`,
-        { tr: tr! },
+        { tr },
       );
       if (!lastTr) return;
       const px = await ctx.wh.all<{ date: string; close: number }>(
         `SELECT date::VARCHAR AS date, close FROM index_bars WHERE sym = $p AND date >= $d::DATE ORDER BY date`,
-        { p: price!, d: lastTr.date },
+        { p: price, d: lastTr.date },
       );
       if (px.length < 2 || px[0]!.date !== lastTr.date) return;
       const rows: unknown[][] = [];

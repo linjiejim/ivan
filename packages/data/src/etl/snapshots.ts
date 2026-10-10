@@ -22,6 +22,7 @@ export const ATTR_LABEL: Record<string, string> = {
   industry: "行业",
   lot_size: "每手股数",
   hk_connect_sz: "深港通名单",
+  hk_connect_sh: "沪港通名单",
 };
 
 /** attr_history 没有市场列：按代码后缀区分 */

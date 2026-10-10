@@ -3,6 +3,7 @@
  * server 的对话工具与 worker 的场景测试共用（验收 17：场景测试直接断言模型实际看到的东西）。
  */
 import {
+  BAR_SOURCE_TEXT,
   type Check,
   COMPUTE_PAUSED_TEXT,
   type Confidence,
@@ -14,6 +15,7 @@ import {
   type PeriodMetrics,
   PLAN_CAUSE_TEXT,
   type PlanCause,
+  type RunProvenance,
   type SimDiagnostics,
 } from "@ivan/core";
 
@@ -37,6 +39,34 @@ export interface RunModelInput {
   diagnostics: SimDiagnostics | null;
   validation: Confidence | null;
   checks: Check[];
+  /** 运行卡（S13 起 data.provenance 有行情来源占比） */
+  card?: unknown;
+}
+
+/** 行情来源代码在模型摘要里的叫法 */
+const SOURCE_NAME: Record<string, string> = { ...BAR_SOURCE_TEXT, unknown: "来源未记录" };
+
+function provenanceOf(card: unknown): RunProvenance | null {
+  return (card as { data?: { provenance?: RunProvenance } } | null)?.data?.provenance ?? null;
+}
+
+/** 行情来源（S13）：各来源占面板日线的比例（小数）、缺失与数据问题 */
+export function sourcesForModel(p: RunProvenance) {
+  const rows = new Map<string, number>();
+  for (const [src, n] of Object.entries(p.bySource)) {
+    const name = SOURCE_NAME[src] ?? src;
+    rows.set(name, (rows.get(name) ?? 0) + n);
+  }
+  const share: Record<string, number | null> = {};
+  for (const [name, n] of rows) share[name] = p.total ? r2(n / p.total) : null;
+  return {
+    bySource: share,
+    rows: p.total,
+    gapDays: p.gapDays,
+    gapCodes: p.gapCodes,
+    issues: p.issues,
+    ...(p.accepted.length ? { acceptedMissing: p.accepted } : {}),
+  };
 }
 
 /** 给模型看的回测摘要（数字全部来自存档结果） */
@@ -107,6 +137,8 @@ export function runForModel(r: RunModelInput) {
         }
       : {}),
     checks: r.checks.map((c) => ({ level: c.level, title: c.title, detail: c.detail })),
+    // 行情来源（S13）：各来源占比是小数；缺失的天数回测当成停牌
+    ...(provenanceOf(r.card) ? { dataSources: sourcesForModel(provenanceOf(r.card)!) } : {}),
     // 复现信息（D57）：口径不同的回测先说口径
     card: {
       hash: r.cardHash ? r.cardHash.slice(0, 8) : null,

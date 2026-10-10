@@ -336,7 +336,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
       }),
       execute: async function* (input) {
         const versionId = resolveVersionId(ctx, input.versionId, input.strategyId);
-        const { runId } = enqueueBacktest(userId, versionId, {
+        const { runId } = await enqueueBacktest(userId, versionId, {
           ...input,
           exec: execOverrides(input.exec),
         });
@@ -465,7 +465,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
       }),
       execute: async function* (input) {
         const versionId = resolveVersionId(ctx, input.versionId);
-        const { runId } = enqueueSweep(userId, versionId, input, input);
+        const { runId } = await enqueueSweep(userId, versionId, input, input);
         yield { runId, status: "queued" as const };
         const r = await waitRun(userId, runId, 600_000);
         yield { runId, status: r.status };

@@ -30,6 +30,7 @@ import { sha256Canonical } from "@ivan/core/node";
 import {
   buildSimInput,
   committedAsOf,
+  committedMissingCritical,
   explainSelection,
   HASH_VERSION,
   hashSimInput,
@@ -81,7 +82,12 @@ import {
 
 type TrackingRow = typeof trackings.$inferSelect;
 
-async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promise<void> {
+async function settleOne(
+  t: TrackingRow,
+  latest: string,
+  ctx: JobContext,
+  missing: ReadonlySet<string>,
+): Promise<void> {
   const { db, sqlite } = env().app;
   const { wh } = env();
   const raw = db
@@ -95,7 +101,7 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
 
   // 刚上线、还没到第一个交易日：不跑模拟，只给出首日建仓计划（精简快照：输入指纹为空，只有解释指纹与数据版本参与版次判断）
   if (t.startDate > latest) {
-    await settleWaiting(t, spec, latest, ctx);
+    await settleWaiting(t, spec, latest, ctx, missing);
     return;
   }
 
@@ -356,8 +362,14 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
             replay: { ...replay, at: latest, cause: drift.cause, causeText: drift.text },
             lastSnapshotId: snap.snapshotId,
             health: health.summary,
-            // 持仓股在今晚缺失名单里的代码（S13 起填）
-            staleCodes: [],
+            // 持仓与明日计划里、今晚没拿到日线的代码（D73）：判词显示「数据未更新」
+            staleCodes: staleOf(
+              [
+                ...result.final.positions.map((p) => p.code),
+                ...result.final.pending.map((o) => o.code),
+              ],
+              missing,
+            ),
           },
         })
         .where(eq(trackings.id, t.id))
@@ -491,6 +503,7 @@ async function settleWaiting(
   spec: StrategySpec,
   latest: string,
   ctx: JobContext,
+  missing: ReadonlySet<string>,
 ): Promise<void> {
   const { db, sqlite } = env().app;
   const { wh } = env();
@@ -565,7 +578,10 @@ async function settleWaiting(
             planFor: t.startDate,
             dataAsOf: dv.asOf,
             lastSnapshotId: snap.snapshotId,
-            staleCodes: [],
+            staleCodes: staleOf(
+              items.map((it) => it.code),
+              missing,
+            ),
           },
         })
         .where(eq(trackings.id, t.id))
@@ -574,14 +590,46 @@ async function settleWaiting(
     .immediate();
 }
 
+/** 持仓或计划里落在今晚缺失名单上的代码（去重、排序） */
+function staleOf(held: readonly string[], missing: ReadonlySet<string>): string[] {
+  return [...new Set(held)].filter((c) => missing.has(c)).sort();
+}
+
+/**
+ * 运行中跟踪的持仓与明日计划里的代码（完整性闸门的 critical，D73）：这些股票缺了不让整晚失败，
+ * 只让相关跟踪显示「数据未更新」。
+ */
+export function criticalCodes(market: Market): string[] {
+  const { sqlite } = env().app;
+  const rows = sqlite
+    .prepare(
+      `SELECT DISTINCT json_extract(p.value, '$.code') AS code
+       FROM trackings t, json_each(t.summary, '$.positions') p
+       WHERE t.status = 'active' AND t.market = ? AND json_valid(t.summary)
+       UNION
+       SELECT DISTINCT o.code FROM tracking_orders o JOIN trackings t ON t.id = o.tracking_id
+       WHERE t.status = 'active' AND t.market = ?`,
+    )
+    .all(market, market) as Array<{ code: string | null }>;
+  return rows
+    .map((r) => r.code)
+    .filter((c): c is string => typeof c === "string")
+    .sort();
+}
+
 export async function settleMarket(
   market: Market,
   ctx: JobContext,
+  opts: {
+    /** 今晚缺日线的持仓 / 计划代码（completeness.missingCritical）；不给时读最新提交版本里记下的 */
+    staleCodes?: readonly string[];
+  } = {},
 ): Promise<{ settled: number; failed: number }> {
   const { db } = env().app;
   // 只结算到最新的已提交版本（D60）：失败那晚写进来的数据不用
   const latest = await committedAsOf(env().wh, market);
   if (!latest) return { settled: 0, failed: 0 };
+  const missing = new Set(opts.staleCodes ?? (await committedMissingCritical(env().wh, market)));
   const active = db
     .select()
     .from(trackings)
@@ -593,7 +641,7 @@ export async function settleMarket(
     const t = active[i]!;
     ctx.progress(i / Math.max(1, active.length), `结算 ${i + 1}/${active.length}`);
     try {
-      await settleOne(t, latest, ctx);
+      await settleOne(t, latest, ctx, missing);
       settled++;
     } catch (e) {
       failed++;

@@ -6,6 +6,8 @@
  *
  * 行情仓写库期间不跑回测（D60）：etl / check 排队或在跑时 compute 道不认领；etl 道轮到 etl / check 时
  * 先等正在跑的 compute 任务结束（compute 道这时已经不再认领，不会饿死）。行情仓在维护状态（还没升级）时两条道都不认领。
+ *
+ * 自动重跑（D73）：任务可以带 not_before（毫秒），没到时间不认领、也不挡回测；attempt 记第几次重跑。
  */
 import { computeBlocked, type jobs, WAREHOUSE_WRITERS } from "@ivan/db";
 import { env } from "./env.ts";
@@ -78,14 +80,24 @@ export function enqueue(
   kind: string,
   payload: Record<string, unknown>,
   userId: string | null = null,
+  opts: { notBefore?: number; attempt?: number } = {},
 ): string {
   const { sqlite } = env().app;
   const id = `j_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   sqlite
     .prepare(
-      `INSERT INTO jobs (id, kind, user_id, payload, status, progress, created_at) VALUES (?, ?, ?, ?, 'queued', 0, ?)`,
+      `INSERT INTO jobs (id, kind, user_id, payload, status, progress, created_at, not_before, attempt)
+       VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
     )
-    .run(id, kind, userId, JSON.stringify(payload), Date.now());
+    .run(
+      id,
+      kind,
+      userId,
+      JSON.stringify(payload),
+      Date.now(),
+      opts.notBefore ?? null,
+      opts.attempt ?? 0,
+    );
   wake();
   return id;
 }
@@ -117,32 +129,32 @@ function laneKinds(lane: Lane): string {
     .join(",");
 }
 
-function claim(lane: Lane): JobRow | undefined {
+/** 认领这条道上最早的、已经到时间的排队任务（导出给测试） */
+export function claim(lane: Lane, now: number = Date.now()): JobRow | undefined {
   const { sqlite } = env().app;
   const kinds = laneKinds(lane);
+  const ready = `status = 'queued' AND kind IN (${kinds}) AND (not_before IS NULL OR not_before <= ?)`;
   const next =
     lane === "etl"
       ? ((
           sqlite
-            .prepare(
-              `SELECT kind FROM jobs WHERE status = 'queued' AND kind IN (${kinds}) ORDER BY created_at LIMIT 1`,
-            )
-            .get() as { kind: string } | undefined
+            .prepare(`SELECT kind FROM jobs WHERE ${ready} ORDER BY created_at LIMIT 1`)
+            .get(now) as { kind: string } | undefined
         )?.kind ?? null)
       : null;
   const wait = shouldWait(lane, next, {
     maintenance: !!env().wh.maintenance,
-    blocked: lane === "compute" && computeBlocked(sqlite) !== null,
+    blocked: lane === "compute" && computeBlocked(sqlite, now) !== null,
     computeRunning: running.compute,
   });
   if (wait) return undefined;
   const row = sqlite
     .prepare(
       `UPDATE jobs SET status = 'running', started_at = ?
-       WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND kind IN (${kinds}) ORDER BY created_at LIMIT 1)
+       WHERE id = (SELECT id FROM jobs WHERE ${ready} ORDER BY created_at LIMIT 1)
        RETURNING *`,
     )
-    .get(Date.now()) as Record<string, unknown> | undefined;
+    .get(now, now) as Record<string, unknown> | undefined;
   if (!row) return undefined;
   return {
     id: row.id as string,
@@ -157,6 +169,8 @@ function claim(lane: Lane): JobRow | undefined {
     createdAt: row.created_at as number,
     startedAt: row.started_at as number,
     finishedAt: null,
+    notBefore: (row.not_before as number | null) ?? null,
+    attempt: (row.attempt as number | null) ?? 0,
   };
 }
 

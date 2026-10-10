@@ -2,9 +2,12 @@
  * 运维命令行：`pnpm ivan <命令>`。
  *   probe [--out <文件>]                      数据探针：确认免费数据源的覆盖范围
  *   backfill --market A|HK [--since 2013-01-01] [--steps a,b] [--limit N] [--top N] [--codes c1,c2] [--force]
- *            （环境变量 KLINE_SOURCE=tencent|eastmoney|auto 指定日 K 来源）
+ *            （环境变量 KLINE_SOURCE=tencent|eastmoney 让日线与指数只走一家、不回退；auto 或不设 = 按回退链，
+ *              顺序见 IVAN_CHAIN_*，D72）
  *                                              回填行情仓（可断点续跑）
- *   daily --market A|HK                       夜间增量（休市自动跳过）
+ *   daily --market A|HK [--critical c1,c2]   夜间增量（休市自动跳过）。完整性闸门（D73）：缺日线的股票超过阈值时
+ *                                              版本记 incomplete 并报错；ETL_ACCEPT_MISSING=c1,c2 放行指定代码；
+ *                                              命令行不读应用库的跟踪，持仓股要用 --critical 指定（缺了不让整晚失败）
  *   factors --market A|HK [--from 日期]       重算因子
  *   backtest <spec.json> [--start 2018-01-01] [--end 日期] [--capital 1000000] [--out 结果.json]
  *                                              回测一份策略（CLI 版，不写应用库）
@@ -26,6 +29,7 @@ import {
   validateSpec,
 } from "@ivan/core";
 import {
+  acceptMissingFromEnv,
   backfill,
   BACKFILL_STEPS,
   type BackfillStep,
@@ -117,7 +121,10 @@ async function main() {
     }
     case "daily": {
       const { ctx, http } = await openCtx();
-      const r = await daily(ctx, market());
+      const r = await daily(ctx, market(), {
+        critical: flag("critical")?.split(","),
+        acceptMissing: acceptMissingFromEnv(),
+      });
       console.log(r);
       printHttp(http);
       ctx.wh.close();

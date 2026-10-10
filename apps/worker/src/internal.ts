@@ -4,19 +4,27 @@
 import { BENCHMARKS, isDateStr, type Market, toCode, validateSpec } from "@ivan/core";
 import { sha256Canonical } from "@ivan/core/node";
 import {
+  benchFirstDates,
   captureStatus,
   committedAsOf,
+  dataQuality,
   dataVersionState,
   EvidenceError,
   type EvidenceItem,
   explainSelection,
   FACTOR_COLUMNS,
+  lastFetchSources,
   lastTradingDay,
   latestDataVersion,
+  loadHkConnect,
+  resolveDataIssue,
   screenOn,
   securityDossier,
+  SelectionDataError,
+  softStepStatus,
   sqlCodeList,
   verifyDossier,
+  type Warehouse,
   weakRegimeDates,
 } from "@ivan/data";
 import { computeBlocked, jobs } from "@ivan/db";
@@ -26,6 +34,35 @@ import { Hono } from "hono";
 import { env, todayOf } from "./env.ts";
 import { marketDayStatus } from "./market-day.ts";
 import { wake } from "./runner.ts";
+
+interface BenchStatus {
+  benchFirstDates: Record<string, string | null>;
+  hkConnect: { attrs: string[]; firstDate: string } | null;
+}
+
+/** 各基准首个数据日与港股通名单（D75、D77）：按（行情仓, 市场）缓存，提交了新版本才重算 */
+const benchCache = new WeakMap<
+  Warehouse,
+  Map<Market, { ver: number | null; value: BenchStatus }>
+>();
+
+async function benchStatus(
+  wh: Warehouse,
+  market: Market,
+  ver: number | null,
+): Promise<BenchStatus> {
+  let byMarket = benchCache.get(wh);
+  if (!byMarket) benchCache.set(wh, (byMarket = new Map()));
+  const hit = byMarket.get(market);
+  if (hit && hit.ver === ver) return hit.value;
+  const hk = market === "HK" ? await loadHkConnect(wh) : null;
+  const value: BenchStatus = {
+    benchFirstDates: await benchFirstDates(wh, market),
+    hkConnect: hk ? { attrs: hk.attrs, firstDate: hk.first } : null,
+  };
+  byMarket.set(market, { ver, value });
+  return value;
+}
 
 export function createInternalApp() {
   const app = new Hono();
@@ -39,6 +76,8 @@ export function createInternalApp() {
   app.onError((err, c) => {
     // 证据读不到（没这只股票、那天还没有数据）：给调用方中文原因与 4xx，不算 worker 出错
     if (err instanceof EvidenceError) return c.json({ error: err.message }, err.status);
+    // 选股要的数据还没有（港股通名单没有记录，D77）
+    if (err instanceof SelectionDataError) return c.json({ error: err.message }, err.status);
     console.error(err);
     return c.json({ error: err.message }, 500);
   });
@@ -71,26 +110,68 @@ export function createInternalApp() {
     const markets = [];
     for (const m of ["A", "HK"] as Market[]) {
       const v = await latestDataVersion(wh, m);
-      const last = db.db
-        .select({ status: jobs.status, finishedAt: jobs.finishedAt, error: jobs.error })
+      const recent = db.db
+        .select({
+          status: jobs.status,
+          finishedAt: jobs.finishedAt,
+          error: jobs.error,
+          notBefore: jobs.notBefore,
+          attempt: jobs.attempt,
+        })
         .from(jobs)
         .where(and(eq(jobs.kind, "etl"), like(jobs.payload, `%"market":"${m}"%`)))
         .orderBy(desc(jobs.createdAt))
-        .get();
+        .limit(5)
+        .all();
+      const last = recent[0];
+      // 排着队等自动重跑（D73）：带上重跑时间、第几次，原因取上一次失败的错误
+      const waitingRetry = last?.status === "queued" && last.attempt > 0;
+      const lastEtl = last
+        ? {
+            status: last.status,
+            finishedAt: last.finishedAt,
+            error: waitingRetry
+              ? (recent.find((j) => j.status === "failed")?.error ?? null)
+              : last.error,
+            attempt: last.attempt,
+            retryAt: waitingRetry ? (last.notBefore ?? null) : null,
+          }
+        : null;
       markets.push({
         market: m,
         asOf: v.asOf,
         dataVersion: v.id,
-        lastEtl: last ?? null,
+        lastEtl,
         // 今天的状态（D78）：已更新 / 休市 / 没更新 / 进行中
         day: await marketDayStatus(m),
         // 正在写的版本、上一个版本的结果（D60）
         ...(await dataVersionState(wh, m)),
         // 点时数据的采集情况（D61）
         capture: await captureStatus(wh, m, todayOf()),
+        // 最近一晚各来源服务了多少只、回退几次（D72）
+        sources: await lastFetchSources(wh, m),
+        // 辅助数据（汇率、证券表、简称、财报）最近成功的日子与连续失败的晚数（D73）
+        soft: await softStepStatus(wh, m),
+        // 各基准首个数据日、港股通名单（D75、D77）：server 提交回测前校验，不排任务、不扣额度
+        ...(await benchStatus(wh, m, v.id)),
       });
     }
     return c.json({ markets, maintenance: null, computePaused });
+  });
+
+  /** 数据质量（D74）：近 N 天按规则统计的拦截与标记、问题最多的代码、未解决的问题、最近几晚的完整性 */
+  app.get("/internal/data-quality", async (c) => {
+    const days = Number(c.req.query("days") ?? 7);
+    return c.json(await dataQuality(env().wh, Number.isFinite(days) ? days : 7));
+  });
+
+  /** 管理员把一条数据问题标为已核对（resolved_by = admin） */
+  app.post("/internal/data-issues/:id/resolve", async (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id <= 0) return c.json({ error: "数据问题编号不对" }, 400);
+    const r = await resolveDataIssue(env().wh, id);
+    if (!r) return c.json({ error: `没有编号 ${id} 的数据问题` }, 404);
+    return c.json(r);
   });
 
   app.post("/internal/screen", async (c) => {
@@ -134,7 +215,11 @@ export function createInternalApp() {
     const committed = await committedAsOf(wh, v.spec.market);
     if (!committed) return c.json({ error: "行情仓还没有数据" }, 400);
     // 落到交易日：周末、节假日按前一个交易日解释（回测只在交易日决策）
-    const date = await lastTradingDay(wh, v.spec.market, b.date && b.date < committed ? b.date : committed);
+    const date = await lastTradingDay(
+      wh,
+      v.spec.market,
+      b.date && b.date < committed ? b.date : committed,
+    );
     const rank = v.spec.rank;
     const limit = Math.min(
       Math.max(b.limit ?? Math.ceil(rank.top * v.spec.rebalance.buffer) + rank.top, 1),
@@ -225,7 +310,13 @@ export function createInternalApp() {
     const asOf = await committedAsOf(wh, market);
     if (!asOf || !items.length) return c.json({ asOf, outcomes: [] });
     const from = items.map((i) => i.decisionDate).sort()[0]!;
-    const bars = await wh.all<{ code: string; d: string; open: number; close: number; adj: number }>(
+    const bars = await wh.all<{
+      code: string;
+      d: string;
+      open: number;
+      close: number;
+      adj: number;
+    }>(
       `SELECT code, date::VARCHAR AS d, open, close, adj FROM bars_daily
        WHERE code IN (${sqlCodeList([...new Set(codes)])}) AND date > $a::DATE AND date <= $b::DATE
        ORDER BY code, date`,

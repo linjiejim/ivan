@@ -1,6 +1,7 @@
 /**
  * ETL 编排：回填、夜间增量、每周抽检。数据版本先开后提交（D60）：开始写之前打开一个 open 版本，
- * 写入方给每行盖上版本号；成功提交 ok（截至日 = 因子表最新日期），休市提交 skipped，出错提交 failed。
+ * 写入方给每行盖上版本号；成功提交 ok（截至日 = 因子表最新日期），休市提交 skipped，出错提交 failed，
+ * 完整性闸门没过提交 incomplete（D73）。
  */
 import {
   addDays,
@@ -13,12 +14,23 @@ import {
   todayCN,
 } from "@ivan/core";
 import type { HttpLike } from "../http.ts";
-import { backfillBars, fetchBars, updateBars } from "./bars.ts";
+import { backfillBars, fetchBars, recordHygiene, updateBars, writeBars } from "./bars.ts";
+import type { Issue } from "../compute/hygiene.ts";
+import {
+  assessCompleteness,
+  type Completeness,
+  IncompleteDataError,
+  RetryableEtlError,
+  type SoftOutcome,
+  type SoftStep,
+  SOFT_STEP_LABEL,
+} from "./completeness.ts";
 import { emQuery } from "../sources/eastmoney.ts";
 import { type EtlContext, filledCodes, loadSecurities } from "./context.ts";
 import { computeFactors } from "./factors.ts";
 import { backfillFundamentals, updateFundamentals } from "./fundamentals.ts";
 import {
+  DEFAULT_SINCE,
   latestTradeDates,
   updateEmDailyNames,
   updateFx,
@@ -27,9 +39,10 @@ import {
 } from "./reference.ts";
 import { refreshSecuritiesA, refreshSecuritiesHK } from "./securities.ts";
 import { committedAsOf } from "../query/backtest.ts";
+import { FetchLedger } from "../sources/chain.ts";
 import { indexQuoteDate } from "../sources/tencent.ts";
 
-export const DEFAULT_SINCE = "2013-01-01";
+export { DEFAULT_SINCE };
 
 /** 今天的收盘价还没定稿（见 CLOSE_FINAL_HM）；命令行用 --today 指定了别的日期时不管 */
 function beforeCloseFinal(ctx: EtlContext, market: Market): boolean {
@@ -185,6 +198,7 @@ async function failDataVersion(ctx: EtlContext, id: number, e: unknown): Promise
     await commitDataVersion(ctx, id, {
       status: "failed",
       note: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+      sources: ctx.ledger?.toJSON(),
     });
   } catch (e2) {
     ctx.log(`数据版本 #${id} 记成失败时出错：${e2 instanceof Error ? e2.message : e2}`);
@@ -199,7 +213,8 @@ export async function backfill(ctx: EtlContext, market: Market, opts: BackfillOp
   // 只回填指定代码时其余股票的因子没重算，截至日不超过已提交的那天（还没提交过就当首次建库，不设上限）
   const held = opts.codes ? ((await committedAsOf(ctx.wh, market)) ?? undefined) : undefined;
   const ver = await beginDataVersion(ctx, market, "backfill");
-  ctx = { ...ctx, ver };
+  // 取数台账（D72）：各来源服务了多少只、回退几次、失败明细，提交时写进 data_versions.sources
+  ctx = { ...ctx, ver, ledger: new FetchLedger() };
   try {
     await backfillSteps(ctx, market, opts, ver, held);
   } catch (e) {
@@ -262,23 +277,22 @@ async function backfillSteps(
   }
   if (steps.has("factors")) {
     await computeFactors(ctx, market, since, { codes: opts.codes });
-    await commitDataVersion(ctx, ver, { status: "ok", note: `since ${since}`, maxAsOf });
+    await commitDataVersion(ctx, ver, {
+      status: "ok",
+      note: `since ${since}`,
+      maxAsOf,
+      sources: ctx.ledger?.toJSON(),
+    });
   } else {
     // 没重算因子：写进去的数据还没反映到因子上，记成不完整（不会被引用；skipped 只留给休市）
     await commitDataVersion(ctx, ver, {
       status: "incomplete",
       note: `since ${since}，没有重算因子`,
       maxAsOf,
+      sources: ctx.ledger?.toJSON(),
     });
   }
   ctx.log(`${market} 回填结束，用时 ${((Date.now() - t0) / 60000).toFixed(1)} 分钟`);
-}
-
-export interface DailyResult {
-  market: Market;
-  tradingDay: boolean;
-  latest: DateStr | null;
-  dataVersion?: number;
 }
 
 /**
@@ -301,19 +315,40 @@ export async function confirmNonTradingDay(
       { cause: e },
     );
   }
-  if (quoted === null || quoted >= today) {
+  if (quoted === null) {
     throw new Error(
-      quoted === null
-        ? `${label}指数日 K 还没有今天的数据，指数报价里也读不出日期，确认不了今天是否休市，稍后在管理页重跑`
-        : `${label}今天开市了，但指数日 K 还没有今天的数据，稍后在管理页重跑`,
+      `${label}指数日 K 还没有今天的数据，指数报价里也读不出日期，确认不了今天是否休市，稍后在管理页重跑`,
     );
+  }
+  if (quoted >= today) {
+    // 开市了、只是日 K 还没更新：45 分钟后自动重跑（D73）
+    throw new RetryableEtlError(`${label}今天开市了，但指数日 K 还没有今天的数据，稍后自动重跑`);
   }
 }
 
+export interface DailyOptions {
+  since?: DateStr;
+  /** 运行中跟踪的持仓与明日计划里的代码：缺了不让整晚失败，只让相关跟踪显示「数据未更新」 */
+  critical?: Iterable<string>;
+  /** 应急放行的代码（ETL_ACCEPT_MISSING） */
+  acceptMissing?: Iterable<string>;
+}
+
+export interface DailyResult {
+  market: Market;
+  tradingDay: boolean;
+  latest: DateStr | null;
+  dataVersion?: number;
+  /** 今晚的完整性（交易日才有） */
+  completeness?: Completeness;
+}
+
 /**
- * 夜间增量：日历 → 今天休市就结束 → 证券表 → 日线 → 简称 → 财报/股本 → 因子（近 15 天重算）→ 数据版本。
+ * 夜间增量：开版本 → 指数与日历 → 今天休市就结束 → 汇率 / 证券表（软）→ 日线 → 完整性闸门（D73）→
+ * 简称 / 财报与股本（软）→ 因子（近 15 天重算）→ 提交。闸门在财报与因子之前：拿不全就提交 incomplete、抛
+ * IncompleteDataError，今天的因子不算（读的人停在上一个提交过的版本上）。
  */
-export async function daily(ctx: EtlContext, market: Market, since = DEFAULT_SINCE): Promise<DailyResult> {
+export async function daily(ctx: EtlContext, market: Market, opts: DailyOptions = {}): Promise<DailyResult> {
   if (beforeCloseFinal(ctx, market)) {
     throw new Error(
       `${MARKET_LABEL[market]}今天的收盘价还没定稿，北京时间 ${CLOSE_FINAL_HM[market]} 之后再更新（以免把盘中价当成收盘价）`,
@@ -321,21 +356,43 @@ export async function daily(ctx: EtlContext, market: Market, since = DEFAULT_SIN
   }
   // 先开版本再写任何东西（D60）：今天的指数与日历也盖上这个版本号
   const ver = await beginDataVersion(ctx, market, "daily");
-  ctx = { ...ctx, ver };
+  ctx = { ...ctx, ver, ledger: new FetchLedger() };
   try {
-    return await dailySteps(ctx, market, since, ver);
+    return await dailySteps(ctx, market, opts, ver);
   } catch (e) {
-    await failDataVersion(ctx, ver, e);
+    // 闸门没过时版本已经提交成 incomplete，不再改成 failed
+    if (!(e instanceof IncompleteDataError)) await failDataVersion(ctx, ver, e);
     throw e;
   }
+}
+
+/** 近 20 个版本（ok / incomplete）里记下的无成交数，最新的在前 */
+async function noTradeHistory(ctx: EtlContext, market: Market, ver: number): Promise<number[]> {
+  const rows = await ctx.wh.all<{ c: string }>(
+    `SELECT completeness AS c FROM data_versions
+     WHERE market = $m AND id < $v AND status IN ('ok', 'incomplete') AND completeness IS NOT NULL
+     ORDER BY id DESC LIMIT 20`,
+    { m: market, v: ver },
+  );
+  const out: number[] = [];
+  for (const r of rows) {
+    try {
+      const n = (JSON.parse(r.c) as Partial<Completeness>).noTrade;
+      if (typeof n === "number") out.push(n);
+    } catch {
+      // 读不懂的旧行跳过
+    }
+  }
+  return out;
 }
 
 async function dailySteps(
   ctx: EtlContext,
   market: Market,
-  since: DateStr,
+  opts: DailyOptions,
   ver: number,
 ): Promise<DailyResult> {
+  const since = opts.since ?? DEFAULT_SINCE;
   const lastIndex = await ctx.wh.scalar<string>(
     `SELECT max(date)::VARCHAR FROM trade_calendar WHERE market = $m`,
     { m: market },
@@ -346,44 +403,86 @@ async function dailySteps(
     // 日 K 里没有今天：用指数实时报价交叉验证，确认不了是休市就让任务失败（看板出横幅，稍后重跑）
     if (ctx.today === todayCN()) await confirmNonTradingDay(ctx.http, market, ctx.today);
     ctx.log(`${market} 今天（${ctx.today}）休市，最近交易日 ${latest}`);
-    await commitDataVersion(ctx, ver, { status: "skipped", note: "休市" });
+    await commitDataVersion(ctx, ver, { status: "skipped", note: "休市", sources: ctx.ledger?.toJSON() });
     return { market, tradingDay: false, latest };
   }
-  // 辅助数据失败只记日志、沿用旧数据；核心的日历与日线失败才让任务失败（spec §8）
-  const soft = async (what: string, fn: () => Promise<unknown>) => {
+  // 辅助数据失败沿用旧数据、不让整晚失败；结果留痕进 completeness.soft，连续失败管理页看得到（D73）
+  const softOutcomes: SoftOutcome[] = [];
+  const soft = async (step: SoftStep, fn: () => Promise<unknown>) => {
     try {
-      await fn();
+      const r = await fn();
+      const rows =
+        typeof r === "number"
+          ? r
+          : r && typeof r === "object"
+            ? Object.values(r).reduce<number>((a, v) => a + (typeof v === "number" ? v : 0), 0)
+            : undefined;
+      softOutcomes.push({ step, ok: true, ...(rows !== undefined ? { rows } : {}) });
     } catch (e) {
-      ctx.log(`${what}失败，沿用旧数据：${e instanceof Error ? e.message : e}`);
+      const error = e instanceof Error ? e.message : String(e);
+      ctx.log(`${SOFT_STEP_LABEL[step]}更新失败，沿用旧数据：${error}`);
+      softOutcomes.push({ step, ok: false, error: error.slice(0, 200) });
     }
   };
-  if (market === "HK") await soft("汇率更新", () => updateFx(ctx, addDays(ctx.today, -20)));
-  await soft("证券表刷新", () => refreshSecurities(ctx, market));
+  if (market === "HK") await soft("fx", () => updateFx(ctx, addDays(ctx.today, -20)));
+  await soft("securities", () => refreshSecurities(ctx, market));
   const securities = await loadSecurities(ctx.wh, market, since);
-  await updateBars(ctx, market, securities, latest, prev ?? latest);
-  if (market === "A") {
-    await soft("深交所简称变更", () => updateSzseNames(ctx, 3));
-    await soft("沪市每日简称", () => updateEmDailyNames(ctx));
+  const bars = await updateBars(ctx, market, securities, latest, prev ?? latest);
+
+  // 完整性闸门（D73）：在简称、财报与因子之前判断
+  const completeness: Completeness = {
+    ...assessCompleteness({
+      market,
+      expected: bars.expected,
+      updated: bars.updated,
+      noTrade: bars.noTrade,
+      missing: bars.missing,
+      critical: new Set(opts.critical ?? []),
+      accepted: new Set(opts.acceptMissing ?? []),
+      noTradeHistory: await noTradeHistory(ctx, market, ver),
+    }),
+    date: ctx.today,
+    soft: softOutcomes,
+  };
+  if (completeness.missingCritical.length) {
+    ctx.log(`持仓或计划里的 ${completeness.missingCritical.length} 只没拿到今天的日线：${completeness.missingCritical.join(",")}`);
   }
-  await soft("财报/股本增量", () => updateFundamentals(ctx, market, securities, since));
+  if (!completeness.ok) {
+    const msg = completeness.reasons.join("；");
+    await commitDataVersion(ctx, ver, {
+      status: "incomplete",
+      completeness,
+      note: msg.slice(0, 300),
+      sources: ctx.ledger?.toJSON(),
+    });
+    throw new IncompleteDataError(msg);
+  }
+
+  if (market === "A") {
+    await soft("names_szse", () => updateSzseNames(ctx, 3));
+    await soft("names_em", () => updateEmDailyNames(ctx));
+  }
+  await soft("fundamentals", () => updateFundamentals(ctx, market, securities, since));
 
   // 注册表版本变了就全量重算，否则只重算近 15 天（覆盖晚到的股本变动与数据修订）
   const reg = await ctx.wh.meta(`factor_registry_version:${market}`);
   const from = reg === String(FACTOR_REGISTRY_VERSION) ? addDays(ctx.today, -15) : since;
   await computeFactors(ctx, market, from);
-  await commitDataVersion(ctx, ver, { status: "ok" });
-  return { market, tradingDay: true, latest, dataVersion: ver };
+  await commitDataVersion(ctx, ver, { status: "ok", completeness, sources: ctx.ledger?.toJSON() });
+  return { market, tradingDay: true, latest, dataVersion: ver, completeness };
 }
 
 /**
- * 每周抽检（spec §8）：抽 50 只在市股票重拉最近一年日线，和库里比收盘价，差异 > 0.5% 算一行被修订；
+ * 每周抽检（spec §8、D74）：抽 50 只在市股票重拉最近一年日线，和库里比收盘价，差异 > 0.5% 算一行被修订；
  * 被修订的股票整段重写并重算因子，结果记一条 data_versions（kind = check）。
+ * 收盘价一致时再比归一后的复权因子（差 > 0.1% → check_adj）与成交量（差 > 1% → check_volume）：只标记、不自动修
+ * （不知道哪家对）；比对一致的股票关掉它之前的 check_* 问题（resolved_by = check）。
  */
 export async function weeklyCheck(
   ctx: EtlContext,
   market: Market,
   sample = 50,
-): Promise<{ checked: number; revisedRows: number; repaired: string[] }> {
+): Promise<{ checked: number; revisedRows: number; repaired: string[]; flagged: number }> {
   // 抽检不新增交易日：截至日沿用开版本前已提交的那天，不把失败夜写了一半的因子提交出去（D60）
   const held = await committedAsOf(ctx.wh, market);
   const ver = await beginDataVersion(ctx, market, "check");
@@ -396,13 +495,65 @@ export async function weeklyCheck(
   }
 }
 
+/** 抽检比对的阈值 */
+const CHECK_CLOSE_DIFF = 0.005;
+const CHECK_ADJ_DIFF = 0.001;
+const CHECK_VOLUME_DIFF = 0.01;
+
+/**
+ * 一只股票的复权因子与成交量比对（收盘价已经一致时）：各规则只在第一处不一致的日子记一条，详情写共几天。
+ */
+export function compareAdjVolume(
+  stored: ReadonlyMap<string, { adj: number; volume: number }>,
+  fresh: ReadonlyArray<{ date: DateStr; adj: number; volume: number }>,
+): Issue[] {
+  const common = fresh.filter((r) => stored.has(r.date));
+  if (!common.length) return [];
+  // 两边的因子基准不同（库里接过锚），按第一个共同日归一
+  const base = stored.get(common[0]!.date)!.adj / common[0]!.adj;
+  let adjFirst: DateStr | null = null;
+  let adjN = 0;
+  let volFirst: DateStr | null = null;
+  let volN = 0;
+  for (const r of common) {
+    const old = stored.get(r.date)!;
+    if (Math.abs(old.adj / (r.adj * base) - 1) > CHECK_ADJ_DIFF) {
+      adjFirst ??= r.date;
+      adjN++;
+    }
+    const denom = Math.max(Math.abs(r.volume), 1);
+    if (Math.abs(old.volume - r.volume) / denom > CHECK_VOLUME_DIFF) {
+      volFirst ??= r.date;
+      volN++;
+    }
+  }
+  const out: Issue[] = [];
+  if (adjFirst) {
+    out.push({
+      rule: "check_adj",
+      severity: "flag",
+      date: adjFirst,
+      detail: `重拉的复权因子和库里不一致，共 ${adjN} 天（差超过 ${CHECK_ADJ_DIFF * 100}%）`,
+    });
+  }
+  if (volFirst) {
+    out.push({
+      rule: "check_volume",
+      severity: "flag",
+      date: volFirst,
+      detail: `重拉的成交量和库里不一致，共 ${volN} 天（差超过 ${CHECK_VOLUME_DIFF * 100}%）`,
+    });
+  }
+  return out;
+}
+
 async function weeklyCheckSteps(
   ctx: EtlContext,
   market: Market,
   sample: number,
   ver: number,
   maxAsOf: DateStr | null,
-): Promise<{ checked: number; revisedRows: number; repaired: string[] }> {
+): Promise<{ checked: number; revisedRows: number; repaired: string[]; flagged: number }> {
   const filled = await filledCodes(ctx.wh, market);
   const securities = (await loadSecurities(ctx.wh, market)).filter(
     (s) => !s.delist_date && filled.has(s.code),
@@ -412,15 +563,16 @@ async function weeklyCheckSteps(
   const picked = securities.filter((_, i) => (i + week) % Math.max(1, Math.floor(securities.length / sample)) === 0).slice(0, sample);
   const from = addDays(ctx.today, -365);
   let revisedRows = 0;
+  let flagged = 0;
   const repaired: string[] = [];
   for (const s of picked) {
     const stored = new Map(
       (
-        await ctx.wh.all<{ d: string; close: number }>(
-          `SELECT date::VARCHAR AS d, close FROM bars_daily WHERE code = $c AND date >= $f::DATE`,
+        await ctx.wh.all<{ d: string; close: number; adj: number; volume: number }>(
+          `SELECT date::VARCHAR AS d, close, adj, volume FROM bars_daily WHERE code = $c AND date >= $f::DATE`,
           { c: s.code, f: from },
         )
-      ).map((r) => [r.d, r.close]),
+      ).map((r) => [r.d, r]),
     );
     let fresh;
     try {
@@ -432,44 +584,49 @@ async function weeklyCheckSteps(
     let diff = 0;
     for (const r of fresh.rows) {
       const old = stored.get(r[1]);
-      if (old !== undefined && Math.abs(old - r[5]) / r[5] > 0.005) diff++;
+      if (old !== undefined && Math.abs(old.close - r[5]) / r[5] > CHECK_CLOSE_DIFF) diff++;
     }
     if (diff) {
       revisedRows += diff;
       repaired.push(s.code);
       await refetchWhole(ctx, s.code, s.list_date);
+      continue;
     }
+    const issues = compareAdjVolume(
+      stored,
+      fresh.rows.map((r) => ({ date: r[1], adj: r[8], volume: r[6] })),
+    );
+    flagged += issues.length;
+    await ctx.wh.exclusive(async () => {
+      if (issues.length) await recordHygiene(ctx, [{ code: s.code, src: fresh.source, written: [], issues }]);
+      // 这次没再不一致的规则：之前的 check_* 问题记为已解决
+      const still = issues.length
+        ? `AND rule NOT IN (${issues.map((x) => `'${x.rule}'`).join(",")})`
+        : "";
+      await ctx.wh.run(
+        `UPDATE data_issues SET resolved_ver = $v, resolved_by = 'check'
+         WHERE code = $c AND dataset = 'bars' AND resolved_by IS NULL AND rule IN ('check_adj', 'check_volume')
+           AND ver < $v ${still}`,
+        { v: ver, c: s.code },
+      );
+    });
   }
   if (repaired.length) await computeFactors(ctx, market, DEFAULT_SINCE, { codes: repaired });
   await commitDataVersion(ctx, ver, {
     status: "ok",
     revisedRows,
     maxAsOf,
-    note: `抽检 ${picked.length} 只，修复 ${repaired.join(",") || "无"}`,
+    note: `抽检 ${picked.length} 只，修复 ${repaired.join(",") || "无"}，标记 ${flagged} 处`,
   });
-  ctx.log(`${market} 每周抽检：${picked.length} 只，${revisedRows} 行被修订，修复 ${repaired.length} 只`);
-  return { checked: picked.length, revisedRows, repaired };
+  ctx.log(
+    `${market} 每周抽检：${picked.length} 只，${revisedRows} 行被修订，修复 ${repaired.length} 只，标记 ${flagged} 处`,
+  );
+  return { checked: picked.length, revisedRows, repaired, flagged };
 }
 
+/** 整段重写一只股票（抽检发现收盘价被修订）：同样过体检（D74） */
 async function refetchWhole(ctx: EtlContext, code: string, listDate: string | null): Promise<void> {
   const from = listDate && listDate > DEFAULT_SINCE ? listDate : DEFAULT_SINCE;
   const fetched = await fetchBars(ctx, code, from, ctx.today);
-  await ctx.wh.exclusive(async () => {
-    await ctx.wh.run(`DELETE FROM bars_daily WHERE code = $c`, { c: code });
-    await ctx.wh.append("bars_daily", fetched.rows);
-    await ctx.wh.run(`DELETE FROM corp_actions WHERE code = $c`, { c: code });
-    await ctx.wh.append(
-      "corp_actions",
-      fetched.actions.map((a) => [
-        code,
-        a.date,
-        a.prevClose,
-        a.refPrice,
-        a.cash,
-        a.split,
-        fetched.source,
-        ctx.ver ?? null,
-      ]),
-    );
-  });
+  await writeBars(ctx, code, from, fetched, { wholeHistory: true });
 }

@@ -16,3 +16,9 @@
 | `em-datacenter-empty.json` | 同上 | 返回数据为空（code 9201，`result: null`），是正常结果 |
 | `em-hk-securityinfo.json` | 东财数据中心 `RPT_HKF10_INFO_SECURITYINFO` | 手工构造（按真实字段布局）：港股证券资料 6 行，含深港通标记 `GANGGUTONGBIAODISHEN`（是 / 否 / 空）、人民币柜台与基金各一行 |
 | `em-hk-orgprofile.json` | 东财数据中心 `RPT_HKF10_INFO_ORGPROFILE` | 手工构造：上面 4 只普通股的所属行业 |
+| `em-kline-a-raw.json` | 东财 push2his `api/qt/stock/kline/get`（fqt=0） | 茅台 2025-06-19 ~ 06-30 不复权 8 行（价格取自 compute.test.ts 的真实行；成交量、成交额、振幅、涨跌幅手工补齐）；2025-06-26 除息：收盘 − 涨跌额 = 1408.24 ≠ 前收 1435.86 |
+| `em-kline-empty.json` | 同上 | 没有数据（`rc: 0`、`data: null`），是正常结果 |
+| `tx-kline-raw.json` | 腾讯 `fqkline/get`（不复权，键 `day`） | 同一段茅台不复权行（compute.test.ts 的真实行），成交量单位手 |
+| `tx-kline-hfq.json` | 同上（后复权，键 `hfqday`） | 同一段茅台后复权行（真实行，3 位小数） |
+| `tx-quote-batch.txt` | 腾讯 `qt.gtimg.cn/q=`（GBK 解码后的文本） | 手工构造，只填 `quotes()` 读的段（1 简称、3 现价、4 前收、5 开、6 量、30 时间、33 高、34 低、35 价/量/额、37 额）：sh600000、sh600001 两行，**故意漏掉** sh600002 |
+| `csindex-h00905.json` | 中证官网 `csindex-home/perf/index-perf`（`indexCode=H00905`） | 手工构造（按 H00300 的真实字段布局）：中证500全收益 2026-09-21 ~ 10-02 共 10 个工作日；`csindexHistory` 只读 `tradeDate` 与 `close`。代码要等探针 `idx.tri.more` 联网核对 |

@@ -2,6 +2,22 @@
 
 运行环境：Node v22.23.2 · darwin-arm64。由 `pnpm ivan probe --out` 生成；只读外部接口，不写本地数据。
 
+> **2026-10 探针修正（D72，vt-borrowing spec §13）**：下面是修正前跑的结果。之后的探针：
+> - A 股日线 `a.bars`、价格指数 `idx.price` 改为**东财优先**、腾讯作为第二条事实，与夜间默认回退链同序（D27）；
+> - 吞吐 `throughput` 改为**串行、同一域名 0.6 秒间隔、抽 10 只**（D31），测的是东财日 K 与东财数据中心，
+>   不再用并发 4 / 50 毫秒冒封 IP 的风险——下面「抓取吞吐（并发 4）」的 19.8 次/秒不代表实际节奏，
+>   回填耗时估算也按东财一次请求整段历史重写了；
+> - 节奏与顺序是 `packages/data/src/probe.ts` 导出的 `PROBE_PACING`、`PROBE_A_BARS_ORDER`，有单测守着。
+>
+> **2026-10 新增检查（D75、D77，vt-borrowing spec §15）**：下面的报告还没有这两项，R4 上线前要联网跑一次核对：
+> - `idx.tri.more`：取近 21 天的中证官网 H00905 / H00852 / H00922（中证 500 / 1000 / 红利全收益）与东财 1.000905 / 1.000852 / 1.000922
+>   （价格孪生），结论列出哪几个代码有数据。没数据的代码先改 `packages/data/src/etl/reference.ts` 的 `INDEXES` 再上线；
+>   新指数第一次夜间更新会自动从 2013-01-01 拉全，中证1000全收益的历史可能晚于 2013 年，回测起点早于它时提交前就会被拒。
+> - `hk.connect.columns`：找证券资料里的沪港通标记列；核实含义后填进 `packages/data/src/etl/securities.ts` 的
+>   `HK_CONNECT_SH_COLUMN`（同时把 `hk_connect_sh` 加进 `CAPTURE_ATTRS.HK`），港股通股票池才取深港通与沪港通的并集，之前只有深港通。
+>
+> 重新生成本报告要联网：`pnpm ivan probe --out docs/probe-report.md`（约一两分钟）。
+
 ## A 股
 
 ### ✅ A 股日线（腾讯，不复权 + 后复权） `a.bars`

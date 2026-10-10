@@ -227,3 +227,34 @@ describe("跟踪净值在基准回测扇形里的分位（D65）", () => {
     expect(summary()).toMatchObject({ navFanPercentile: null, navFanBand: null });
   });
 });
+
+describe("持仓股缺日线（D73）", () => {
+  it("持仓里的代码在 missingCritical 里：summary.staleCodes 记下它，判词是「数据未更新」", async () => {
+    await settle();
+    const held = (summary().positions as Array<{ code: string }>).map((p) => p.code);
+    expect(held.length).toBeGreaterThan(0);
+    expect((await import("./settle.ts")).criticalCodes("A")).toEqual(expect.arrayContaining(held));
+    const r = await settleMarket("A", fakeJobContext("settle", { market: "A" }), {
+      staleCodes: [held[0]!, "600999.SH"],
+    });
+    expect(r).toEqual({ settled: 1, failed: 0 });
+    expect(summary().staleCodes).toEqual([held[0]]);
+    const { trackingVerdict } = await import("@ivan/engine");
+    const s = summary();
+    expect(
+      trackingVerdict(s, s.lastDate as string, { marketDay: "traded", committedAsOf: THU }),
+    ).toBe("STALE_DATA");
+  });
+
+  it("管理员单独重跑结算：沿用最新提交的夜间版本里记下的 missingCritical", async () => {
+    await settle();
+    const held = (summary().positions as Array<{ code: string }>)[0]!.code;
+    await t.env.wh.run(
+      `INSERT INTO data_versions (id, market, as_of, kind, status, completeness)
+       VALUES (nextval('data_version_seq'), 'A', $d::DATE, 'daily', 'ok', $c)`,
+      { d: THU, c: JSON.stringify({ ok: true, missingCritical: [held], date: THU }) },
+    );
+    await settle();
+    expect(summary().staleCodes).toEqual([held]);
+  });
+});

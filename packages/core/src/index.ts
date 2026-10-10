@@ -12,3 +12,4 @@ export * from "./plan.ts";
 export * from "./health.ts";
 export * from "./versions.ts";
 export * from "./ledger.ts";
+export * from "./data-quality.ts";

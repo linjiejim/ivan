@@ -37,8 +37,22 @@ describe("市场当日状态（D78）", () => {
     ["没有任务 → 进行中", day([]), "pending"],
     ["正在跑 → 进行中", day([job("running", 17)]), "pending"],
     ["排着队 → 进行中", day([job("queued", 17)]), "pending"],
-    // S13 起「排队等自动重跑（attempt > 0）」才算没更新；本切片还是进行中
-    ["排队等自动重跑（attempt 1）→ 本切片仍是进行中", day([job("queued", 17, null, 1)]), "pending"],
+    // 排队等自动重跑（attempt > 0，D73）算没更新
+    ["排队等自动重跑（attempt 1）→ 没更新", day([job("queued", 17, null, 1)]), "stale"],
+    [
+      "失败 + 排队等第 1 次自动重跑 → 没更新，不说休市",
+      day([job("failed", 17), job("queued", 18, null, 1)]),
+      "stale",
+    ],
+    [
+      "第 2 次自动重跑成功 → 不再算没更新",
+      day([
+        job("failed", 17),
+        job("failed", 18, null, 1),
+        job("done", 19, { tradingDay: true }, 2),
+      ]),
+      "pending",
+    ],
     ["没有数据版本也不会因为日历里没今天就说休市", day([job("failed", 17, null)], null), "stale"],
   ])("%s", (_name, got, want) => {
     expect(got).toBe(want);
@@ -47,5 +61,45 @@ describe("市场当日状态（D78）", () => {
   it("任务顺序不影响结果（按创建时间判断「之后」）", () => {
     expect(day([job("done", 18, { tradingDay: true }), job("failed", 17)])).toBe("pending");
     expect(day([job("failed", 19), job("done", 18, { tradingDay: true })])).toBe("stale");
+  });
+});
+
+describe("marketDayStatus 读 jobs 表", () => {
+  it("失败的 etl + 排队等自动重跑（attempt 1、not_before 在未来）→ 没更新", async () => {
+    const { jobs, newId } = await import("@ivan/db");
+    const { todayCN } = await import("@ivan/core");
+    const { makeTestEnv } = await import("./testing/harness.ts");
+    const { marketDayStatus } = await import("./market-day.ts");
+    const t = await makeTestEnv({ today: "2026-10-09" });
+    try {
+      const now = Date.parse("2026-10-09T17:40:00+08:00");
+      expect(todayCN(new Date(now))).toBe("2026-10-09");
+      const add = (
+        status: string,
+        createdAt: number,
+        attempt = 0,
+        notBefore: number | null = null,
+      ) =>
+        t.env.app.db
+          .insert(jobs)
+          .values({
+            id: newId("j_"),
+            kind: "etl",
+            payload: { market: "A" },
+            status,
+            createdAt,
+            attempt,
+            notBefore,
+          })
+          .run();
+      add("failed", now - 10 * 60_000);
+      expect(await marketDayStatus("A", "2026-10-09")).toBe("stale");
+      add("queued", now, 1, now + 45 * 60_000);
+      expect(await marketDayStatus("A", "2026-10-09")).toBe("stale");
+      // 别的市场不受影响
+      expect(await marketDayStatus("HK", "2026-10-09")).toBe("pending");
+    } finally {
+      await t.cleanup();
+    }
   });
 });

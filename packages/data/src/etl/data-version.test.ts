@@ -142,7 +142,7 @@ describe("不新增交易日的提交不前移截至日", () => {
   it("每周抽检提交 ok，但截至日还是失败夜之前提交过的那天", async () => {
     await failedNightAfterCommit();
     const r = await weeklyCheck(ctxOf(new FakeHttp([]), "2025-10-05"), "A");
-    expect(r).toEqual({ checked: 0, revisedRows: 0, repaired: [] });
+    expect(r).toEqual({ checked: 0, revisedRows: 0, repaired: [], flagged: 0 });
     const last = (await versions()).at(-1)!;
     expect(last).toMatchObject({ kind: "check", status: "ok", as_of: "2025-10-02" });
     expect(await committedAsOf(wh, "A")).toBe("2025-10-02");

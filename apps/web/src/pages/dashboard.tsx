@@ -46,6 +46,7 @@ import {
   WIDE_QUERY,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
+import { retryBannerText } from "../lib/data-status.ts";
 import {
   beatPct,
   DEVIATION_INFO,
@@ -68,7 +69,9 @@ import type {
   TrackingChart,
 } from "../lib/types.ts";
 
-/** 只在出问题时出现：worker 没跑、行情仓维护中、某个市场最近一次更新失败、某个跟踪结算失败 */
+/**
+ * 只在出问题时出现：worker 没跑、行情仓维护中、某个市场最近一次更新失败或在等自动重跑（D73）、某个跟踪结算失败
+ */
 export function DataBanner({ data }: { data: DataStatus }) {
   const isAdmin = useMe().data?.user.role === "admin";
   if (!data.workerUp) {
@@ -88,8 +91,13 @@ export function DataBanner({ data }: { data: DataStatus }) {
     );
   }
   const failed = data.markets.filter((m) => m.lastEtl?.status === "failed");
+  // 排着队等自动重跑（D73）：说清楚原因与几点重试，不说休市
+  const retrying = data.markets.flatMap((m) => {
+    const text = retryBannerText(m);
+    return text ? [{ m, text }] : [];
+  });
   const settle = data.settleFailures ?? [];
-  if (!failed.length && !settle.length) return null;
+  if (!failed.length && !retrying.length && !settle.length) return null;
   return (
     <div className="space-y-2">
       {/* 结算失败不只进日志（D70）：这个跟踪的数字还是上一次成功结算的 */}
@@ -111,6 +119,16 @@ export function DataBanner({ data }: { data: DataStatus }) {
               去管理页重跑
             </Link>
           )}
+        </Callout>
+      ))}
+      {retrying.map(({ m, text }) => (
+        <Callout
+          key={`retry-${m.market}`}
+          tone="warn"
+          icon={IconClock}
+          title={`${MARKET_TEXT[m.market]}数据停在 ${m.asOf ?? NA}`}
+        >
+          {text}。这期间这个市场的跟踪不结算，简报会说数据没更新。
         </Callout>
       ))}
       {failed.map((m) => (

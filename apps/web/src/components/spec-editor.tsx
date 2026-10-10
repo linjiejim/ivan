@@ -4,12 +4,32 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import type { Condition, FactorDef, Market, RankTerm, StrategySpec } from "@ivan/core";
+import {
+  BENCHMARKS,
+  benchmarkOf,
+  benchmarksOf,
+  type Condition,
+  type FactorDef,
+  type Market,
+  type RankTerm,
+  type StrategySpec,
+} from "@ivan/core";
 import { api } from "../lib/api.ts";
 import type { ProposeResult } from "../lib/types.ts";
 import { DiffView } from "./diff-view.tsx";
 import { IconAdd, IconCheck, IconDelete, IconEdit } from "./icons.tsx";
-import { Button, Checkbox, cx, ErrorNote, Field, IconButton, Input, Modal, Select } from "./ui.tsx";
+import {
+  Button,
+  Checkbox,
+  cx,
+  ErrorNote,
+  Field,
+  IconButton,
+  Input,
+  Modal,
+  Select,
+  Tag,
+} from "./ui.tsx";
 
 const BOARDS: Record<Market, Array<[string, string]>> = {
   A: [
@@ -20,17 +40,6 @@ const BOARDS: Record<Market, Array<[string, string]>> = {
   HK: [
     ["hk_main", "港股主板"],
     ["hk_gem", "港股创业板"],
-  ],
-};
-
-const BENCH: Record<Market, Array<[string, string]>> = {
-  A: [
-    ["csi300", "沪深300全收益"],
-    ["sse", "上证指数（不含分红）"],
-  ],
-  HK: [
-    ["hsi", "恒指（含分红）"],
-    ["hscei", "国企指数（含分红）"],
   ],
 };
 
@@ -359,7 +368,10 @@ export function SpecEditor({
             <option value="HK">港股</option>
           </Select>
         </Field>
-        <Field label="基准">
+        <Field
+          label="基准"
+          hint={BENCHMARKS[benchmarkOf(spec)].withDividends ? <Tag>含分红</Tag> : "不含分红"}
+        >
           <Select
             value={spec.benchmark ?? ""}
             onChange={(e) =>
@@ -370,10 +382,10 @@ export function SpecEditor({
             }
             className="w-full"
           >
-            <option value="">默认（{BENCH[spec.market][0]![1]}）</option>
-            {BENCH[spec.market].map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
+            <option value="">默认（{BENCHMARKS[benchmarksOf(spec.market)[0]!].label}）</option>
+            {benchmarksOf(spec.market).map((k) => (
+              <option key={k} value={k}>
+                {BENCHMARKS[k].label}
               </option>
             ))}
           </Select>
@@ -426,6 +438,18 @@ export function SpecEditor({
               ),
             )}
           </div>
+          {spec.market === "HK" && (
+            <>
+              <span aria-hidden className="h-4 w-px bg-line-strong max-sm:hidden" />
+              <Checkbox
+                label="只选港股通标的（内地投资者能买到的）"
+                checked={!!spec.universe.hkConnect}
+                onChange={(e) =>
+                  up((s) => void (s.universe.hkConnect = e.target.checked ? true : undefined))
+                }
+              />
+            </>
+          )}
           <span aria-hidden className="h-4 w-px bg-line-strong max-sm:hidden" />
           <Inline>
             市值 ≥

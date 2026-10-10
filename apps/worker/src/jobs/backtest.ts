@@ -218,6 +218,8 @@ async function execute(
         priceHash: hashes.priceHash,
         benchHash: hashes.benchHash,
         caveatsHash,
+        // 行情来源占比、缺失与数据问题（S13）：只是报告，不进输入指纹
+        provenance: built.provenance,
       },
       seeds: { validation: seed },
       outputs: resultHashes({ ...result, validation }, sha256Canonical),

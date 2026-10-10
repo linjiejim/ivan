@@ -449,7 +449,7 @@ async function statusItems(
   const issues = Number(
     (await wh.scalar(
       `SELECT count(*) FROM data_issues
-       WHERE code = $c AND coalesce(date, created_at::DATE) <= $a::DATE AND resolved_ver IS NULL`,
+       WHERE code = $c AND coalesce(date, created_at::DATE) <= $a::DATE AND resolved_by IS NULL`,
       { c: code, a: asOf },
     )) ?? 0,
   );

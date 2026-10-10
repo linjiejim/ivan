@@ -14,13 +14,27 @@ export interface DataStatus {
     market: string;
     asOf: string | null;
     dataVersion: number | null;
-    lastEtl: { status: string; finishedAt: number | null; error: string | null } | null;
+    /**
+     * 最近一次 etl 任务。排着队等自动重跑时（D73）：status = queued，retryAt 是重跑时间，attempt 是第几次，
+     * error 是上一次失败的原因
+     */
+    lastEtl: {
+      status: string;
+      finishedAt: number | null;
+      error: string | null;
+      attempt?: number;
+      retryAt?: number | null;
+    } | null;
     /** 今天的状态（D78）：已更新 / 休市 / 没更新 / 进行中 */
     day?: "traded" | "closed" | "stale" | "pending";
     /** 正在写的数据版本（D60）；startedAt 是毫秒时间戳 */
     openVersion?: { id: number; startedAt: number | null } | null;
     /** 上一个结束的版本：ok | incomplete | failed | skipped */
     lastVersionStatus?: string | null;
+    /** 各基准（index_bars 的 sym）的首个数据日，一行都没有为 null（D75）：提交回测前校验 */
+    benchFirstDates?: Record<string, string | null>;
+    /** 港股通名单（D77，只有港股）：取并集的属性与首次记录日；一行都没有为 null */
+    hkConnect?: { attrs: string[]; firstDate: string } | null;
     /** 点时数据的采集情况（D61） */
     capture?: {
       attrs: Array<{
@@ -32,6 +46,24 @@ export interface DataStatus {
       }>;
       financialsSeen: { rows: number; new7d: number };
     };
+    /** 最近一晚的取数来源（D72）：served 的键是行级来源代码 em / tx / txq / csi */
+    sources?: {
+      versionId: number;
+      status: string;
+      date: string | null;
+      served: Record<string, number>;
+      fallbacks: number;
+      failed: number;
+      empty: number;
+      index: Record<string, string>;
+    } | null;
+    /** 辅助数据（汇率、证券表、简称、财报）最近成功的日子与连续失败的晚数（D73） */
+    soft?: Array<{
+      step: string;
+      lastOkDate: string | null;
+      failingNights: number;
+      firstFailDate: string | null;
+    }>;
   }>;
   /** 行情仓维护中（还没升级，D76）：非空时 worker 不排任务、不认领 */
   maintenance?: string | null;
@@ -40,6 +72,35 @@ export interface DataStatus {
   workerUp: boolean;
   /** 这个用户的跟踪最近一次结算失败的（D70；看板才有，按用户算） */
   settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
+}
+
+/** 管理页「数据质量」卡（D74，worker /internal/data-quality） */
+export interface DataQuality {
+  days: number;
+  byRule: Array<{ rule: string; severity: string; n: number; open: number }>;
+  topCodes: Array<{ code: string; name: string | null; n: number }>;
+  open: Array<{
+    id: number;
+    code: string;
+    name: string | null;
+    date: string;
+    rule: string;
+    severity: string;
+    detail: string | null;
+  }>;
+  lastVersions: Array<{
+    id: number;
+    market: string;
+    status: string;
+    date: string | null;
+    expected: number | null;
+    updated: number | null;
+    noTrade: number | null;
+    missing: number;
+    missingCritical: number;
+    accepted: number;
+    reasons: string[];
+  }>;
 }
 
 export async function dataStatus(): Promise<DataStatus> {
@@ -95,7 +156,10 @@ export async function overview(userId: string) {
       string,
       string | null
     >,
-    failedMarkets: data.markets.filter((m) => m.lastEtl?.status === "failed").map((m) => m.market),
+    // 最近一次更新失败，或排着队等自动重跑（D73）
+    failedMarkets: data.markets
+      .filter((m) => m.lastEtl?.status === "failed" || m.lastEtl?.retryAt)
+      .map((m) => m.market),
     workerUp: data.workerUp,
     // 行情仓维护中（D76）、夜间更新写库期间回测暂停（D60）：模型据此解释为什么回测还在排队
     maintenance: data.maintenance ?? null,

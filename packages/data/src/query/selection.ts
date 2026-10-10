@@ -9,6 +9,7 @@ import {
   type DateStr,
   describeCondition,
   FACTOR_MAP,
+  HK_CONNECT_MISSING_TEXT,
   type RankTerm,
   type StrategySpec,
 } from "@ivan/core";
@@ -61,11 +62,64 @@ const BOARD_TEXT: Record<string, string> = {
   hk_gem: "港股创业板",
 };
 
+/** 港股通名单（D77）：用哪几个属性（深港通，核实后加沪港通）取并集，首次记录日（之前的日子用这天的名单） */
+export interface HkConnectList {
+  attrs: string[];
+  first: DateStr;
+}
+
+/** 选股读行情仓以外的数据（港股通名单）：调用方先用 selectionContext 读好，SQL 构造保持纯函数 */
+export interface SelectionContext {
+  hkConnect?: HkConnectList;
+}
+
+/** 选股要的数据还没有（港股通名单没有记录）：worker 接口给 400 与中文原因 */
+export class SelectionDataError extends Error {
+  readonly status = 400 as const;
+}
+
+const HK_CONNECT_ATTRS = ["hk_connect_sz", "hk_connect_sh"] as const;
+
+/** 港股通名单的属性与首次记录日；一行快照都没有时为 null */
+export async function loadHkConnect(wh: Warehouse): Promise<HkConnectList | null> {
+  const rows = await wh.all<{ attr: string; first: string }>(
+    `SELECT attr, min(valid_from)::VARCHAR AS first FROM attr_history
+     WHERE attr IN (${HK_CONNECT_ATTRS.map(str).join(", ")}) AND code LIKE '%.HK'
+     GROUP BY attr ORDER BY attr DESC`,
+  );
+  if (!rows.length) return null;
+  return {
+    attrs: rows.map((r) => r.attr),
+    first: rows.reduce((m, r) => (r.first < m ? r.first : m), rows[0]!.first),
+  };
+}
+
+/** 策略选股要的额外数据：设了 universe.hkConnect 而没有名单时抛 SelectionDataError */
+export async function selectionContext(wh: Warehouse, spec: StrategySpec): Promise<SelectionContext> {
+  if (!spec.universe.hkConnect) return {};
+  const hkConnect = await loadHkConnect(wh);
+  if (!hkConnect) throw new SelectionDataError(HK_CONNECT_MISSING_TEXT);
+  return { hkConnect };
+}
+
+/**
+ * 港股通条件（D77）：决策日在名单里（值 Y 的区间覆盖这天）；早于首次记录日的日子用首次记录的名单。
+ * 条件里的列不带别名（选股与解释都直接读 factors_daily），所以用表名限定。
+ */
+function hkConnectSql(l: HkConnectList): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(l.first)) throw new Error(`非法日期 ${l.first}`);
+  const attrs = l.attrs.map((a) => {
+    if (!(HK_CONNECT_ATTRS as readonly string[]).includes(a)) throw new Error(`未知属性 ${a}`);
+    return str(a);
+  });
+  return `EXISTS (SELECT 1 FROM attr_history h WHERE h.code = factors_daily.code AND h.attr IN (${attrs.join(", ")}) AND h.value = 'Y' AND ((h.valid_from <= factors_daily.date AND coalesce(h.valid_to, DATE '9999-12-31') > factors_daily.date) OR (factors_daily.date < DATE '${l.first}' AND h.valid_from = DATE '${l.first}')))`;
+}
+
 /**
  * 股票池 + 条件（不含排序）拆成带中文标签的条件（D67）：选股、今日选股与选股解释共用，
  * 解释时把每条算成一个布尔列，列出没满足的。
  */
-export function whereParts(spec: StrategySpec): WherePart[] {
+export function whereParts(spec: StrategySpec, sctx: SelectionContext = {}): WherePart[] {
   const w: WherePart[] = [{ sql: `market = ${str(spec.market)}`, label: null }];
   const u = spec.universe;
   if (u.boards?.length) {
@@ -92,13 +146,17 @@ export function whereParts(spec: StrategySpec): WherePart[] {
       label: "行业被排除",
     });
   }
+  if (u.hkConnect) {
+    if (!sctx.hkConnect) throw new SelectionDataError(HK_CONNECT_MISSING_TEXT);
+    w.push({ sql: hkConnectSql(sctx.hkConnect), label: "不是港股通标的" });
+  }
   for (const c of spec.filters) w.push({ sql: conditionSql(c), label: `没满足：${describeCondition(c)}` });
   return w;
 }
 
 /** 股票池 + 条件（不含排序），给选股与「今日选股」共用。 */
-export function whereSql(spec: StrategySpec): string[] {
-  return whereParts(spec).map((p) => p.sql);
+export function whereSql(spec: StrategySpec, sctx: SelectionContext = {}): string[] {
+  return whereParts(spec, sctx).map((p) => p.sql);
 }
 
 /** 排序项的分位表达式：得分求和与解释的 t 列用同一段文本（D67） */
@@ -108,7 +166,7 @@ function termSql(t: RankTerm): string {
   )} ${t.better === "high" ? "ASC" : "DESC"})`;
 }
 
-export interface SelectionSqlOptions {
+export interface SelectionSqlOptions extends SelectionContext {
   /** 解释模式：在同一组 CTE 里多输出每个排序项的分位 t0…tn 与一级行业 */
   trace?: boolean;
   /** 不截前 limit 名（解释时给出全体合格股里的名次） */
@@ -127,7 +185,7 @@ export function selectionSql(
 ): string {
   if (!spec.rank) throw new Error("规则策略需要排序");
   const terms = spec.rank.terms;
-  const where = [...whereSql(spec), `date IN (${sqlDateList(dates)})`];
+  const where = [...whereSql(spec, opts), `date IN (${sqlDateList(dates)})`];
   for (const t of terms) where.push(`${col(t.factor)} IS NOT NULL`);
   const totalW = terms.reduce((s, t) => s + t.weight, 0);
   // 行业内比较（D48）：百分位在同日同一一级行业里算
@@ -157,8 +215,13 @@ SELECT date::VARCHAR AS date, code, score${traceOut} FROM ${cap ? "capped" : "sc
 ORDER BY date, score DESC, code`;
 }
 
-export function compileSelection(spec: StrategySpec, dates: readonly DateStr[], limit: number): string {
-  return selectionSql(spec, dates, limit, {});
+export function compileSelection(
+  spec: StrategySpec,
+  dates: readonly DateStr[],
+  limit: number,
+  sctx: SelectionContext = {},
+): string {
+  return selectionSql(spec, dates, limit, { hkConnect: sctx.hkConnect });
 }
 
 /** 大盘状态用的指数（不含分红的价格指数）：A 股沪深300、港股恒指（D53） */
@@ -218,12 +281,20 @@ export async function runRegimeSelection(
   spec: StrategySpec,
   dates: readonly DateStr[],
   limit: number,
+  sctxIn?: SelectionContext,
 ): Promise<{ selections: Map<DateStr, string[]>; weak: Set<DateStr> }> {
+  const sctx = sctxIn ?? (await selectionContext(wh, spec));
   const regime = spec.rank?.regime;
-  if (!regime) return { selections: await runSelection(wh, spec, dates, limit), weak: new Set() };
+  if (!regime) return { selections: await runSelection(wh, spec, dates, limit, sctx), weak: new Set() };
   const weak = await weakRegimeDates(wh, spec.market, dates, regime.ma);
-  const selections = await runSelection(wh, spec, dates.filter((d) => !weak.has(d)), limit);
-  const weakSel = await runSelection(wh, specForRegime(spec, true), dates.filter((d) => weak.has(d)), limit);
+  const selections = await runSelection(wh, spec, dates.filter((d) => !weak.has(d)), limit, sctx);
+  const weakSel = await runSelection(
+    wh,
+    specForRegime(spec, true),
+    dates.filter((d) => weak.has(d)),
+    limit,
+    sctx,
+  );
   for (const [d, l] of weakSel) selections.set(d, l);
   return { selections, weak };
 }
@@ -234,11 +305,13 @@ export async function runSelectionScored(
   spec: StrategySpec,
   dates: readonly DateStr[],
   limit: number,
+  sctxIn?: SelectionContext,
 ): Promise<Map<DateStr, Array<{ code: string; score: number }>>> {
   const out = new Map<DateStr, Array<{ code: string; score: number }>>();
   if (!dates.length) return out;
+  const sctx = sctxIn ?? (await selectionContext(wh, spec));
   const rows = await wh.all<{ date: string; code: string; score: number }>(
-    compileSelection(spec, dates, limit),
+    compileSelection(spec, dates, limit, sctx),
   );
   for (const r of rows) {
     let l = out.get(r.date);
@@ -254,9 +327,10 @@ export async function runSelection(
   spec: StrategySpec,
   dates: readonly DateStr[],
   limit: number,
+  sctx?: SelectionContext,
 ): Promise<Map<DateStr, string[]>> {
   const out = new Map<DateStr, string[]>();
-  for (const [d, l] of await runSelectionScored(wh, spec, dates, limit)) {
+  for (const [d, l] of await runSelectionScored(wh, spec, dates, limit, sctx)) {
     out.set(d, l.map((x) => x.code));
   }
   return out;

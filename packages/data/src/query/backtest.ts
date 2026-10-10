@@ -7,10 +7,12 @@ import {
   type BacktestParams,
   benchmarkOf,
   BENCHMARKS,
+  benchUnavailableText,
   type DateStr,
   type ExecConfig,
   type PriceSeries,
   resolveExec,
+  type RunProvenance,
   type SecurityInfo,
   type Signal,
   type SimInput,
@@ -19,8 +21,11 @@ import {
   type TradingDayBasis,
 } from "@ivan/core";
 import { rebalanceDays } from "@ivan/engine";
+import type { SourcesLedger } from "../sources/chain.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
-import { REGIME_INDEX, runRegimeSelection } from "./selection.ts";
+import { benchFirstDate, benchMismatchCaveat } from "./bench.ts";
+import { runProvenance } from "./data-health.ts";
+import { REGIME_INDEX, runRegimeSelection, selectionContext } from "./selection.ts";
 
 export interface DataVersionInfo {
   id: number | null;
@@ -84,6 +89,54 @@ export async function dataVersionState(
   };
 }
 
+/** 最近一晚的取数来源（管理页「今晚东财 N 只、腾讯 M 只（回退 K 次）」，D72） */
+export interface FetchSourcesSummary {
+  versionId: number;
+  status: string;
+  /** 这一晚的日期（版本开始的那天） */
+  date: DateStr | null;
+  served: SourcesLedger["served"];
+  fallbacks: number;
+  failed: number;
+  empty: number;
+  index: SourcesLedger["index"];
+}
+
+/**
+ * 最近一个写了取数台账的夜间增量版本（ok / incomplete / failed；休市的夜里只拉了指数，不算）。
+ * 台账 JSON 读不懂（以后改了格式又回滚）时返回 null，不让数据状态接口出错。
+ */
+export async function lastFetchSources(
+  wh: Warehouse,
+  market: string,
+): Promise<FetchSourcesSummary | null> {
+  const r = await wh.one<{ id: number; status: string; d: string | null; sources: string }>(
+    `SELECT id, status, started_at::DATE::VARCHAR AS d, sources FROM data_versions
+     WHERE market = $m AND kind = 'daily' AND status IN ('ok', 'incomplete', 'failed')
+       AND sources IS NOT NULL
+     ORDER BY id DESC LIMIT 1`,
+    { m: market },
+  );
+  if (!r) return null;
+  let s: Partial<SourcesLedger>;
+  try {
+    s = JSON.parse(r.sources) as Partial<SourcesLedger>;
+  } catch {
+    return null;
+  }
+  if (s?.v !== 1) return null;
+  return {
+    versionId: r.id,
+    status: r.status,
+    date: r.d ?? null,
+    served: s.served ?? {},
+    fallbacks: s.fallbacks ?? 0,
+    failed: s.failed ?? 0,
+    empty: s.empty ?? 0,
+    index: s.index ?? {},
+  };
+}
+
 /** 成交假设要不要日均成交额与波动率（D64）：设了单笔上限或计冲击成本时才把这两列装进价格面板 */
 export function needsLiquidity(exec: ExecConfig): boolean {
   return exec.participation !== null || exec.impact !== "none";
@@ -107,6 +160,8 @@ export interface BuiltInput {
   params: BacktestParams;
   /** 补的「下一个交易日」按什么推算；没补时为 null */
   nextDayBasis: TradingDayBasis | null;
+  /** 行情来源占比、缺失与数据问题（S13）：写进运行卡 data.provenance，不进输入指纹 */
+  provenance: RunProvenance;
   stats: { decisionDates: number; codes: number; priceRows: number; ms: number };
 }
 
@@ -132,6 +187,15 @@ export async function buildSimInput(
     { m: market, a: addDays(params.start, -lead), b: params.end },
   );
   const calendar = calRows.map((r) => r.d);
+
+  // 基准在起点前一个交易日要有数据（D75）：回测在这里拒绝（不拿一条平线比）；跟踪只加提示，免得全收益基准晚到让结算失败
+  const benchKey = benchmarkOf(spec);
+  const bk = BENCHMARKS[benchKey];
+  const anchor = calendar.filter((d) => d < params.start).at(-1) ?? calendar.find((d) => d >= params.start);
+  const benchFirst = await benchFirstDate(wh, bk.sym);
+  const benchProblem = anchor ? benchUnavailableText(benchKey, benchFirst, anchor) : null;
+  if (benchProblem && !opts.appendNextDay) throw new Error(benchProblem);
+
   let nextDayBasis: TradingDayBasis | null = null;
   if (opts.appendNextDay && calendar.at(-1) === lastDay) {
     const next = nextTradingDay(market, lastDay);
@@ -143,12 +207,14 @@ export async function buildSimInput(
   let selections = new Map<DateStr, string[]>();
   let decisionDates: DateStr[] = [];
   let weakDates = new Set<DateStr>();
+  // 港股通股票池（D77）：名单没有记录时抛错（server 提交前已经拦过一次）
+  const sctx = spec.mode === "rules" ? await selectionContext(wh, spec) : {};
   if (spec.mode === "rules" && spec.rank) {
     decisionDates = rebalanceDays(calendar, params, spec.rebalance.every).decisionDates.filter(
       (d) => d <= lastDay,
     );
     const limit = Math.ceil(spec.rank.top * spec.rebalance.buffer) + spec.rank.top;
-    const r = await runRegimeSelection(wh, spec, decisionDates, limit);
+    const r = await runRegimeSelection(wh, spec, decisionDates, limit, sctx);
     selections = r.selections;
     weakDates = r.weak;
   }
@@ -263,12 +329,14 @@ export async function buildSimInput(
     }
   }
 
+  // 面板读行情的区间：日历起点到最后一个已提交的交易日（补出来的「下一个交易日」不读）
+  const panelEnd = lastDay < calendar.at(-1)! ? lastDay : calendar.at(-1)!;
+
   // 基准
-  const bk = BENCHMARKS[benchmarkOf(spec)];
   const benchRows = await wh.all<{ d: string; close: number }>(
     `SELECT date::VARCHAR AS d, close FROM index_bars
      WHERE sym = $s AND date >= $a::DATE AND date <= $b::DATE ORDER BY date`,
-    { s: bk.sym, a: calendar[0]!, b: lastDay < calendar.at(-1)! ? lastDay : calendar.at(-1)! },
+    { s: bk.sym, a: calendar[0]!, b: panelEnd },
   );
   const benchMap = new Map(benchRows.map((r) => [r.d, r.close]));
   const bench = Float64Array.from(calendar, (d) => benchMap.get(d) ?? NaN);
@@ -299,6 +367,42 @@ export async function buildSimInput(
       detail: "2018 年以前的沪市股票和沪市退市股没有公开的简称历史，ST 用「最近两期年报都亏损」近似。",
     });
   }
+  // 行情来源与数据提示（D73、D74）：缺口、数据问题、财报久未更新。只是报告：进 reportHash，不进输入指纹
+  const prov = await runProvenance(wh, market, codeList, calendar[0]!, panelEnd);
+  caveats.push(...prov.caveats);
+  // 基准与股票池的提示（D75、D77）：同样只是报告
+  if (opts.appendNextDay && anchor) {
+    const missing = calendar.filter((d, i) => d >= anchor && d <= panelEnd && !Number.isFinite(bench[i]!));
+    if (benchProblem || missing.length) {
+      const at = missing[0] ?? anchor;
+      caveats.push({
+        id: "bench_missing",
+        level: "warn",
+        title: "基准缺数据",
+        detail: `基准「${bk.label}」在 ${at} 没有数据，超额按缺值处理${missing.length > 1 ? `（共 ${missing.length} 个交易日）` : ""}。`,
+      });
+    }
+  }
+  const mismatch = await benchMismatchCaveat(wh, spec, selections);
+  if (mismatch) caveats.push(mismatch);
+  if (sctx.hkConnect) {
+    const early = params.start < sctx.hkConnect.first;
+    const szOnly = !sctx.hkConnect.attrs.includes("hk_connect_sh");
+    if (early || szOnly) {
+      const parts = [
+        early
+          ? `港股通名单从 ${sctx.hkConnect.first} 起逐日记录，之前的日期用的是那天的名单（以后才纳入的股票会被当成一直能买）`
+          : null,
+        szOnly ? "目前只记录了深港通名单" : null,
+      ].filter(Boolean);
+      caveats.push({
+        id: "hk_connect_approx",
+        level: "info",
+        title: "港股通名单为近似",
+        detail: `${parts.join("；")}。`,
+      });
+    }
+  }
 
   return {
     input: {
@@ -318,6 +422,7 @@ export async function buildSimInput(
     dataVersion,
     params,
     nextDayBasis,
+    provenance: prov.provenance,
     stats: { decisionDates: decisionDates.length, codes: codeList.length, priceRows, ms: Date.now() - t0 },
   };
 }
