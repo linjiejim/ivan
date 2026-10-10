@@ -45,7 +45,8 @@ describe("beginDataVersion / commitDataVersion", () => {
     expect(await versions()).toEqual([
       { id, status: "open", as_of: null, kind: "daily", note: null },
     ]);
-    expect(await wh.scalar(`SELECT registry_version FROM data_versions WHERE id = $id`, { id })).toBe(2);
+    // 注册表版本只是记录（S15b 起是 3，D83）
+    expect(await wh.scalar(`SELECT registry_version FROM data_versions WHERE id = $id`, { id })).toBe(3);
     expect(await latestDataVersion(wh, "A")).toEqual({ id: null, asOf: null });
     const r = await commitDataVersion(ctx, id, { status: "ok" });
     expect(r).toEqual({ id, asOf: "2025-09-30" });

@@ -8,7 +8,15 @@
  * - 缺失的股票是运行中跟踪的持仓或明日计划（critical）→ 不让整晚失败，记进 missingCritical，相关跟踪显示「数据未更新」；
  * - ETL_ACCEPT_MISSING 放行的代码不计数，记进 accepted。
  */
-import { type DateStr, MARKET_LABEL, type Market, type SoftStep, toCode } from "@ivan/core";
+import {
+  type CanaryStatus,
+  type DateStr,
+  MARKET_LABEL,
+  type Market,
+  type PitDatasetId,
+  type SoftStep,
+  toCode,
+} from "@ivan/core";
 
 export { SOFT_STEP_LABEL, type SoftStep } from "@ivan/core";
 
@@ -29,6 +37,19 @@ export interface SoftOutcome {
   /** 写了多少行（步骤函数给得出时） */
   rows?: number;
   error?: string;
+}
+
+/** 一个点时事件数据集这一晚（或这次周检）的结果（S15） */
+export interface DatasetCompleteness {
+  ok: boolean;
+  /** 金丝雀的结果；没跑到为 null */
+  canary: CanaryStatus | null;
+  rows: number;
+  requests: number;
+  /** 写入了但没到齐的块（两融的日子） */
+  partial: string[];
+  /** 周检补扫新找到的行数 */
+  lateRows?: number;
 }
 
 export interface CompletenessInput {
@@ -65,6 +86,8 @@ export interface Completeness {
   date?: DateStr;
   /** 辅助步骤的结果（失败沿用旧数据） */
   soft?: SoftOutcome[];
+  /** 点时事件数据集（S15，只有 A 股；周检的版本也写，带 lateRows） */
+  datasets?: Partial<Record<PitDatasetId, DatasetCompleteness>>;
 }
 
 /** 闸门阈值：缺失超过这个数就让整晚失败 */

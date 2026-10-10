@@ -45,8 +45,8 @@ export function usageToday(userId: string) {
   );
 }
 
-/** 检查并计数；超额抛 429。n 为本次消耗。 */
-export function consume(userId: string, kind: QuotaKind, n = 1): void {
+/** 只检查不计数（先挡住超额的请求，等真的拿到结果再 consume）；超额抛 429 */
+export function ensureQuota(userId: string, kind: QuotaKind, n = 1): void {
   const limit = quotaOf(userId)[kind];
   const used = usageToday(userId)[kind];
   if (used + n > limit) {
@@ -55,6 +55,11 @@ export function consume(userId: string, kind: QuotaKind, n = 1): void {
       `今天的${LABEL[kind]}额度（${limit} 次）已用完，明天再来，或请管理员调高额度。`,
     );
   }
+}
+
+/** 检查并计数；超额抛 429。n 为本次消耗。 */
+export function consume(userId: string, kind: QuotaKind, n = 1): void {
+  ensureQuota(userId, kind, n);
   const { app } = env();
   const col = COLUMN[kind];
   app.db

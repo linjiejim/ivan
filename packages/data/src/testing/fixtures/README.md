@@ -22,3 +22,11 @@
 | `tx-kline-hfq.json` | 同上（后复权，键 `hfqday`） | 同一段茅台后复权行（真实行，3 位小数） |
 | `tx-quote-batch.txt` | 腾讯 `qt.gtimg.cn/q=`（GBK 解码后的文本） | 手工构造，只填 `quotes()` 读的段（1 简称、3 现价、4 前收、5 开、6 量、30 时间、33 高、34 低、35 价/量/额、37 额）：sh600000、sh600001 两行，**故意漏掉** sh600002 |
 | `csindex-h00905.json` | 中证官网 `csindex-home/perf/index-perf`（`indexCode=H00905`） | 手工构造（按 H00300 的真实字段布局）：中证500全收益 2026-09-21 ~ 10-02 共 10 个工作日；`csindexHistory` 只读 `tradeDate` 与 `close`。代码要等探针 `idx.tri.more` 联网核对 |
+| `em-rzrq-2026-09-29.json` | 东财数据中心 `RPTA_WEB_RZRQ_GGMX`（两融明细） | 按 2026-10-05 实测的字段布局裁剪（只留请求的 9 列）：2026-09-29 的 000001.SZ、000002.SZ、600519.SH（`RZYEZB` 1.09532005 = 实测值）、688981.SH 与 ETF 510050.SH（`SZ` 为空）；除 600519 的融资余额与流通市值外数值手工构造，`count` 改成 5 |
+| `em-rzrq-2026-09-30-sh-only.json` | 同上 | 2026-09-30 只有沪市 3 行（实测那天深市还没出），用来测「只到一个交易所」 |
+| `em-holdernum.json` | 东财数据中心 `RPT_HOLDERNUM_DET`（股东户数） | 000603.SZ 截至 2026-06-30、公告 2026-08-01，66961 / 74197 户，上期截至 2026-05-29（实测行）；002064.SZ 一行手工构造；`HOLDER_NUM_RATIO` 是 % |
+| `em-lift-stage.json` | 东财数据中心 `RPT_LIFT_STAGE`（限售解禁） | 300005.SZ 2013-01-04 首发原股东限售股份、002150.SZ 股权激励、301358.SZ 定向增发 8253.7493 / 84581.5647 万股、`FREE_RATIO` 0.108135536917（实测行）；股数列是万股，比例是小数 |
+| `em-blocktrade.json` | 东财数据中心 `RPT_DATA_BLOCKTRADE`（大宗交易） | 001309.SZ 平价成交（`PREMIUM_RATIO` 0）；001366.SZ 11.84 / 13.13 买方机构专用两笔（代码、日期、金额相同，卖方不同）；`DEAL_AMT` 元、`DEAL_VOLUME` 股 |
+| `em-blocktrade-identical.json` | 同上 | 手工构造：001309.SZ 一笔，加 001366.SZ 两笔**完全相同**的成交（同价同量、买卖席位都一样），用来测「真有一模一样的大宗」不算翻页漂移 |
+| `em-9501-schema-drift.json` | 东财数据中心 | 请求了不存在的列：`code 9501`、`NO_SUCH_COLUMN_X返回字段不存在`（实测原文） |
+| `em-9201-empty.json` | 东财数据中心 | 空结果 `code 9201`（正常结果） |

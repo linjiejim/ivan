@@ -1,4 +1,5 @@
 export { ENGINE_VERSION, periodIndexes, rebalanceDays, SimError, simulate } from "./simulate.ts";
+export { legacyView } from "./legacy-view.ts";
 export {
   FillLog,
   lotFloor,

@@ -73,4 +73,32 @@ describe("committedAsOf：结算与选股", () => {
     expect(body.date).toBe(committed);
     expect(body.rows.map((r) => r.code)).toEqual(["600002.SH", "600001.SH"]);
   });
+
+  it("/internal/screen 给了日期也截到已提交的截至日；格式不对或不存在的日子 400", async () => {
+    const post = (body: unknown) =>
+      createInternalApp().request("/internal/screen", {
+        method: "POST",
+        headers: { "x-internal-secret": "s", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const later = await post({ spec, date: calendar.at(-1) });
+    expect(later.status).toBe(200);
+    expect(((await later.json()) as { date: string }).date).toBe(committed);
+    const earlier = await post({ spec, date: calendar[5] });
+    expect(((await earlier.json()) as { date: string }).date).toBe(calendar[5]);
+    for (const date of ["2024-13-45", "2026-02-30", "x"]) {
+      const bad = await post({ spec, date });
+      expect(bad.status).toBe(400);
+      expect(((await bad.json()) as { error: string }).error).toBe("日期格式要是 YYYY-MM-DD");
+    }
+  });
+
+  it("/internal/securities/:code 的因子行不晚于已提交的截至日", async () => {
+    const res = await createInternalApp().request("/internal/securities/600001.SH", {
+      headers: { "x-internal-secret": "s" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { factors: { date: string } | null };
+    expect(body.factors!.date).toBe(committed);
+  });
 });

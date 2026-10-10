@@ -35,10 +35,12 @@ export function conditionSql(c: Condition): string {
   switch (c.op) {
     case "between":
       return `${f} BETWEEN ${lit(c.value[0])} AND ${lit(c.value[1])}`;
+    // 事件类的是非因子（两融标的）为空 = 不知道（D84）：「是」「不是」都不让它通过；
+    // 其余是非标记（flag_*）沿用把空当「否」的写法（SQL 逐字节不变）
     case "is":
-      return `coalesce(${f}, false) = true`;
+      return FACTOR_MAP.get(c.factor)?.dataset ? `${f} = true` : `coalesce(${f}, false) = true`;
     case "not":
-      return `coalesce(${f}, false) = false`;
+      return FACTOR_MAP.get(c.factor)?.dataset ? `${f} = false` : `coalesce(${f}, false) = false`;
     case "in":
       return `${f} IN (${c.value.map(str).join(", ")})`;
     case "not_in":

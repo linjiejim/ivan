@@ -9,7 +9,7 @@ import { szseNameChanges } from "../sources/exchanges.ts";
 import { klineRange } from "../sources/tencent.ts";
 import { emKline } from "../sources/emkline.ts";
 import { fetchWithChain } from "../sources/chain.ts";
-import { chainFor, chainOf } from "../sources/registry.ts";
+import { chainFor, chainOf, klineSingleSource } from "../sources/registry.ts";
 import { type IndexBar, type SourceId, srcCode, type SrcCode } from "../sources/types.ts";
 import { decomposeHfq } from "../compute/adjust.ts";
 import type { EtlContext } from "./context.ts";
@@ -97,7 +97,8 @@ async function fetchIndex(
     ctx.ledger?.recordIndex(sym, r);
     return { bars: r.value, src: srcCode(r.servedBy, "index") };
   }
-  const useTencent = process.env.KLINE_SOURCE === "tencent";
+  // 与日线、指数同一个判断（去空格、不分大小写）
+  const useTencent = klineSingleSource() === "tencent";
   // ETF：总收益序列 = 不复权收盘 × 等比因子（从上市或 from 起算，只看涨跌）
   if (!useTencent) {
     try {

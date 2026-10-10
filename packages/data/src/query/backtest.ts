@@ -12,6 +12,7 @@ import {
   type ExecConfig,
   type PriceSeries,
   resolveExec,
+  type RunCardEvents,
   type RunProvenance,
   type SecurityInfo,
   type Signal,
@@ -25,32 +26,11 @@ import type { SourcesLedger } from "../sources/chain.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import { benchFirstDate, benchMismatchCaveat } from "./bench.ts";
 import { runProvenance } from "./data-health.ts";
+import { eventCoverage } from "./event-coverage.ts";
 import { REGIME_INDEX, runRegimeSelection, selectionContext } from "./selection.ts";
+import { type DataVersionInfo, latestDataVersion } from "./versions.ts";
 
-export interface DataVersionInfo {
-  id: number | null;
-  asOf: DateStr | null;
-}
-
-/**
- * 最新的已提交数据版本（D60）：只认 ok（旧行 status 为空也算 ok）；open、incomplete、failed、skipped 都不会被引用。
- */
-export async function latestDataVersion(wh: Warehouse, market: string): Promise<DataVersionInfo> {
-  const r = await wh.one<{ id: number; as_of: string }>(
-    `SELECT id, as_of::VARCHAR AS as_of FROM data_versions
-     WHERE market = $m AND coalesce(status, 'ok') = 'ok' ORDER BY id DESC LIMIT 1`,
-    { m: market },
-  );
-  return { id: r?.id ?? null, asOf: r?.as_of ?? null };
-}
-
-/**
- * 「读到哪一天」（D60）：最新 ok 版本的截至日。回测终点、跟踪结算、选股默认日期都用它——
- * 某晚写了因子却失败时，读的人还停在上一个提交过的版本上。
- */
-export async function committedAsOf(wh: Warehouse, market: string): Promise<DateStr | null> {
-  return (await latestDataVersion(wh, market)).asOf;
-}
+export { committedAsOf, type DataVersionInfo, latestDataVersion } from "./versions.ts";
 
 /**
  * 决策日落到交易日：取该市场交易日历上不晚于 date 的最后一个交易日（周末、节假日退到前一个交易日）。
@@ -100,6 +80,8 @@ export interface FetchSourcesSummary {
   failed: number;
   empty: number;
   index: SourcesLedger["index"];
+  /** 夜间的点时事件数据集（台账第 2 版起才有） */
+  datasets: SourcesLedger["datasets"];
 }
 
 /**
@@ -124,7 +106,9 @@ export async function lastFetchSources(
   } catch {
     return null;
   }
-  if (s?.v !== 1) return null;
+  // 第 1 版（S12）与第 2 版（S15 加 datasets）都认
+  const v = (s as { v?: unknown } | null)?.v;
+  if (v !== 1 && v !== 2) return null;
   return {
     versionId: r.id,
     status: r.status,
@@ -134,6 +118,7 @@ export async function lastFetchSources(
     failed: s.failed ?? 0,
     empty: s.empty ?? 0,
     index: s.index ?? {},
+    datasets: s.datasets ?? {},
   };
 }
 
@@ -162,6 +147,8 @@ export interface BuiltInput {
   nextDayBasis: TradingDayBasis | null;
   /** 行情来源占比、缺失与数据问题（S13）：写进运行卡 data.provenance，不进输入指纹 */
   provenance: RunProvenance;
+  /** 事件因子（S15b）：写进运行卡 data.events；策略不用事件因子时为 undefined */
+  events?: RunCardEvents;
   stats: { decisionDates: number; codes: number; priceRows: number; ms: number };
 }
 
@@ -195,6 +182,8 @@ export async function buildSimInput(
   const benchFirst = await benchFirstDate(wh, bk.sym);
   const benchProblem = anchor ? benchUnavailableText(benchKey, benchFirst, anchor) : null;
   if (benchProblem && !opts.appendNextDay) throw new Error(benchProblem);
+  // 事件因子（S15b）：补算没完成或起点早于数据起点时回测在这里拒绝，跟踪只加提示；不用事件因子的策略什么都不做
+  const ev = await eventCoverage(wh, spec, params.start, { tracking: !!opts.appendNextDay });
 
   let nextDayBasis: TradingDayBasis | null = null;
   if (opts.appendNextDay && calendar.at(-1) === lastDay) {
@@ -379,14 +368,16 @@ export async function buildSimInput(
         id: "bench_missing",
         level: "warn",
         title: "基准缺数据",
-        detail: `基准「${bk.label}」在 ${at} 没有数据，超额按缺值处理${missing.length > 1 ? `（共 ${missing.length} 个交易日）` : ""}。`,
+        // 引擎把基准按前一天的值带过去（第一天之前按起点算）：如实说是近似，不是「按缺值」
+        detail: `基准「${bk.label}」在 ${at} 没有数据，这些天按前一天的基准值近似${missing.length > 1 ? `（共 ${missing.length} 个交易日）` : ""}。`,
       });
     }
   }
   const mismatch = await benchMismatchCaveat(wh, spec, selections);
   if (mismatch) caveats.push(mismatch);
   if (sctx.hkConnect) {
-    const early = params.start < sctx.hkConnect.first;
+    // 第一次决策在起点的前一个交易日（anchor）：起点正好是首次记录日时，第一次决策用的也是之前的近似
+    const early = (anchor ?? params.start) < sctx.hkConnect.first;
     const szOnly = !sctx.hkConnect.attrs.includes("hk_connect_sh");
     if (early || szOnly) {
       const parts = [
@@ -403,6 +394,8 @@ export async function buildSimInput(
       });
     }
   }
+  // 事件因子的数据起点、过期与解禁可得日推算（S15b）：同样只是报告
+  caveats.push(...ev.caveats);
 
   return {
     input: {
@@ -423,6 +416,7 @@ export async function buildSimInput(
     params,
     nextDayBasis,
     provenance: prov.provenance,
+    ...(ev.events ? { events: ev.events } : {}),
     stats: { decisionDates: decisionDates.length, codes: codeList.length, priceRows, ms: Date.now() - t0 },
   };
 }

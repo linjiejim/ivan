@@ -27,6 +27,7 @@ import { api } from "../lib/api.ts";
 import { dateTime } from "../lib/format.ts";
 import {
   CompareCard,
+  EventsCard,
   EvidenceCard,
   GroundingNote,
   OverviewCard,
@@ -181,6 +182,12 @@ function renderTool(part: ToolPart, send: (t: string) => void): ReactNode {
         <EvidenceCard output={out as never} />
       ) : (
         <ToolChip name="get_security_evidence" state={part.state} />
+      );
+    case "get_security_events":
+      return out ? (
+        <EventsCard output={out as never} />
+      ) : (
+        <ToolChip name="get_security_events" state={part.state} />
       );
     case "get_plan":
       return out ? (

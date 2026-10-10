@@ -28,13 +28,33 @@ export interface AppDbHandle {
   db: AppDb;
 }
 
-export function openAppDb(path: string, opts: { migrate?: boolean } = {}): AppDbHandle {
+export function openAppDb(
+  path: string,
+  opts: { migrate?: boolean; migrationsFolder?: string } = {},
+): AppDbHandle {
   mkdirSync(dirname(path), { recursive: true });
   const sqlite = new Database(path);
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("busy_timeout = 5000");
   sqlite.pragma("foreign_keys = ON");
   const db = drizzle(sqlite, { schema });
-  if (opts.migrate !== false) migrate(db, { migrationsFolder: MIGRATIONS });
+  if (opts.migrate !== false) migrateWithRetry(db, opts.migrationsFolder ?? MIGRATIONS);
   return { sqlite, db };
+}
+
+/**
+ * 部署时 server 与 worker 同时启动、同时迁移：drizzle 在事务外读「已经做到哪一条」，后到的进程可能按旧的读数
+ * 再跑一遍已经做过的 ALTER（duplicate column）。迁移整体在一个事务里，失败会整体回滚，所以出错时等一下重来：
+ * 重来时重新读进度，先到的进程已经做完就什么都不用做。最多试 6 次（约 10 秒）。
+ */
+export function migrateWithRetry(db: AppDb, folder: string, run: typeof migrate = migrate): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      run(db, { migrationsFolder: folder });
+      return;
+    } catch (e) {
+      if (attempt >= 6) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300 * attempt);
+    }
+  }
 }

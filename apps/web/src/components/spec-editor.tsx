@@ -9,13 +9,13 @@ import {
   benchmarkOf,
   benchmarksOf,
   type Condition,
-  type FactorDef,
   type Market,
   type RankTerm,
   type StrategySpec,
 } from "@ivan/core";
 import { api } from "../lib/api.ts";
-import type { ProposeResult } from "../lib/types.ts";
+import { eventFactorOption } from "../lib/format.ts";
+import type { FactorInfo, ProposeResult } from "../lib/types.ts";
 import { DiffView } from "./diff-view.tsx";
 import { IconAdd, IconCheck, IconDelete, IconEdit } from "./icons.tsx";
 import {
@@ -100,7 +100,7 @@ export function SpecEditor({
   const [spec, setSpec] = useState<StrategySpec>(() => structuredClone(initial ?? blank("A")));
   const factors = useQuery({
     queryKey: ["factors", spec.market],
-    queryFn: () => api.get<{ factors: FactorDef[] }>(`/api/factors?market=${spec.market}`),
+    queryFn: () => api.get<{ factors: FactorInfo[] }>(`/api/factors?market=${spec.market}`),
   });
   const [proposal, setProposal] = useState<Extract<ProposeResult, { ok: true }> | null>(null);
   const qc = useQueryClient();
@@ -134,8 +134,8 @@ export function SpecEditor({
       return n;
     });
 
-  const factorOptions = (list: FactorDef[]) => {
-    const groups = new Map<string, FactorDef[]>();
+  const factorOptions = (list: FactorInfo[]) => {
+    const groups = new Map<string, FactorInfo[]>();
     for (const f of list) groups.set(f.group, [...(groups.get(f.group) ?? []), f]);
     const label: Record<string, string> = {
       valuation: "估值",
@@ -145,15 +145,21 @@ export function SpecEditor({
       technical: "技术",
       category: "分类",
       flag: "标记",
+      event: "两融与筹码",
     };
     return [...groups.entries()].map(([g, fs]) => (
       <optgroup key={g} label={label[g] ?? g}>
-        {fs.map((f) => (
-          <option key={f.key} value={f.key}>
-            {f.label}
-            {f.unit ? `（${f.unit}）` : ""}
-          </option>
-        ))}
+        {fs.map((f) => {
+          // 两融与筹码（S15b）：历史没补算完的带「补算中」并禁用，否则写数据起点
+          const ev = eventFactorOption(f);
+          return (
+            <option key={f.key} value={f.key} disabled={ev.disabled}>
+              {f.label}
+              {f.unit ? `（${f.unit}）` : ""}
+              {ev.suffix}
+            </option>
+          );
+        })}
       </optgroup>
     ));
   };

@@ -46,12 +46,19 @@ export type BundleEntry = OwnEntry | ForeignEntry;
 
 export interface BundleManifest {
   engineVersion: string;
+  /** 注册表版本只是说明（第 3 版起不决定数值）；决定因子值的是下面两个 */
   factorRegistryVersion: number;
   explainVersion: number;
   groundingVersion: number;
   healthVersion: number;
   validationVersion: number;
   hashVersion: number;
+  /** 核心因子的计算版本（之后导出的文件才有；旧文件没有这几个键，清单指纹按文件里写的重算，不受影响） */
+  factorCoreVersion?: number;
+  /** 事件因子（两融与筹码）SQL 的版本 */
+  eventFactorVersion?: number;
+  /** 证据的版本 */
+  evidenceVersion?: number;
 }
 
 /** 计划快照里不进内容指纹的元信息：版次、原因与各维度的指纹（任何人都能据此重算版次原因）；不参与校验 */
@@ -156,8 +163,16 @@ export interface BundleInput {
   generatedAt?: string;
 }
 
-/** 组装导出文件：整条链（本跟踪的条目带内容，其余只给哈希）、计划快照的元信息、健康读数、导出时的链校验 */
+/**
+ * 组装导出文件：整条链（本跟踪的条目带内容，其余只给哈希）、计划快照的元信息、健康读数、导出时的链校验。
+ * 全部读在一个读事务里（WAL 快照）：worker 进程的夜间结算在中间追加条目时，导出的条目与链头仍是同一刻的，
+ * 不会因为链头对不上被误报成篡改。
+ */
 export function buildTraceBundle(h: AppDbHandle, o: BundleInput): TraceBundle {
+  return h.sqlite.transaction(() => buildTraceBundleAt(h, o))();
+}
+
+function buildTraceBundleAt(h: AppDbHandle, o: BundleInput): TraceBundle {
   const rows = h.db
     .select()
     .from(ledgerEntries)

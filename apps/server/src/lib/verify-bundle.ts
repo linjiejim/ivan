@@ -3,7 +3,20 @@
  * 只读文件，不读库；通过退出码 0，不通过或读不了退出码 1。
  */
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { BUNDLE_BREAK_TEXT, verifyBundle } from "@ivan/db";
+
+/**
+ * 命令行给的相对路径按用户敲命令时所在的目录算：pnpm 跑脚本时把当前目录换成了仓库根，
+ * 原来的目录在 INIT_CWD 里
+ */
+export function userPath(
+  file: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+): string {
+  return resolve(env.INIT_CWD ?? cwd, file);
+}
 
 export function verifyBundleFile(path: string): { code: 0 | 1; message: string } {
   let raw: unknown;

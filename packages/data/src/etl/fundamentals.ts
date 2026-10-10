@@ -209,6 +209,9 @@ export async function fetchShareChanges(ctx: EtlContext, code: string): Promise<
   return out;
 }
 
+/** share_changes 一行的列数（code, eff_date, notice_date, total_shares, reason；表尾的 src、ver 由写入时补） */
+const SHARE_FIELDS = 5;
+
 /** financials 的列（键 code 之后，按表的列序；表尾的 src、ver 由写入时补） */
 export const FIN_FIELDS = [
   "report_date",
@@ -298,25 +301,24 @@ export async function writeFundamentals(
   shares: unknown[][] | null,
 ): Promise<void> {
   const ver = ctx.ver ?? null;
+  // 按列序追加：元组长度不对，src、ver 就会落进别的列。先校验完再删，坏数据不会把这只股票原有的财报、股本删掉
+  const finRows = fin?.map((t) => {
+    if (t.length !== FIN_FIELDS.length + 1) throw new Error(`财报行有 ${t.length} 列，应为 ${FIN_FIELDS.length + 1}`);
+    return [...t, "em", ver];
+  });
+  const shareRows = shares?.map((t) => {
+    if (t.length !== SHARE_FIELDS) throw new Error(`股本行有 ${t.length} 列，应为 ${SHARE_FIELDS}`);
+    return [...t, "em", ver];
+  });
   await ctx.wh.exclusive(async () => {
-    if (fin) {
+    if (fin && finRows) {
       await recordFinancialsSeen(ctx, code, fin);
       await ctx.wh.run(`DELETE FROM financials WHERE code = $c`, { c: code });
-      await ctx.wh.append(
-        "financials",
-        fin.map((t) => {
-          // 按列序追加：元组长度不对，src、ver 就会落进别的列
-          if (t.length !== FIN_FIELDS.length + 1) throw new Error(`财报行有 ${t.length} 列，应为 ${FIN_FIELDS.length + 1}`);
-          return [...t, "em", ver];
-        }),
-      );
+      await ctx.wh.append("financials", finRows);
     }
-    if (shares) {
+    if (shareRows) {
       await ctx.wh.run(`DELETE FROM share_changes WHERE code = $c`, { c: code });
-      await ctx.wh.append(
-        "share_changes",
-        shares.map((t) => [...t, "em", ver]),
-      );
+      await ctx.wh.append("share_changes", shareRows);
     }
   });
 }

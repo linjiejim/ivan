@@ -1,14 +1,33 @@
 /**
  * 因子注册表：策略 DSL 只能引用这里的 key（白名单），行情仓 `factors_daily` 的列也由它生成。
- * 改任何因子的口径都要把 FACTOR_REGISTRY_VERSION 加 1，夜间更新会全量重算。
+ * 改**核心因子**口径时把 FACTOR_CORE_VERSION 加 1（夜间全量重算）；改**事件因子**口径时把
+ * EVENT_FACTOR_VERSION 加 1（只按列补算事件列，D83）；FACTOR_REGISTRY_VERSION 只是记录。
  * 新因子只能加在数组末尾：已有行情仓靠 ALTER TABLE 在表尾补列，列顺序必须和注册表一致。
  */
+import { addDays, type DateStr } from "./dates.ts";
 import type { Market } from "./market.ts";
+import type { PitDatasetId } from "./pit.ts";
 
-export const FACTOR_REGISTRY_VERSION = 2;
+/** 注册表版本：只记进运行卡与数据版本，不触发重算、也不是漂移原因（D83）。3 = S15b 加 7 个事件因子 */
+export const FACTOR_REGISTRY_VERSION = 3;
+/**
+ * 核心因子（逐股计算与横截面那些）的口径版本：变了夜间全量重算。行情仓里仍记在 `factor_registry_version:<市场>`，
+ * 所以回滚到 R4（它认的是注册表第 2 版）也不会触发重算。
+ */
+export const FACTOR_CORE_VERSION = 2;
+/** 事件因子（两融与筹码，S15b）的口径版本：变了只按列按年补算事件列（etl/event-columns.ts） */
+export const EVENT_FACTOR_VERSION = 1;
 
 export type FactorGroup =
-  "valuation" | "quality" | "growth" | "size" | "technical" | "category" | "flag";
+  | "valuation"
+  | "quality"
+  | "growth"
+  | "size"
+  | "technical"
+  | "category"
+  | "flag"
+  // 两融与筹码（S15b，D84）：由点时事件数据集按 SQL 算，不在逐股计算里
+  | "event";
 export type FactorKind = "number" | "bool" | "category";
 
 export interface FactorDef {
@@ -19,6 +38,10 @@ export interface FactorDef {
   unit?: "%" | "亿" | "x" | "天" | "名" | "年";
   markets: readonly Market[];
   describe: string;
+  /** 事件因子来自哪个点时数据集（有它就是事件因子） */
+  dataset?: PitDatasetId;
+  /** 数据起点 = 数据集的覆盖起点 + 这么多自然日（预热：20 日变化要先有 20 个交易日、环比要先有上一季） */
+  warmupDays?: number;
 }
 
 const BOTH = ["A", "HK"] as const;
@@ -444,6 +467,90 @@ export const FACTORS = [
     describe:
       "约一年前到约一个月前（第 250 到第 20 个交易日前）的涨幅（后复权，含分红）；跳过最近一个月，避开短期反转。",
   },
+  // ── 以下为注册表第 3 版新增（S15b，D83、D84）：两融与筹码，只有 A 股。只能往末尾加，见文件头 ──
+  {
+    key: "margin_ratio",
+    label: "融资余额占流通市值",
+    group: "event",
+    kind: "number",
+    unit: "%",
+    markets: A_ONLY,
+    dataset: "margin",
+    warmupDays: 7,
+    describe:
+      "最近一条两融记录的融资余额 ÷ 同一行的流通市值 × 100。融资数据按 T+1 可得：决策日用的是前一个交易日的两融数据。不是两融标的、最近一条早于 5 个交易日、或两融数据同步落后超过 5 个交易日时为空。",
+  },
+  {
+    key: "margin_chg_20d",
+    label: "融资余额 20 日变化",
+    group: "event",
+    kind: "number",
+    unit: "%",
+    markets: A_ONLY,
+    dataset: "margin",
+    warmupDays: 40,
+    describe:
+      "最近一条融资余额 ÷ 正好 20 个交易日前那条 − 1（%）。按 T+1 可得；20 个交易日前没有记录，或两融数据同步落后超过 5 个交易日时为空。",
+  },
+  {
+    key: "margin_eligible",
+    label: "两融标的",
+    group: "event",
+    kind: "bool",
+    markets: A_ONLY,
+    dataset: "margin",
+    warmupDays: 7,
+    describe:
+      "最近 5 个交易日内有融资余额 > 0 的两融记录（按 T+1 可得）。两融数据覆盖起点后 7 天之前、或同步落后超过 5 个交易日时为空（不知道），不是两融标的为「否」。",
+  },
+  {
+    key: "holder_num_qoq",
+    label: "股东户数环比",
+    group: "event",
+    kind: "number",
+    unit: "%",
+    markets: A_ONLY,
+    dataset: "holders",
+    warmupDays: 200,
+    describe:
+      "决策日已公告的最新一个季末户数 ÷ 上一季末户数 − 1（%），上一季末那条也必须当时已公告。按公告日可得，不是截至日；户数减少常被看作筹码集中。最新季末的公告超过 200 天、上一季末没有、或户数同步落后 30 天以上时为空。",
+  },
+  {
+    key: "unlock_days",
+    label: "距下次解禁",
+    group: "event",
+    kind: "number",
+    unit: "天",
+    markets: A_ONLY,
+    dataset: "lockups",
+    warmupDays: 0,
+    describe:
+      "决策日已知的下一次限售解禁日 − 决策日（自然日，只看 180 天内）；180 天内没有已知解禁记为 181。解禁的可得日在每晚同步开始之前是按规则推算的（首发按上市日，其他按解禁前几个交易日的提示性公告）。解禁数据同步落后 3 天以上时为空。",
+  },
+  {
+    key: "unlock_ratio_30d",
+    label: "30 天内解禁占流通股",
+    group: "event",
+    kind: "number",
+    unit: "%",
+    markets: A_ONLY,
+    dataset: "lockups",
+    warmupDays: 0,
+    describe:
+      "未来 30 个自然日内已知解禁的股数占流通股比例之和（%）；没有已知解禁为 0，有已知解禁但缺比例时为空（不知道）。可得日规则同「距下次解禁」；解禁数据同步落后 3 天以上时为空。",
+  },
+  {
+    key: "block_premium_20d",
+    label: "大宗交易折溢价（20 日）",
+    group: "event",
+    kind: "number",
+    unit: "%",
+    markets: A_ONLY,
+    dataset: "blocks",
+    warmupDays: 40,
+    describe:
+      "近 20 个交易日（按可得日）大宗交易成交价 ÷ 当日收盘 − 1，按成交额加权（%）；负数是折价。大宗交易按 T+1 可得。没有大宗交易、或大宗数据没同步到决策日的前一个交易日时为空。",
+  },
 ] as const satisfies readonly FactorDef[];
 
 export type FactorKey = (typeof FACTORS)[number]["key"];
@@ -463,6 +570,32 @@ export function factorsForMarket(market: Market): FactorDef[] {
 export function isFactorAvailable(key: string, market: Market): boolean {
   const f = FACTOR_MAP.get(key);
   return !!f && (f.markets as readonly Market[]).includes(market);
+}
+
+/** 事件因子（带 dataset 的，S15b）：按注册表顺序 */
+export const EVENT_FACTOR_KEYS: readonly string[] = (FACTORS as readonly FactorDef[])
+  .filter((f) => f.dataset)
+  .map((f) => f.key);
+
+export function isEventFactor(key: string): boolean {
+  return !!FACTOR_MAP.get(key)?.dataset;
+}
+
+/** 用到事件因子、而历史还没补算完时的提示（server 提交前与 worker 建输入时同一句，D83） */
+export function eventNotReadyText(doneYears: number, totalYears: number): string {
+  return totalYears > 0
+    ? `两融与筹码类因子的历史还在补算（${doneYears}/${totalYears} 年），补完后才能回测；今天的选股可以先用`
+    : "两融与筹码类因子的历史数据还在补齐，补完后才能回测；今天的选股可以先用";
+}
+
+/** 回测起点早于事件因子的数据起点 */
+export function eventStartTooEarlyText(label: string, from: DateStr): string {
+  return `因子「${label}」从 ${from} 起才有数据，请把起点设在这之后`;
+}
+
+/** 事件因子的数据起点 = 数据集的覆盖起点 + 预热天数；数据集还没补完（没有覆盖起点）为 null */
+export function eventCoverageFrom(def: FactorDef, coveredFrom: DateStr | null): DateStr | null {
+  return coveredFrom ? addDays(coveredFrom, def.warmupDays ?? 0) : null;
 }
 
 /** 行业里不判高负债的金融类（A 股一级行业 / 港股行业名里含这些字即算）。 */

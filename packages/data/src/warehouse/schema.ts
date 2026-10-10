@@ -2,10 +2,14 @@
  * 行情仓表结构。改表结构时 SCHEMA_VERSION 加 1；这里只做「IF NOT EXISTS」式的增量建表，
  * 需要改列的变更写成显式的 ALTER 语句追加在末尾。
  */
-import { FACTORS } from "@ivan/core";
+import { EVENT_FACTOR_KEYS, FACTORS } from "@ivan/core";
 import { FIX_A_VOLUME_SQL } from "../compute/volume-unit.ts";
 
-export const SCHEMA_VERSION = 3;
+/**
+ * 5 = S15b：factors_daily 表尾加 7 个事件因子列（注册表第 3 版）。在约 1600 万行的因子表上加列是重迁移（D76、D83），
+ * worker 启动时不做，进维护状态（MAINTENANCE_V5），由 scripts/migrate.sh 执行；回滚到 R4 之前先 `migrate --down 4`。
+ */
+export const SCHEMA_VERSION = 5;
 
 /** factors_daily 的列：键列 + 注册表里的全部因子（分类因子 VARCHAR，布尔 BOOLEAN，其余 DOUBLE）。 */
 export const FACTOR_COLUMNS = FACTORS.map((f) => f.key);
@@ -153,7 +157,8 @@ export const SCHEMA_SQL: string[] = [
   updated_at TIMESTAMP DEFAULT current_timestamp,
   PRIMARY KEY (task, key)
 )`,
-  // 第 2 版（注册表第 2 版新增因子）：已有的行情仓在表尾补列，顺序与注册表一致；新建的库这些语句是空操作
+  // 第 2 版（注册表第 2 版新增因子）与第 5 版（注册表第 3 版的 7 个事件因子，S15b）：已有的行情仓在表尾补列，
+  // 顺序与注册表一致；新建的库这些语句是空操作
   ...FACTORS.map((f) => `ALTER TABLE factors_daily ADD COLUMN IF NOT EXISTS ${f.key} ${factorType(f.kind)}`),
   // 第 3 版（D60、D61）：行级来源与版本号加在表尾（Warehouse.append 按列序写，写入方在行元组末尾补这两个值）。
   // src：em 东财 / tx 腾讯日 K / txq 腾讯实时报价 / csi 中证官网 / prov 临时补齐的全收益；已有的行为空 = 来源未记录。
@@ -214,6 +219,117 @@ export const SCHEMA_SQL: string[] = [
   `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS completeness VARCHAR`,
   `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS sources VARCHAR`,
   `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS registry_version INTEGER`,
+  // ── 第 4 版（S15，D80、D81）：点时事件数据集，只加表、轻量升级 ──
+  // 列顺序是约定（Warehouse.append 按列序写），迁移测试钉着。每行：src 来源（本轮只有 em）、
+  // ver 写它的夜间数据版本（后台回填为空）、batch 写它的 pit_batches.id（永远有值）。
+  // 两融明细：日期之后的下一个交易日才可得；rzyezb 是东财原样的 %（留作核对），其余金额元、融券余量股
+  `CREATE TABLE IF NOT EXISTS margin_daily (
+  code VARCHAR NOT NULL,
+  date DATE NOT NULL,
+  avail_date DATE NOT NULL,
+  rzye DOUBLE,
+  rzmre DOUBLE,
+  rzche DOUBLE,
+  rqye DOUBLE,
+  rqyl DOUBLE,
+  float_mcap DOUBLE,
+  rzyezb DOUBLE,
+  src VARCHAR,
+  ver INTEGER,
+  batch INTEGER
+)`,
+  // 股东户数：键（代码, 截至日, 公告日），可得日 = 公告日；消失的行设 gone_from，不删
+  `CREATE TABLE IF NOT EXISTS holder_counts (
+  code VARCHAR NOT NULL,
+  end_date DATE NOT NULL,
+  notice_date DATE NOT NULL,
+  avail_date DATE NOT NULL,
+  holder_num DOUBLE,
+  pre_holder_num DOUBLE,
+  pre_end_date DATE,
+  first_seen DATE NOT NULL,
+  last_seen DATE NOT NULL,
+  gone_from DATE,
+  src VARCHAR,
+  ver INTEGER,
+  batch INTEGER
+)`,
+  // 限售解禁：键（代码, 解禁日, 类型），股数为股、比例为小数；avail_rule 见 @ivan/core 的 LockupAvailRule
+  `CREATE TABLE IF NOT EXISTS lockups (
+  code VARCHAR NOT NULL,
+  free_date DATE NOT NULL,
+  type VARCHAR NOT NULL,
+  unlock_shares DOUBLE,
+  able_shares DOUBLE,
+  float_after DOUBLE,
+  ratio_float DOUBLE,
+  ratio_total DOUBLE,
+  avail_date DATE NOT NULL,
+  avail_rule VARCHAR NOT NULL,
+  first_seen DATE NOT NULL,
+  last_seen DATE NOT NULL,
+  gone_from DATE,
+  src VARCHAR,
+  ver INTEGER,
+  batch INTEGER
+)`,
+  // 大宗交易：键（代码, 成交日, 序号），premium 是相对当日收盘的小数，金额元、数量股
+  `CREATE TABLE IF NOT EXISTS block_trades (
+  code VARCHAR NOT NULL,
+  trade_date DATE NOT NULL,
+  seq INTEGER NOT NULL,
+  avail_date DATE NOT NULL,
+  deal_price DOUBLE,
+  close_price DOUBLE,
+  premium DOUBLE,
+  deal_volume DOUBLE,
+  deal_amount DOUBLE,
+  buyer_inst BOOLEAN,
+  seller_inst BOOLEAN,
+  src VARCHAR,
+  ver INTEGER,
+  batch INTEGER
+)`,
+  // 各数据集的同步状态：last_status = ok | partial | canary_failed | failed | blocked；canary 是 CanaryResult 的 JSON
+  `CREATE TABLE IF NOT EXISTS pit_sync (
+  dataset VARCHAR PRIMARY KEY,
+  backfill_from DATE,
+  covered_from DATE,
+  window_through DATE,
+  synced_at DATE,
+  nightly_since DATE,
+  last_ok_at TIMESTAMP,
+  last_status VARCHAR,
+  last_detail VARCHAR,
+  canary VARCHAR
+)`,
+  `CREATE SEQUENCE IF NOT EXISTS pit_batch_seq START 1`,
+  // 每次写事件表的批次（D81）：kind = nightly | backfill | check | event_cols；status = running | ok | partial | failed。
+  // 后台回填与补算只写这里、不开数据版本
+  `CREATE TABLE IF NOT EXISTS pit_batches (
+  id INTEGER PRIMARY KEY,
+  kind VARCHAR NOT NULL,
+  datasets VARCHAR,
+  data_version INTEGER,
+  started_at TIMESTAMP,
+  finished_at TIMESTAMP,
+  status VARCHAR,
+  chunks INTEGER,
+  rows INTEGER,
+  requests INTEGER,
+  note VARCHAR
+)`,
+];
+
+/**
+ * 降到第 4 版（`pnpm ivan migrate --down 4`，回滚到 R4 之前跑，D83）：R4 的代码写因子时用
+ * `INSERT INTO factors_daily SELECT <旧列>`，多出来的事件列会让它报错。删掉 7 个事件列、清掉补算进度与完成标记；
+ * 事件表（S15）留着无害。版本号由调用方写回 4。
+ */
+export const DOWN_TO_V4_SQL: string[] = [
+  ...[...EVENT_FACTOR_KEYS].reverse().map((k) => `ALTER TABLE factors_daily DROP COLUMN IF EXISTS ${k}`),
+  `DELETE FROM meta WHERE key = 'event_factors:A'`,
+  `DELETE FROM etl_progress WHERE task LIKE 'event_cols:%'`,
 ];
 
 /**

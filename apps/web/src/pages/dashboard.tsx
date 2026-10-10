@@ -137,7 +137,7 @@ export function DataBanner({ data }: { data: DataStatus }) {
           tone="warn"
           icon={IconWarn}
           title={`${MARKET_TEXT[m.market]}数据停在 ${m.asOf ?? NA}`}
-          action={<Info label="失败原因">{m.lastEtl?.error ?? "未知"}</Info>}
+          action={m.lastEtl?.error ? <Info label="失败原因">{m.lastEtl.error}</Info> : undefined}
         >
           最近一次更新失败，这个市场的跟踪没有结算，简报里的数字也还是旧的。
           {isAdmin && (

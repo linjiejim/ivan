@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { PRESETS } from "./presets.ts";
-import { benchmarksOf, describeSpec, validateSpec } from "./strategy.ts";
+import {
+  EVENT_FACTOR_KEYS,
+  EVENT_FACTOR_VERSION,
+  eventCoverageFrom,
+  FACTOR_CORE_VERSION,
+  FACTOR_REGISTRY_VERSION,
+  type FactorDef,
+  FACTORS,
+  getFactor,
+  isEventFactor,
+} from "./factors.ts";
+import { benchmarksOf, describeSpec, factorsUsedBySpec, validateSpec } from "./strategy.ts";
 
 describe("预设模板", () => {
   it.each(PRESETS.map((p) => [p.id, p] as const))("%s 能通过校验并生成描述", (_id, p) => {
@@ -105,5 +116,104 @@ describe("新基准与港股通股票池（D75、D77）", () => {
     expect(v.errors).toEqual([]);
     expect(describeSpec(v.spec!)[0]).toMatch(/只选港股通标的/);
     expect(validateSpec({ ...hk, universe: { hkConnect: false } }).ok).toBe(false);
+  });
+});
+
+describe("注册表第 3 版：事件因子（S15b，D83、D84）", () => {
+  const EVENT = [
+    "margin_ratio",
+    "margin_chg_20d",
+    "margin_eligible",
+    "holder_num_qoq",
+    "unlock_days",
+    "unlock_ratio_30d",
+    "block_premium_20d",
+  ];
+
+  it("版本号：注册表 3、核心 2、事件 1", () => {
+    expect(FACTOR_REGISTRY_VERSION).toBe(3);
+    expect(FACTOR_CORE_VERSION).toBe(2);
+    expect(EVENT_FACTOR_VERSION).toBe(1);
+  });
+
+  it("7 个事件因子按约定顺序排在注册表最末，只有 A 股，分组 event，带数据集与预热天数", () => {
+    const tail = (FACTORS as readonly FactorDef[]).slice(-7);
+    expect(tail.map((f) => f.key)).toEqual(EVENT);
+    expect(EVENT_FACTOR_KEYS).toEqual(EVENT);
+    for (const f of tail) {
+      expect(f.markets).toEqual(["A"]);
+      expect(f.group).toBe("event");
+      expect(f.dataset).toBeTruthy();
+      expect(typeof f.warmupDays).toBe("number");
+      expect(f.key.startsWith("flag_")).toBe(false);
+      expect(f.describe).toMatch(/可得|181|同步/);
+    }
+    expect(tail.map((f) => [f.dataset, f.warmupDays])).toEqual([
+      ["margin", 7],
+      ["margin", 40],
+      ["margin", 7],
+      ["holders", 200],
+      ["lockups", 0],
+      ["lockups", 0],
+      ["blocks", 40],
+    ]);
+    // 前面的因子都不是事件因子（核心因子顺序不变）
+    expect((FACTORS as readonly FactorDef[]).slice(0, -7).some((f) => f.dataset)).toBe(false);
+    expect(getFactor("unlock_days")!.describe).toMatch(/记为 181/);
+  });
+
+  it("数据起点 = 覆盖起点 + 预热天数；没有覆盖起点为 null", () => {
+    expect(eventCoverageFrom(getFactor("margin_chg_20d")!, "2013-01-04")).toBe("2013-02-13");
+    expect(eventCoverageFrom(getFactor("unlock_days")!, "2013-01-01")).toBe("2013-01-01");
+    expect(eventCoverageFrom(getFactor("margin_ratio")!, null)).toBeNull();
+  });
+
+  it("港股策略用两融因子被拒；A 股可以用", () => {
+    const base = {
+      name: "x",
+      rank: { terms: [{ factor: "margin_ratio", weight: 1, better: "low" }], top: 10 },
+    };
+    expect(validateSpec({ ...base, market: "HK" }).errors.join("\n")).toMatch(
+      /融资余额占流通市值.*在港股不可用|在港股不可用/,
+    );
+    const v = validateSpec({
+      ...base,
+      market: "A",
+      filters: [
+        { factor: "unlock_days", op: ">", value: 90 },
+        { factor: "margin_eligible", op: "is" },
+      ],
+    });
+    expect(v.errors).toEqual([]);
+    expect(describeSpec(v.spec!).join("\n")).toMatch(/距下次解禁 > 90天/);
+  });
+
+  it("factorsUsedBySpec：筛选 + 排序 + 弱势排序，去重", () => {
+    const v = validateSpec({
+      name: "x",
+      market: "A",
+      filters: [{ factor: "unlock_days", op: ">", value: 90 }],
+      rank: {
+        terms: [
+          { factor: "pe_ttm", weight: 1, better: "low" },
+          { factor: "unlock_days", weight: 1, better: "high" },
+        ],
+        top: 10,
+        regime: { weak: { terms: [{ factor: "holder_num_qoq", weight: 1, better: "low" }] } },
+      },
+    });
+    expect(v.errors).toEqual([]);
+    expect(factorsUsedBySpec(v.spec!)).toEqual(["unlock_days", "pe_ttm", "holder_num_qoq"]);
+    expect(factorsUsedBySpec(v.spec!).filter(isEventFactor)).toEqual([
+      "unlock_days",
+      "holder_num_qoq",
+    ]);
+  });
+
+  it("预设模板都不用事件因子（旧选股 SQL 不变）", () => {
+    for (const p of PRESETS) {
+      const v = validateSpec(p.spec);
+      expect(factorsUsedBySpec(v.spec!).filter(isEventFactor)).toEqual([]);
+    }
   });
 });

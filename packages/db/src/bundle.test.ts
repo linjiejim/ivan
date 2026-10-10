@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type AppDbHandle,
+  appendLedger,
   type BundleInput,
   buildTraceBundle,
   type OwnEntry,
@@ -151,6 +152,42 @@ describe("导出文件", () => {
       [1, "initial"],
       [2, "data_revision"],
     ]);
+  });
+
+  it("导出读到一半时另一个连接（夜间结算）又记了一条：整份按同一个快照导出，校验通过、不误报链头不符", () => {
+    const other = openAppDb(join(dir, "app.sqlite"), { migrate: false });
+    const prepare = h.sqlite.prepare.bind(h.sqlite);
+    let appended = false;
+    // 账本已经读完、链校验还没做的时候（读健康读数那一步）插进一条
+    h.sqlite.prepare = ((sql: string) => {
+      if (!appended && sql.includes("tracking_health")) {
+        appended = true;
+        appendLedger(other, {
+          userId: "u_1",
+          kind: "tracking_start",
+          subjectType: "user",
+          subjectId: "u_1",
+          asOf: "2026-03-25",
+          payloadTable: "inline",
+          payload: { note: "导出途中追加" },
+        });
+      }
+      return prepare(sql);
+    }) as typeof h.sqlite.prepare;
+    let b: TraceBundle;
+    try {
+      b = roundTrip(buildTraceBundle(h, input()));
+    } finally {
+      h.sqlite.prepare = prepare;
+      other.sqlite.close();
+    }
+    expect(appended).toBe(true);
+    expect(b.entries).toHaveLength(7);
+    expect(verifyBundle(b)).toEqual({ ok: true, checked: 7, headHash: b.chain.headHash });
+    // 下一次导出带上新的那条
+    const next = roundTrip(buildTraceBundle(h, input()));
+    expect(next.entries).toHaveLength(8);
+    expect(verifyBundle(next).ok).toBe(true);
   });
 
   it("清单指纹不看导出时间；文件带中英文的重算说明", () => {

@@ -34,6 +34,8 @@ const RULES = `你是 Ivan 的策略研究助手，帮用户在 A 股、港股�
 - 想按条件找股票、但还没打算建策略（「找找股息率超过 5% 的港股」）→ screen_rules；按已有策略选股 → screen_today。
 - 回测里的某笔交易或任意一天的个股为什么 → get_security_evidence（带 runId 与成交日 tradeDate）；跟踪里的某只带 trackingId，结果里有 planRecord 时先说它；lookup_security 只看最新的个股卡。
   成交记录上的日期是次日开盘的成交日，决策看的是前一个交易日收盘后的数据：说「决策日 X（次日 Y 开盘成交）」，不要拿成交日当天的数据解释。
+- 个股的融资余额、股东户数、什么时候解禁、大宗交易折价 → get_security_events（只有 A 股）；为什么那天选它 → get_security_evidence。
+  股东户数可以照抄整数，也可以写成「x.x 万户」（按写出的精度核对）；解禁股数照抄工具里的股数。
 - 用户问「能放多少钱」「买得进吗」「滑点」→ query_run(what=execution)。`;
 
 const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
@@ -70,6 +72,10 @@ const DSL = `策略 DSL（propose_strategy 的 spec，JSON）：
 排序：每个排序项取当日横截面百分位（neutral 的项只在同一一级行业里比），按权重加权，取前 top 只；设了 maxPerIndustry 时每个一级行业最多留这么多只。
 「当时市值前 N 大」的股票池用条件 { "factor": "mcap_rank", "op": "<=", "value": N }，不要用今天的市值去筛历史。
 港股策略可以加 universe.hkConnect: true，只选港股通标的（按决策日当时的名单）。
+两融与筹码类因子（margin_ratio、margin_chg_20d、margin_eligible、holder_num_qoq、unlock_days、unlock_ratio_30d、block_premium_20d）只适用于 A 股，
+按公布后可得的日期算（两融与大宗 T+1、户数按公告日、解禁按规则推算）；回测起点不能早于它们的数据起点，历史还没补算完时不能回测（list_factors 的 from、ready）。
+数据可用而 180 天内没有已知解禁时 unlock_days 是 181、unlock_ratio_30d 是 0，所以「unlock_days > 90」不会把没有解禁的股票排除。
+这些因子为空表示「不知道」（数据过期、还在预热、30 天内有解禁但缺比例），任何条件都不会让空值通过：margin_eligible 的 is 与 not 都只选得出知道答案的股票，两融数据过期那天「不是两融标的」一只也选不出。
 基准：csi500 / csi1000 / csi_div 是中证500 / 中证1000 / 中证红利全收益。中小盘策略（回测提示「基准可能不匹配」或持仓市值排名靠后）可以建议换成中证500 或中证1000，以股息率排序为主的建议中证红利；只在提案里改 benchmark，由用户确认，不要自己换了基准再说跑赢。
 改已有策略时，优先用 patch（JSON Patch：[{ "op": "replace", "path": "/exits/stopLoss", "value": 0.1 }]），只改用户要求的部分。
 回测规则：收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率。

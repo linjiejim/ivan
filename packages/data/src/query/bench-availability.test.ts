@@ -78,7 +78,7 @@ describe("跟踪：不抛错，加 bench_missing 提示", () => {
     const c = built.input.dataCaveats!.find((x) => x.id === "bench_missing");
     expect(c).toMatchObject({ level: "warn", title: "基准缺数据" });
     expect(c!.detail).toBe(
-      `基准「中证1000全收益」在 ${calendar[4]} 没有数据，超额按缺值处理（共 6 个交易日）。`,
+      `基准「中证1000全收益」在 ${calendar[4]} 没有数据，这些天按前一天的基准值近似（共 6 个交易日）。`,
     );
   });
 
@@ -88,7 +88,7 @@ describe("跟踪：不抛错，加 bench_missing 提示", () => {
     });
     const built = await buildSimInput(wh, spec("csi1000"), params(calendar[12]!), { appendNextDay: true });
     expect(built.input.dataCaveats!.find((x) => x.id === "bench_missing")!.detail).toBe(
-      `基准「中证1000全收益」在 ${calendar.at(-1)} 没有数据，超额按缺值处理。`,
+      `基准「中证1000全收益」在 ${calendar.at(-1)} 没有数据，这些天按前一天的基准值近似。`,
     );
     // 回测不管最后一天（只要求起点前一个交易日有数据）
     const bt = await buildSimInput(wh, spec("csi1000"), params(calendar[12]!));

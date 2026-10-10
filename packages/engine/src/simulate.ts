@@ -771,14 +771,26 @@ export function simulate(input: SimInput): SimResult {
       cash: params.capital,
       positions: 0,
     };
-    metrics = computeMetrics(series, trades, params.capital, { version: 2, anchor });
+    metrics = computeMetrics(series, trades, params.capital, {
+      version: 2,
+      anchor,
+      held: new Set(positions.keys()),
+    });
     const oosStartDate = params.oosMonths > 0 ? oosStart(series, params.oosMonths, 2) : null;
+    const first = series[0]?.date;
+    // 样本内的数值带锚点算，起点写第一个真实的交易日（同 metrics.start）
+    const fromFirst = (p: ReturnType<typeof periodMetrics>) => (first ? { ...p, start: first } : p);
     segments = oosStartDate
       ? {
-          inSample: periodMetrics([anchor, ...series.filter((p) => p.date < oosStartDate)]),
+          inSample: fromFirst(
+            periodMetrics([anchor, ...series.filter((p) => p.date < oosStartDate)]),
+          ),
           outOfSample: periodMetrics(series.filter((p) => p.date >= oosStartDate)),
         }
-      : { inSample: periodMetrics([anchor, ...series], metrics.totalReturn), outOfSample: null };
+      : {
+          inSample: fromFirst(periodMetrics([anchor, ...series], metrics.totalReturn)),
+          outOfSample: null,
+        };
   }
   // 按流动性成交（D64）：费用拖累拆成费用与滑点两部分（costDrag = 两者之和）
   fills.slippageCost = trades.reduce((s, t) => s + (t.slip ?? 0), 0);

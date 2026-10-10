@@ -1,0 +1,45 @@
+{
+ "version": null,
+ "result": {
+  "pages": 1,
+  "data": [
+   {
+    "SECUCODE": "001309.SZ",
+    "TRADE_DATE": "2026-09-29 00:00:00",
+    "DEAL_PRICE": 88.52,
+    "CLOSE_PRICE": 88.52,
+    "PREMIUM_RATIO": 0,
+    "DEAL_VOLUME": 120000,
+    "DEAL_AMT": 10622400,
+    "BUYER_NAME": "中信证券股份有限公司上海分公司",
+    "SELLER_NAME": "华泰证券股份有限公司深圳益田路证券营业部"
+   },
+   {
+    "SECUCODE": "001366.SZ",
+    "TRADE_DATE": "2026-09-29 00:00:00",
+    "DEAL_PRICE": 11.84,
+    "CLOSE_PRICE": 13.13,
+    "PREMIUM_RATIO": -0.098248286367,
+    "DEAL_VOLUME": 500000,
+    "DEAL_AMT": 5920000,
+    "BUYER_NAME": "机构专用",
+    "SELLER_NAME": "国泰君安证券股份有限公司总部"
+   },
+   {
+    "SECUCODE": "001366.SZ",
+    "TRADE_DATE": "2026-09-29 00:00:00",
+    "DEAL_PRICE": 11.84,
+    "CLOSE_PRICE": 13.13,
+    "PREMIUM_RATIO": -0.098248286367,
+    "DEAL_VOLUME": 500000,
+    "DEAL_AMT": 5920000,
+    "BUYER_NAME": "机构专用",
+    "SELLER_NAME": "招商证券股份有限公司深圳深南大道证券营业部"
+   }
+  ],
+  "count": 3
+ },
+ "success": true,
+ "message": "ok",
+ "code": 0
+}

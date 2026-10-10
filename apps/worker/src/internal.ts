@@ -1,7 +1,18 @@
 /**
  * worker 内部接口（只监听 127.0.0.1，带共享密钥）：server 所有行情查询都经这里（D3）。
  */
-import { BENCHMARKS, isDateStr, type Market, toCode, validateSpec } from "@ivan/core";
+import {
+  BENCHMARKS,
+  EVENT_FACTOR_KEYS,
+  eventCoverageFrom,
+  FACTOR_MAP,
+  isDateStr,
+  type Market,
+  PIT_DATASET_IDS,
+  type PitDatasetId,
+  toCode,
+  validateSpec,
+} from "@ivan/core";
 import { sha256Canonical } from "@ivan/core/node";
 import {
   benchFirstDates,
@@ -9,6 +20,8 @@ import {
   committedAsOf,
   dataQuality,
   dataVersionState,
+  estimatePitBackfill,
+  eventColumnsStatus,
   EvidenceError,
   type EvidenceItem,
   explainSelection,
@@ -17,9 +30,13 @@ import {
   lastTradingDay,
   latestDataVersion,
   loadHkConnect,
+  pitBackfillProgress,
+  pitDatasetStatus,
+  PIT_DEFAULT_SINCE,
   resolveDataIssue,
   screenOn,
   securityDossier,
+  securityEvents,
   SelectionDataError,
   softStepStatus,
   sqlCodeList,
@@ -31,9 +48,10 @@ import { computeBlocked, jobs } from "@ivan/db";
 import { evaluatePlanItem } from "@ivan/engine";
 import { and, desc, eq, like } from "drizzle-orm";
 import { Hono } from "hono";
-import { env, todayOf } from "./env.ts";
+import { env, etlContext, todayOf } from "./env.ts";
+import { eventsJobActive, eventsPayload } from "./jobs/events.ts";
 import { marketDayStatus } from "./market-day.ts";
-import { wake } from "./runner.ts";
+import { enqueue, wake } from "./runner.ts";
 
 interface BenchStatus {
   benchFirstDates: Record<string, string | null>;
@@ -63,6 +81,93 @@ async function benchStatus(
   byMarket.set(market, { ver, value });
   return value;
 }
+
+/** 事件表的行数：按最近一个结束的批次缓存（管理页每 5 秒轮询一次数据状态） */
+const eventRowsCache = new WeakMap<Warehouse, { batch: number; rows: Record<string, number> }>();
+
+/**
+ * 点时事件数据（S15，只有 A 股）：各数据集的同步状态与连续失败晚数、后台回填的进度与最近一批。
+ */
+async function eventsStatus(wh: Warehouse) {
+  const lastFinished = Number(
+    (await wh.scalar(`SELECT max(id) FROM pit_batches WHERE finished_at IS NOT NULL`)) ?? 0,
+  );
+  const hit = eventRowsCache.get(wh);
+  const status = await pitDatasetStatus(wh, hit?.batch === lastFinished ? hit.rows : undefined);
+  const rows = Object.fromEntries(PIT_DATASET_IDS.map((id) => [id, status[id].rows]));
+  eventRowsCache.set(wh, { batch: lastFinished, rows });
+  const soft = await softStepStatus(wh, "A");
+  const datasets = Object.fromEntries(
+    PIT_DATASET_IDS.map((id) => [
+      id,
+      {
+        ...status[id],
+        rows: rows[id] ?? 0,
+        failingNights: soft.find((s) => s.step === id)?.failingNights ?? 0,
+      },
+    ]),
+  );
+  const job = eventsJobActive();
+  const last = await wh.one<{
+    id: number;
+    startedAt: string | null;
+    finishedAt: string | null;
+    status: string | null;
+    note: string | null;
+    rows: number | null;
+    requests: number | null;
+  }>(
+    `SELECT id, strftime(started_at, '%Y-%m-%dT%H:%M:%S') AS startedAt,
+            strftime(finished_at, '%Y-%m-%dT%H:%M:%S') AS finishedAt, status, note, rows, requests
+     FROM pit_batches WHERE kind = 'backfill' ORDER BY id DESC LIMIT 1`,
+  );
+  return {
+    datasets,
+    backfill: {
+      status: job ? job.status : "idle",
+      notBefore: job?.notBefore ?? null,
+      progress: await pitBackfillProgress(wh, todayOf()),
+      lastBatch: last ?? null,
+    },
+  };
+}
+
+/**
+ * 事件因子（S15b）的补算进度与各因子的数据起点：server 提交回测前校验（补完之前、起点早于数据起点直接 400，不扣额度），
+ * 编辑器与 list_factors 显示「自 {from}」/「补算中」。ready = 补算完成且签名、版本都对得上。
+ */
+async function eventFactorStatus(wh: Warehouse) {
+  const st = await eventColumnsStatus(wh);
+  const factorCoverage = Object.fromEntries(
+    EVENT_FACTOR_KEYS.map((k) => {
+      const def = FACTOR_MAP.get(k)!;
+      return [k, { from: eventCoverageFrom(def, st.state[def.dataset!].from), ready: st.complete }];
+    }),
+  );
+  return {
+    factorCoverage,
+    eventFactors: {
+      v: st.v,
+      sig: st.sig,
+      complete: st.complete,
+      doneYears: st.doneYears,
+      totalYears: st.totalYears,
+      backfillComplete: st.backfillComplete,
+    },
+  };
+}
+
+/** 回填估算按起点缓存 1 小时（每次 4 个计数请求） */
+const estimateCache = new Map<string, { at: number; value: unknown }>();
+
+/** 格式对、而且是真实存在的日子（2024-13-45 这种格式对的也挡掉，不让 DuckDB 的转换错误原文传出去） */
+function isCalendarDate(d: unknown): d is string {
+  return (
+    isDateStr(d) && !Number.isNaN(Date.parse(d)) && new Date(d).toISOString().slice(0, 10) === d
+  );
+}
+
+export const ESTIMATE_TTL_MS = 3_600_000;
 
 export function createInternalApp() {
   const app = new Hono();
@@ -156,7 +261,44 @@ export function createInternalApp() {
         ...(await benchStatus(wh, m, v.id)),
       });
     }
-    return c.json({ markets, maintenance: null, computePaused });
+    return c.json({
+      markets,
+      maintenance: null,
+      computePaused,
+      events: await eventsStatus(wh),
+      ...(await eventFactorStatus(wh)),
+    });
+  });
+
+  /** 排一次点时事件数据的后台回填（S15）：已经有一个在排队或运行时 409 */
+  app.post("/internal/events/backfill", async (c) => {
+    const raw: unknown = await c.req.json().catch(() => ({}));
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+      return c.json({ error: "请求体要是一个对象" }, 400);
+    const p = eventsPayload(raw as { datasets?: unknown; since?: unknown });
+    if (typeof p === "string") return c.json({ error: p }, 400);
+    if (eventsJobActive()) return c.json({ error: "已经有一个事件数据回填在排队或运行" }, 409);
+    const jobId = enqueue("events", { ...p }, null);
+    return c.json({ jobId });
+  });
+
+  /** 回填估算（4 个计数请求，按起点缓存 1 小时） */
+  app.get("/internal/events/estimate", async (c) => {
+    const since = c.req.query("since") || PIT_DEFAULT_SINCE;
+    if (!isDateStr(since)) return c.json({ error: "日期格式要是 YYYY-MM-DD" }, 400);
+    const hit = estimateCache.get(since);
+    if (hit && Date.now() - hit.at < ESTIMATE_TTL_MS) return c.json(hit.value);
+    const ids: PitDatasetId[] = [...PIT_DATASET_IDS];
+    const value = {
+      since,
+      ...(await estimatePitBackfill(
+        etlContext(() => {}),
+        ids,
+        since,
+      )),
+    };
+    estimateCache.set(since, { at: Date.now(), value });
+    return c.json(value);
   });
 
   /** 数据质量（D74）：近 N 天按规则统计的拦截与标记、问题最多的代码、未解决的问题、最近几晚的完整性 */
@@ -178,10 +320,18 @@ export function createInternalApp() {
     const b = (await c.req.json()) as { spec: unknown; date?: string; limit?: number };
     const v = validateSpec(b.spec);
     if (!v.spec) return c.json({ error: v.errors.join("；") }, 400);
+    if (b.date !== undefined && !isCalendarDate(b.date))
+      return c.json({ error: "日期格式要是 YYYY-MM-DD" }, 400);
     const { wh } = env();
-    // 默认选最新的已提交交易日（D60），不读还没提交的数据
-    const date = b.date ?? (await committedAsOf(wh, v.spec.market));
-    if (!date) return c.json({ error: "行情仓还没有数据" }, 400);
+    // 默认选最新的已提交交易日（D60），不读还没提交的数据：给了日期也截到已提交的截至日，再落到交易日
+    // （名单旁边写的数据版本是已提交的那个，不能配一份读了未提交行的名单）
+    const committed = await committedAsOf(wh, v.spec.market);
+    if (!committed) return c.json({ error: "行情仓还没有数据" }, 400);
+    const date = await lastTradingDay(
+      wh,
+      v.spec.market,
+      b.date && b.date < committed ? b.date : committed,
+    );
     const rows = await screenOn(wh, v.spec, date, Math.min(Math.max(b.limit ?? 30, 1), 100));
     // 按大盘状态切换排序的策略（D53）：告诉前端这天用的是哪套排序
     const regime = v.spec.rank?.regime
@@ -247,18 +397,53 @@ export function createInternalApp() {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    // 证据版本（D97）：不给就是当前版本；给了按那一版的条目集合重新生成
+    const version = c.req.query("version") ? Number(c.req.query("version")) : undefined;
     return c.json(
-      await securityDossier(env().wh, code, asOf, factors.length ? { factorKeys: factors } : {}),
+      await securityDossier(env().wh, code, asOf, {
+        ...(factors.length ? { factorKeys: factors } : {}),
+        ...(version !== undefined ? { version } : {}),
+      }),
     );
   });
 
-  /** 复核个股证据：按同样的代码、决策日、因子集重新生成，比校验值；带上原来的条目时列出变了的项 */
+  /**
+   * 个股的两融与筹码明细（S15b）：只读 asOf 当时可得且没撤下的行；asOf 默认并截到已提交的截至日。只有 A 股
+   * （港股 404「两融、股东户数、解禁、大宗交易目前只有 A 股」）。datasets=margin,holders 只取其中几组。
+   */
+  app.get("/internal/securities/:code/events", async (c) => {
+    let code: string;
+    try {
+      code = toCode(c.req.param("code"));
+    } catch {
+      return c.json({ error: "代码不对" }, 400);
+    }
+    const datasets = (c.req.query("datasets") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean) as PitDatasetId[];
+    return c.json(
+      await securityEvents(
+        env().wh,
+        code,
+        c.req.query("asOf") || undefined,
+        datasets.length ? datasets : undefined,
+      ),
+    );
+  });
+
+  /**
+   * 复核个股证据（D97）：按同样的代码、决策日、版本、因子集与选项重新生成，比校验值；带上原来的条目时列出变了的项。
+   * 没给版本（S07 时代存下的）先按第 1 版、再按当前版本试；返回 {same, hash, matchedVersion, changed}。
+   */
   app.post("/internal/dossier/verify", async (c) => {
     const b = (await c.req.json()) as {
       code: string;
       asOf: string;
       hash: string;
+      evidenceVersion?: number;
       factorKeys?: string[];
+      options?: Record<string, unknown>;
       items?: EvidenceItem[];
     };
     if (!b.code || !b.asOf || !b.hash) return c.json({ error: "需要 code、asOf 与 hash" }, 400);
@@ -272,6 +457,8 @@ export function createInternalApp() {
       await verifyDossier(env().wh, code, b.asOf, b.hash, {
         factorKeys: b.factorKeys,
         items: b.items,
+        ...(b.evidenceVersion !== undefined ? { evidenceVersion: Number(b.evidenceVersion) } : {}),
+        ...(b.options ? { options: b.options } : {}),
       }),
     );
   });
@@ -394,10 +581,15 @@ export function createInternalApp() {
       { c: code },
     );
     if (!sec) return c.json({ error: `找不到 ${code}` }, 404);
-    const factors = await wh.one(
-      `SELECT date::VARCHAR AS date, close, ${FACTOR_COLUMNS.join(", ")}
-       FROM factors_daily WHERE code IN (${sqlCodeList([code])}) ORDER BY date DESC LIMIT 1`,
-    );
+    // 只读已提交的数据（D60）：失败那晚写进来的因子行不给；还没有提交过的版本时没有因子
+    const asOf = await committedAsOf(wh, (sec as { market: string }).market);
+    const factors = asOf
+      ? await wh.one(
+          `SELECT date::VARCHAR AS date, close, ${FACTOR_COLUMNS.join(", ")}
+           FROM factors_daily WHERE code IN (${sqlCodeList([code])}) AND date <= $a::DATE ORDER BY date DESC LIMIT 1`,
+          { a: asOf },
+        )
+      : null;
     const financials = await wh.all(
       `SELECT report_date::VARCHAR AS report_date, period, eff_date::VARCHAR AS eff_date, currency,
               revenue, np, deducted_np, revenue_yoy, np_yoy, deducted_np_yoy, roe, gross_margin, debt_ratio

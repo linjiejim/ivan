@@ -164,4 +164,20 @@ describe("财报与股本写入", () => {
     // 股本没传（null）时不动
     expect(await wh.scalar(`SELECT count(*) FROM share_changes`)).toBe(1);
   });
+
+  it("财报行的列数不对：报错，且这只股票原有的财报不被删掉", async () => {
+    const http = new FakeHttp([]);
+    const shares = [["600000.SH", "2025-12-31", "2026-01-05", 2.9e10, "定期报告"]];
+    await writeFundamentals(ctxOf(http, 7, "2026-04-21"), "600000.SH", [fin("2025-12-31", 4e9)], shares);
+    const bad = [fin("2026-03-31", 1e9).slice(0, -1) as FinTuple];
+    await expect(writeFundamentals(ctxOf(http, 8, "2026-04-22"), "600000.SH", bad, null)).rejects.toThrow(/财报行有/);
+    expect(await wh.all(`SELECT np, ver FROM financials`)).toEqual([{ np: 4e9, ver: 7 }]);
+    // 股本行同样先校验再删：列数不对时财报、股本都不动
+    const badShares = [["600000.SH", "2026-03-31", "2026-04-02", 3e10]];
+    await expect(
+      writeFundamentals(ctxOf(http, 8, "2026-04-22"), "600000.SH", [fin("2026-03-31", 1e9)], badShares),
+    ).rejects.toThrow(/股本行有/);
+    expect(await wh.all(`SELECT np, ver FROM financials`)).toEqual([{ np: 4e9, ver: 7 }]);
+    expect(await wh.all(`SELECT total_shares, ver FROM share_changes`)).toEqual([{ total_shares: 2.9e10, ver: 7 }]);
+  });
 });

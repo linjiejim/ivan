@@ -2,14 +2,16 @@
  * 数字核对（spec §10，D69）：把「数字只能来自工具结果」从提示词变成机器检查。纯函数，server 的对话与 worker 的简报共用。
  *
  * - 抽数：先规范化（全角、U+2212、零宽字符、千分位），日期、证券代码、版本号、行首序号、反引号里的内容豁免；
- *   带 % / 个百分点 / bp / 货币或单位的是「量」，跟着 天 / 只 / 笔 / 次 / 名 / 个交易日 的整数是「计数」，其余裸整数不核对。
+ *   带 % / 个百分点 / bp / 货币或单位的是「量」，跟着 天 / 只 / 笔 / 次 / 名 / 户 / 个交易日 的整数是「计数」（裸「股」不算，见 COUNT_UNITS），其余裸整数不核对。
+ *   带「万 / 亿」的计数（「4.8 万户」，S15b）按写出的精度核对：x 万（d 位小数）对 n 要 |x × 10⁴ − n| ≤ 0.5 × 10^(4−d)。
  * - 证据：遍历工具给模型看的 JSON，每个有限数字按键名归类；因子先按因子表的单位（Ivan 存的百分数是 4.25 这样的百分点）。
  * - 匹配：按写出的精度留半个末位的余量（或 0.5% 相对误差），按类型匹配，不允许推算。
  * 简报是闸门（对不上就重写一次、再不行用模板），对话只能标注（流式撤不回来）。
  */
 import { FACTOR_MAP, type FactorDef } from "@ivan/core";
 
-export const GROUNDING_VERSION = 1;
+/** 1 = S09；2 = S15b：「户」是计数单位，带「万 / 亿」的计数（万户、万股……）按写出的精度核对；裸「股」仍不是计数单位 */
+export const GROUNDING_VERSION = 2;
 
 /** 文字里的数：百分数、百分点、金额（已按万 / 亿换算）、普通数（小数或倍数）、计数、裸整数（不核对） */
 export type FigureKind = "percent" | "points" | "money" | "ratio" | "count" | "plain";
@@ -25,7 +27,7 @@ export interface ProseFigure {
   negative: boolean;
   /** 写了「+」：证据为负时不能靠上下文里的「跌、回撤」开脱 */
   plus: boolean;
-  /** 金额的单位倍数（元 1、万 1e4、亿 1e8），决定「半个写出的末位」有多大 */
+  /** 金额或计数的单位倍数（元 1、万 1e4、亿 1e8；「4.8 万户」的 1e4），决定「半个写出的末位」有多大 */
   scale: number;
   start: number;
   end: number;
@@ -47,7 +49,7 @@ export interface UnverifiedFigure {
   kind: FigureKind;
   reason: "no_match" | "sign_mismatch";
   /** 同类证据里最接近的一个（给界面 ⓘ 与重写提示用） */
-  nearest?: { path: string; value: number };
+  nearest?: { path: string; value: number; kind?: EvidenceKind };
 }
 
 export interface GroundingResult {
@@ -71,12 +73,11 @@ export function normalizeText(s: string): string {
     .replace(/．/g, ".")
     .replace(/＋/g, "+")
     .replace(/[－−]/g, "-");
-  // 千分位：数字中间的逗号（半角或全角）后面正好 3 位数字；反复做，处理 1,234,567
-  const sep = /(\d)[,，](\d{3})(?!\d)/g;
-  for (let prev = ""; prev !== t;) {
-    prev = t;
-    t = t.replace(sep, "$1$2");
-  }
+  // 千分位：只认完整的千分位分组（开头 1–3 位、前面不是数字或小数点，之后每组正好 3 位）。
+  // 「收盘 1460.52，128 只」「0.82，200 日均线」是两个数，不合并
+  t = t.replace(/(?<![\d.])\d{1,3}(?:[,，]\d{3})+(?:\.\d+)?(?!\d)/g, (m) =>
+    m.replace(/[,，]/g, ""),
+  );
   return t;
 }
 
@@ -97,7 +98,7 @@ const EXEMPT: RegExp[] = [
   /\d{6}\.(?:SH|SZ|BJ)/gi, // 600519.SH
   /\d{4,5}\.HK/gi, // 00700.HK
   /(?<![\d.])[01]\.\d{6}(?!\d)/g, // 东财行情代码 1.000905
-  /(?<![\d.])\d{6}(?![\d.])(?!\s*(?:%|个百分点|bp|元|港元|万|亿|倍|天|只|笔|次|名|个交易日))/g, // 600519
+  /(?<![\d.])\d{6}(?![\d.])(?!\s*(?:%|个百分点|bp|元|港元|万|亿|倍|天|只|笔|次|名|户|个交易日))/g, // 600519
   // v3、MA20、H00905、run_ab12。后面紧跟计量单位的不算标识符：「ROE15%」「PE12.5倍」是因子值，要核对
   /[A-Za-z_][A-Za-z_]*\d[0-9A-Za-z_]*(?![\d.]*\s*(?:%|个百分点|bp|BP|倍|x(?![A-Za-z])|万亿|亿|万|港元|元))/g,
   /^[ \t]*(?:[-*][ \t]*)?(?:\(\d{1,2}\)|（\d{1,2}）|\d{1,2}[.、)）](?!\d))/gm, // 行首序号
@@ -110,7 +111,7 @@ const EXEMPT: RegExp[] = [
 
 /** 单位 → 种类与倍数 */
 const UNIT =
-  /^(\s*)(%|个百分点|bp|BP|万亿|亿港元|亿元|万港元|万元|港元|元|亿|万|倍|x(?![A-Za-z])|个交易日|天|只|笔|次|名)/;
+  /^(\s*)(%|个百分点|bp|BP|万亿|亿港元|亿元|万港元|万元|亿户|万户|亿股|万股|港元|元|亿|万|倍|x(?![A-Za-z])|个交易日|天|只|笔|次|名|户)/;
 const MONEY_SCALE: Record<string, number> = {
   万亿: 1e12,
   亿港元: 1e8,
@@ -122,7 +123,11 @@ const MONEY_SCALE: Record<string, number> = {
   港元: 1,
   元: 1,
 };
-const COUNT_UNITS = new Set(["个交易日", "天", "只", "笔", "次", "名"]);
+// 不含裸「股」：「每 10 股派 3 元」「10 转 5 股」里的整数在证据里没有（分红送转按每股存），按第 1 版当裸整数不核对；
+// 股数只核对带「万 / 亿」的写法（解禁股数的证据就是万股）
+const COUNT_UNITS = new Set(["个交易日", "天", "只", "笔", "次", "名", "户"]);
+/** 带「万 / 亿」的计数单位（S15b）：股东户数、股数 */
+const SCALED_COUNT: Record<string, number> = { 亿户: 1e8, 万户: 1e4, 亿股: 1e8, 万股: 1e4 };
 
 function decimalsOf(n: string): number {
   const i = n.indexOf(".");
@@ -136,6 +141,10 @@ function signBefore(t: string, i: number): { negative: boolean; plus: boolean; a
   const c = t[j];
   if (c === "负") return { negative: true, plus: false, at: j };
   if (c === "-" || c === "+") {
+    // Markdown 列表符号「- 12.5%」：行首（前面只有空白）、后面跟空格的不是正负号
+    if (t[j + 1] === " " && /^[ \t]*$/.test(t.slice(t.lastIndexOf("\n", j - 1) + 1, j))) {
+      return { negative: false, plus: false, at: i };
+    }
     let k = j - 1;
     if (t[k] === " ") k--;
     if (k >= 0 && /[\d)）%]/.test(t[k]!)) return { negative: false, plus: false, at: i };
@@ -181,6 +190,9 @@ export function extractFigures(text: string): { figures: ProseFigure[]; exempt: 
     else if (unit && MONEY_SCALE[unit]) {
       const scale = MONEY_SCALE[unit]!;
       fig = { ...base, raw, value: signed * scale, kind: "money", decimals: d, scale };
+    } else if (unit && SCALED_COUNT[unit]) {
+      const scale = SCALED_COUNT[unit]!;
+      fig = { ...base, raw, value: signed * scale, kind: "count", decimals: d, scale };
     } else if (unit === "倍" || unit === "x")
       fig = { ...base, raw, value: signed, kind: "ratio", decimals: d };
     else if (unit && COUNT_UNITS.has(unit))
@@ -211,6 +223,10 @@ const COUNT_KEYS = new Set([
   "positiveYears",
   "edition",
   "top",
+  // 两融与筹码（S15b）
+  "holderNum",
+  "preHolderNum",
+  "unlockShares",
 ]);
 /** 财报行（个股卡、证据）的字段：不在因子表里，单位同 FIN_FIELDS（金额是元，比率是百分数） */
 const FIN_UNIT: Record<string, "%" | "元"> = {
@@ -243,7 +259,16 @@ function byUnit(unit: string | undefined, v: number): Classified {
     case "天":
     case "年":
     case "条":
+    case "户":
+    case "笔":
+    case "股":
       return { kind: Number.isInteger(v) ? "count" : "number", value: v };
+    case "万股": {
+      // 证据项写的是万股（股数 ÷ 1e4）：换回股数，乘回去的浮点误差按整数算
+      const n = v * 1e4;
+      const r = Math.round(n);
+      return Math.abs(n - r) < 1e-6 ? { kind: "count", value: r } : { kind: "number", value: n };
+    }
     default:
       return null;
   }
@@ -337,7 +362,7 @@ export function collectEvidence(source: string, payload: unknown): EvidenceValue
 
 const EPS = 1e-9;
 /** 证据为负时，文字前 12 个字里有这些词就算说清了方向 */
-const NEGATIVE_CUE = /跌|回撤|亏|跑输|落后|下滑|低于|下降|负/;
+const NEGATIVE_CUE = /跌|回撤|亏|跑输|落后|下滑|低于|下降|负|折价|减少|回落|缩水|少了/;
 
 /** 一个数与一条证据的差距与余量（在同一个量纲里）；类型不兼容时为 null */
 function compare(f: ProseFigure, e: EvidenceValue): { diff: number; tol: number } | null {
@@ -360,7 +385,8 @@ function compare(f: ProseFigure, e: EvidenceValue): { diff: number; tol: number 
       return { diff: Math.abs(fa - ea), tol: Math.max(half, 0.005 * ea) };
     case "count":
       if (!Number.isInteger(e.value) || e.kind === "money") return null;
-      return { diff: Math.abs(fa - ea), tol: 0 };
+      // 「4.8 万户」：按写出的精度留半个末位（0.5 × 10^(4−1) = 500 户）；不带万 / 亿的计数要一模一样
+      return { diff: Math.abs(fa - ea), tol: f.scale > 1 ? half * f.scale : 0 };
     default:
       return null;
   }
@@ -387,7 +413,9 @@ export function checkGrounding(text: string, evidence: readonly EvidenceValue[])
       const score = c.diff / (c.tol || 1);
       if (!nearest || score < nearest.score) nearest = { e, score };
     }
-    const near = nearest ? { path: nearest.e.path, value: nearest.e.value } : undefined;
+    const near = nearest
+      ? { path: nearest.e.path, value: nearest.e.value, kind: nearest.e.kind }
+      : undefined;
     const base = { raw: f.raw, value: f.value, kind: f.kind };
     if (!matched.length) {
       unverified.push({ ...base, reason: "no_match", ...(near ? { nearest: near } : {}) });
@@ -401,7 +429,7 @@ export function checkGrounding(text: string, evidence: readonly EvidenceValue[])
       unverified.push({
         ...base,
         reason: "sign_mismatch",
-        nearest: { path: e.path, value: e.value },
+        nearest: { path: e.path, value: e.value, kind: e.kind },
       });
     }
   }

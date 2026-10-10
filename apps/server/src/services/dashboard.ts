@@ -56,6 +56,8 @@ export interface DataStatus {
       failed: number;
       empty: number;
       index: Record<string, string>;
+      /** 夜间的点时事件数据集（S15）：由谁给的、几次请求、写了几行 */
+      datasets?: Record<string, { servedBy: string | null; requests: number; rows: number }>;
     } | null;
     /** 辅助数据（汇率、证券表、简称、财报）最近成功的日子与连续失败的晚数（D73） */
     soft?: Array<{
@@ -69,9 +71,64 @@ export interface DataStatus {
   maintenance?: string | null;
   /** 夜间更新写库期间回测暂停（D60）：reason = etl | check */
   computePaused?: { reason: string; since: number } | null;
+  /** 点时事件数据（S15，只有 A 股）：各数据集的同步状态与金丝雀、后台回填进度 */
+  events?: EventsStatus;
+  /** 事件因子（S15b）各自的数据起点与是否补算完成（提交回测前校验；编辑器、list_factors 显示） */
+  factorCoverage?: Record<string, { from: string | null; ready: boolean }>;
+  /** 事件因子列的补算进度（管理页「事件因子：补算中（x / y 年）」） */
+  eventFactors?: EventFactorsStatus;
   workerUp: boolean;
   /** 这个用户的跟踪最近一次结算失败的（D70；看板才有，按用户算） */
   settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
+}
+
+/** 一个点时事件数据集的同步状态（worker pit_sync + 软步骤连续失败晚数） */
+export interface EventDatasetStatus {
+  label: string;
+  backfillFrom: string | null;
+  /** 回填全部完成后才有：数据自哪天起 */
+  coveredFrom: string | null;
+  /** 两融、大宗：最后一个完整的数据日 */
+  windowThrough: string | null;
+  /** 最近一次成功同步的日子 */
+  syncedAt: string | null;
+  nightlySince: string | null;
+  lastOkAt: string | null;
+  /** ok | partial | canary_failed | failed | blocked */
+  lastStatus: string | null;
+  lastDetail: string | null;
+  canary: { status: string; source: string; at: string; detail: string } | null;
+  rows: number;
+  failingNights: number;
+}
+
+export interface EventFactorsStatus {
+  v: number;
+  sig: string;
+  complete: boolean;
+  doneYears: number;
+  totalYears: number;
+  /** S15 的历史回填完成了（四个数据集都有覆盖起点） */
+  backfillComplete?: boolean;
+}
+
+export interface EventsStatus {
+  datasets: Record<string, EventDatasetStatus>;
+  backfill: {
+    /** idle | queued | running */
+    status: string;
+    notBefore: number | null;
+    progress: Record<string, { done: number; total: number }>;
+    lastBatch: {
+      id: number;
+      startedAt: string | null;
+      finishedAt: string | null;
+      status: string | null;
+      note: string | null;
+      rows: number | null;
+      requests: number | null;
+    } | null;
+  };
 }
 
 /** 管理页「数据质量」卡（D74，worker /internal/data-quality） */
@@ -170,7 +227,37 @@ export async function overview(userId: string) {
   };
 }
 
-export async function dashboard(userId: string) {
+/**
+ * 看板给的数据状态：只留横幅用得到的（市场、截至日、数据版本、今天的状态、更新失败或等重跑、维护中、回测暂停）。
+ * 来源占比、金丝雀、软步骤、采集情况、回填批次这类诊断只给管理页（/api/admin/data）；
+ * 失败原因与维护说明的原文只给管理员（普通用户看到「失败」「维护中」）。
+ */
+export function dashboardDataStatus(d: DataStatus, admin: boolean): DataStatus {
+  return {
+    markets: d.markets.map((m) => ({
+      market: m.market,
+      asOf: m.asOf,
+      dataVersion: m.dataVersion,
+      lastEtl: m.lastEtl
+        ? {
+            status: m.lastEtl.status,
+            finishedAt: m.lastEtl.finishedAt,
+            error: admin ? m.lastEtl.error : null,
+            ...(m.lastEtl.attempt !== undefined ? { attempt: m.lastEtl.attempt } : {}),
+            ...(m.lastEtl.retryAt !== undefined ? { retryAt: m.lastEtl.retryAt } : {}),
+          }
+        : null,
+      ...(m.day ? { day: m.day } : {}),
+    })),
+    maintenance: d.maintenance ? (admin ? d.maintenance : "行情仓维护中") : null,
+    computePaused: d.computePaused
+      ? { reason: d.computePaused.reason, since: d.computePaused.since }
+      : null,
+    workerUp: d.workerUp,
+  };
+}
+
+export async function dashboard(userId: string, o: { admin?: boolean } = {}) {
   const { db } = env().app;
   const data = await dataStatus();
   const brief = db
@@ -212,7 +299,7 @@ export async function dashboard(userId: string) {
     trackings,
     signals: todaySignals(userId),
     recentRuns: listRuns(userId, { limit: 5 }),
-    data: { ...data, settleFailures },
+    data: { ...dashboardDataStatus(data, o.admin ?? false), settleFailures },
     presets: PRESETS.map((p) => ({
       id: p.id,
       market: p.market,

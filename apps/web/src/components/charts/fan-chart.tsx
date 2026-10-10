@@ -91,7 +91,7 @@ export function FanChart({ fan, height = 260 }: { fan: Fan; height?: number }) {
         boundaryGap: false,
         ...ax,
         splitLine: { show: false },
-        axisLabel: { ...ax.axisLabel, formatter: (d: string) => `${d} 天` },
+        axisLabel: { ...ax.axisLabel, formatter: (d: string) => `${d} 个交易日` },
       },
       yAxis: {
         type: "value",
@@ -120,7 +120,7 @@ export function FanChart({ fan, height = 260 }: { fan: Fan; height?: number }) {
         一年内最大回撤：中位数 <span className="tabular text-ink-2">{pct(fan.mdd.p50)}</span>
         ，较深的 5% 路径超过 <span className="tabular text-ink-2">{pct(fan.mdd.p5)}</span>
         。一年后净值低于起点的路径占{" "}
-        <span className="tabular text-ink-2">{pct(fan.probLoss, 0, false)}</span>。 深色带是 25–75
+        <span className="tabular text-ink-2">{pct(fan.probLoss, 0, false)}</span>。深色带是 25–75
         分位，浅色带是 5–95 分位，按绝对净值（不扣基准）。
         {fan.horizon < 243 && `回测不到一年，只画到 ${fan.horizon} 个交易日。`}
       </p>

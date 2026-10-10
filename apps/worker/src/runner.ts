@@ -4,7 +4,7 @@
  * - etl：夜间 ETL、结算、简报（并发 1，互不重叠）
  * 进度写回 jobs 表，server 读它推给前端。
  *
- * 行情仓写库期间不跑回测（D60）：etl / check 排队或在跑时 compute 道不认领；etl 道轮到 etl / check 时
+ * 行情仓写库期间不跑回测（D60）：etl / check / event_cols 排队或在跑时 compute 道不认领；etl 道轮到它们时
  * 先等正在跑的 compute 任务结束（compute 道这时已经不再认领，不会饿死）。行情仓在维护状态（还没升级）时两条道都不认领。
  *
  * 自动重跑（D73）：任务可以带 not_before（毫秒），没到时间不认领、也不挡回测；attempt 记第几次重跑。
@@ -15,6 +15,8 @@ import { backtestJob, sweepJob } from "./jobs/backtest.ts";
 import { briefJob } from "./jobs/brief.ts";
 import { checkJob } from "./jobs/check.ts";
 import { etlJob } from "./jobs/etl.ts";
+import { eventColsJob } from "./jobs/event-cols.ts";
+import { eventsJob } from "./jobs/events.ts";
 import { settleJob } from "./jobs/settle.ts";
 import { verifyJob } from "./jobs/verify.ts";
 
@@ -36,6 +38,10 @@ const HANDLERS: Record<string, { lane: "compute" | "etl"; run: Handler }> = {
   settle: { lane: "etl", run: settleJob },
   brief: { lane: "etl", run: briefJob },
   check: { lane: "etl", run: checkJob },
+  // 点时事件数据的后台分段回填（S15）：只写事件表、不开数据版本，不算写行情仓的任务（回测不读事件表）
+  events: { lane: "etl", run: eventsJob },
+  // 事件因子列按年补算（S15b）：改 factors_daily，算写行情仓的任务（WAREHOUSE_WRITERS），排队与运行时回测暂停
+  event_cols: { lane: "etl", run: eventColsJob },
 };
 
 const running = { compute: 0, etl: 0 };

@@ -140,6 +140,63 @@ describe("选股解释与个股证据的内部接口（D67）", () => {
     expect(v.same).toBe(true);
   });
 
+  it("证据版本（D97）：按版本生成与复核；没给版本时先按第 1 版试；两融与筹码明细只有 A 股", async () => {
+    const asOf = calendar[5]!;
+    const v1 = (await (
+      await req(`/internal/securities/600001/dossier?asOf=${asOf}&version=1`)
+    ).json()) as {
+      evidenceVersion: number;
+      hash: string;
+      items: Array<{ group: string }>;
+    };
+    expect(v1.evidenceVersion).toBe(1);
+    expect(v1.items.some((i) => i.group === "events")).toBe(false);
+    const v2 = (await (await req(`/internal/securities/600001/dossier?asOf=${asOf}`)).json()) as {
+      evidenceVersion: number;
+      factorKeys: string[];
+      options: object;
+      hash: string;
+      items: Array<{ group: string }>;
+    };
+    expect(v2.evidenceVersion).toBe(2);
+    expect(v2.items.some((i) => i.group === "events")).toBe(true);
+    const legacy = await (
+      await req("/internal/dossier/verify", { code: "600001.SH", asOf, hash: v1.hash })
+    ).json();
+    expect(legacy).toMatchObject({ same: true, matchedVersion: 1 });
+    const cur = await (
+      await req("/internal/dossier/verify", {
+        code: "600001.SH",
+        asOf,
+        hash: v2.hash,
+        evidenceVersion: 2,
+        factorKeys: v2.factorKeys,
+        options: v2.options,
+      })
+    ).json();
+    expect(cur).toMatchObject({ same: true, matchedVersion: 2 });
+    expect((await req(`/internal/securities/600001/dossier?asOf=${asOf}&version=7`)).status).toBe(
+      400,
+    );
+
+    const ev = await req(`/internal/securities/600001/events?asOf=${asOf}&datasets=lockups,blocks`);
+    expect(ev.status).toBe(200);
+    const body = (await ev.json()) as {
+      asOf: string;
+      lockups: unknown[];
+      margin: unknown[];
+      coverage: object;
+    };
+    expect(body).toMatchObject({ asOf, lockups: [], margin: [] });
+    expect(Object.keys(body.coverage)).toEqual(["lockups", "blocks"]);
+    await t.env.wh.run(
+      `INSERT INTO securities (code, market, name) VALUES ('00700.HK', 'HK', '腾讯')`,
+    );
+    const hk = await req(`/internal/securities/00700.HK/events`);
+    expect(hk.status).toBe(404);
+    expect(await hk.json()).toEqual({ error: "两融、股东户数、解禁、大宗交易目前只有 A 股" });
+  });
+
   it("决策日是周末：解释与证据都落到前一个交易日，结果和直接问周五一样", async () => {
     // 2026-03-08 是周日，前一个交易日是 3 月 6 日（周五）
     const ask = async (date: string) =>
@@ -154,7 +211,9 @@ describe("选股解释与个股证据的内部接口（D67）", () => {
     expect(sun).toEqual(fri);
     expect(sun.codes[0]).toMatchObject({ code: "600001.SH", passed: true, rank: 2 });
 
-    const d = (await (await req(`/internal/securities/600001.SH/dossier?asOf=2026-03-08`)).json()) as {
+    const d = (await (
+      await req(`/internal/securities/600001.SH/dossier?asOf=2026-03-08`)
+    ).json()) as {
       asOf: string;
       dataDate: string;
     };
@@ -212,7 +271,12 @@ describe("计划结果回看（D79）", () => {
       decisionDate: calendar[2],
       benchClose: null,
     }));
-    expect((await req("/internal/plan-outcomes", { market: "A", benchSym: "csi300_tr", items: many })).status).toBe(400);
-    expect((await req("/internal/plan-outcomes", { market: "A", benchSym: "x", items: [] })).status).toBe(400);
+    expect(
+      (await req("/internal/plan-outcomes", { market: "A", benchSym: "csi300_tr", items: many }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await req("/internal/plan-outcomes", { market: "A", benchSym: "x", items: [] })).status,
+    ).toBe(400);
   });
 });

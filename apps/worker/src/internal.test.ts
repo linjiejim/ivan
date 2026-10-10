@@ -127,6 +127,8 @@ describe("数据版本、写库暂停与采集情况", () => {
       failed: 1,
       empty: 0,
       index: { sse: "em" },
+      // 第 1 版台账没有事件数据集
+      datasets: {},
     });
     expect(body.markets.find((m) => m.market === "HK")!.sources).toBeNull();
   });

@@ -1,0 +1,7 @@
+{
+ "version": null,
+ "result": null,
+ "success": false,
+ "message": "NO_SUCH_COLUMN_X返回字段不存在",
+ "code": 9501
+}

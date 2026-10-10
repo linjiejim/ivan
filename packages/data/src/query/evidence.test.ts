@@ -167,7 +167,12 @@ describe("个股证据（D67）", () => {
     const b = await securityDossier(wh, SH, d);
     expect(b.hash).toBe(a.hash);
     expect(a.hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(await verifyDossier(wh, SH, d, a.hash)).toEqual({ same: true, hash: a.hash, changed: [] });
+    expect(await verifyDossier(wh, SH, d, a.hash)).toEqual({
+      same: true,
+      hash: a.hash,
+      matchedVersion: 2,
+      changed: [],
+    });
     await wh.run(`UPDATE bars_daily SET close = close + 1 WHERE code = $c AND date = $d::DATE`, {
       c: SH,
       d: a.dataDate,
@@ -196,7 +201,9 @@ describe("个股证据（D67）", () => {
     expect(item(x, "corp_action:2024-05-20")).toMatchObject({ value: "每股派现 0.5", ref: { src: "em", ver: 4 } });
     // 带策略时只取策略的因子（外加为真的风险标记）
     const s = await securityDossier(wh, SH, "2024-06-03", { factorKeys: ["pb"] });
-    expect(s.items.filter((i) => i.ref.table === "factors_daily").map((i) => i.key)).toEqual([
+    expect(
+      s.items.filter((i) => i.ref.table === "factors_daily" && i.group !== "events").map((i) => i.key),
+    ).toEqual([
       "pb",
       "flag_value_trap",
     ]);
@@ -237,5 +244,154 @@ describe("个股证据（D67）", () => {
       message: "这只股票那天还没有数据",
     });
     await expect(securityDossier(wh, "600999.SH", "2024-05-01")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("证据版本（D97）与「两融与筹码」组（证据第 2 版）", () => {
+  const D = "2024-05-20";
+  let v1Before: SecurityDossier;
+
+  beforeAll(async () => {
+    // 事件数据写进来之前算的第 1 版校验值（S07 时代存下的）
+    v1Before = await securityDossier(wh, SH, D, { version: 1 });
+    const i = calendar.indexOf(D);
+    await wh.run(
+      `UPDATE factors_daily SET margin_eligible = true, margin_ratio = 1.5, unlock_days = 12, unlock_ratio_30d = 3
+       WHERE code = $c`,
+      { c: SH },
+    );
+    await wh.run(
+      `INSERT INTO margin_daily (code, date, avail_date, rzye, float_mcap, src, ver, batch) VALUES
+       ($c, $d1::DATE, $d2::DATE, 1.723e10, 1e12, 'em', 7, 3),
+       ($c, $d2::DATE, $d3::DATE, 1.8e10, 1e12, 'em', NULL, 4)`,
+      { c: SH, d1: calendar[i - 1]!, d2: calendar[i]!, d3: calendar[i + 1]! },
+    );
+    await wh.run(
+      `INSERT INTO holder_counts (code, end_date, notice_date, avail_date, holder_num, first_seen, last_seen, gone_from, src, ver, batch) VALUES
+       ($c, DATE '2024-03-31', DATE '2024-04-20', DATE '2024-04-20', 48212, DATE '2024-04-20', DATE '2024-04-20', NULL, 'em', NULL, 2),
+       ($c, DATE '2024-06-30', DATE '2024-05-25', DATE '2024-05-25', 47000, DATE '2024-05-25', DATE '2024-05-25', NULL, 'em', NULL, 2)`,
+      { c: SH },
+    );
+    await wh.run(
+      `INSERT INTO lockups (code, free_date, type, unlock_shares, ratio_float, avail_date, avail_rule, first_seen, last_seen, gone_from, src, ver, batch) VALUES
+       ($c, DATE '2024-06-01', '定向增发机构配售股份', 2.5e7, 0.03, DATE '2024-05-28', 'notice_bound', DATE '2024-05-28', DATE '2024-05-28', NULL, 'em', NULL, 2),
+       ($c, DATE '2024-07-01', '首发原股东限售股份', 1e8, 0.1, DATE '2024-01-02', 'ipo_terms', DATE '2024-01-02', DATE '2024-01-02', NULL, 'em', NULL, 2),
+       ($c, DATE '2024-05-25', '股权激励限售股份', 1e6, 0.001, DATE '2024-04-01', 'notice_bound', DATE '2024-04-01', DATE '2024-04-01', DATE '2024-05-01', 'em', NULL, 2)`,
+      { c: SH },
+    );
+    await wh.run(
+      `INSERT INTO block_trades (code, trade_date, seq, avail_date, deal_price, close_price, premium, deal_volume, deal_amount, src, ver, batch) VALUES
+       ($c, $t::DATE, 1, $a::DATE, 9, 10, -0.1, 1e6, 9e6, 'em', NULL, 5),
+       ($c, $t::DATE, 2, $a::DATE, 10.2, 10, 0.02, 1e6, 1.02e7, 'em', NULL, 5),
+       ($c, $a::DATE, 1, $n::DATE, 9, 10, -0.1, 1e6, 9e6, 'em', NULL, 5)`,
+      { c: SH, t: calendar[i - 2]!, a: calendar[i - 1]!, n: calendar[i + 1]! },
+    );
+  });
+
+  it("新生成的是第 2 版：带 evidenceVersion、factorKeys、options，校验值覆盖它们", async () => {
+    const x = await securityDossier(wh, SH, D);
+    expect(x.evidenceVersion).toBe(2);
+    expect(x.options).toEqual({});
+    expect(x.factorKeys).toContain("pe_ttm");
+    const y = await securityDossier(wh, SH, D, { factorKeys: ["pb", "unlock_days"] });
+    // 事件因子不进普通因子集，统一在「两融与筹码」组
+    expect(y.factorKeys).toEqual(["pb"]);
+    expect(y.hash).not.toBe(x.hash);
+    await expect(securityDossier(wh, SH, D, { options: { trend: true } })).rejects.toMatchObject({ status: 400 });
+    await expect(securityDossier(wh, SH, D, { version: 9 })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("第 1 版按原样重新生成：没有事件组、没有 margin_eligible；写入事件数据之前存的校验值不给版本也能复核（matchedVersion 1）", async () => {
+    const v1 = await securityDossier(wh, SH, D, { version: 1, factorKeys: ["pb", "margin_eligible"] });
+    expect(v1.items.some((i) => i.group === "events")).toBe(false);
+    expect(v1.items.some((i) => i.key === "margin_eligible")).toBe(false);
+    const again = await securityDossier(wh, SH, D, { version: 1 });
+    expect(again.hash).toBe(v1Before.hash);
+    expect(again.items).toEqual(v1Before.items);
+    const r = await verifyDossier(wh, SH, D, v1Before.hash);
+    expect(r).toMatchObject({ same: true, matchedVersion: 1 });
+    // 给了版本就只按那一版
+    expect(await verifyDossier(wh, SH, D, v1Before.hash, { evidenceVersion: 2 })).toMatchObject({
+      same: false,
+      matchedVersion: null,
+    });
+    const v2 = await securityDossier(wh, SH, D);
+    expect(
+      await verifyDossier(wh, SH, D, v2.hash, {
+        evidenceVersion: 2,
+        factorKeys: v2.factorKeys,
+        options: v2.options,
+      }),
+    ).toMatchObject({ same: true, matchedVersion: 2 });
+  });
+
+  it("「两融与筹码」组：7 个事件因子 + 最近两融、户数、下一次解禁、近 20 日大宗，可得日都不晚于决策日，引用带 src、ver、batch", async () => {
+    const x = await securityDossier(wh, SH, D);
+    const ev = x.items.filter((i) => i.group === "events");
+    expect(ev.slice(0, 7).map((i) => i.key)).toEqual([
+      "margin_ratio",
+      "margin_chg_20d",
+      "margin_eligible",
+      "holder_num_qoq",
+      "unlock_days",
+      "unlock_ratio_30d",
+      "block_premium_20d",
+    ]);
+    expect(item(x, "margin_eligible")!.value).toBe(true);
+    for (const it of ev) expect(it.availDate <= x.asOf, it.key).toBe(true);
+    const i = calendar.indexOf(D);
+    // D 当天的两融数据 D+1 才可得：用的是前一天那条
+    expect(item(x, "margin.latest")).toMatchObject({
+      label: `融资余额（${calendar[i - 1]}）`,
+      unit: "亿",
+      availDate: D,
+      ref: { table: "margin_daily", src: "em", ver: 7, batch: 3 },
+    });
+    expect(item(x, "margin.latest")!.value).toBeCloseTo(172.3, 10);
+    // 6-30 截至的那期 5-25 才公告
+    expect(item(x, "holders.latest")).toMatchObject({
+      label: "股东户数（截至 2024-03-31，2024-04-20 公告）",
+      value: 48212,
+      unit: "户",
+      ref: { table: "holder_counts", batch: 2 },
+    });
+    // 6-1 那次 5-28 才可得；5-25 那次 5-1 撤下了：下一次已知的是 7-1 的首发
+    expect(item(x, "lockup.next")).toMatchObject({
+      label: "下一次已知解禁（2024-07-01，首发原股东限售股份）",
+      value: 10000,
+      unit: "万股",
+      note: "首发限售，上市时已知",
+    });
+    // 大宗：可得日在近 20 个交易日内的两笔（第三笔 D+1 才可得）
+    expect(item(x, "blocks.20d.count")!.value).toBe(2);
+    expect(item(x, "blocks.20d.amount")!.value).toBeCloseTo(0.192, 10);
+    expect(item(x, "blocks.20d.premium")!.value).toBeCloseTo(((-0.1 * 9e6 + 0.02 * 1.02e7) / 1.92e7) * 100, 10);
+
+    const later = await securityDossier(wh, SH, "2024-05-29");
+    expect(item(later, "lockup.next")).toMatchObject({
+      label: "下一次已知解禁（2024-06-01，定向增发机构配售股份）",
+      value: 2500,
+      note: "按解禁前 3 个交易日的提示性公告推算可得日",
+    });
+    expect(item(later, "holders.latest")!.label).toBe("股东户数（截至 2024-06-30，2024-05-25 公告）");
+  });
+
+  it("撤下之前仍算已知", async () => {
+    const x = await securityDossier(wh, SH, "2024-04-30");
+    expect(item(x, "lockup.next")!.label).toBe("下一次已知解禁（2024-05-25，股权激励限售股份）");
+  });
+
+  it("港股没有事件组", async () => {
+    const hk = await Warehouse.open(":memory:");
+    await seedSyntheticMarket(hk, {
+      market: "HK",
+      start: "2024-04-01",
+      days: 30,
+      stocks: [{ code: "00700.HK", name: "腾讯", close: () => 300, factors: () => ({ pe_ttm: 20 }) }],
+    });
+    const x = await securityDossier(hk, "00700.HK", "2024-05-01");
+    expect(x.evidenceVersion).toBe(2);
+    expect(x.items.some((i) => i.group === "events")).toBe(false);
+    hk.close();
   });
 });

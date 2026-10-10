@@ -2,7 +2,7 @@
  * 管理页（spec §10、§11）：用户与额度、邀请码、数据状态与手动触发任务、数据质量（D74）、今日用量、近 14 天 LLM 用量。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { todayCN } from "@ivan/core";
+import { PIT_DATASET_IDS, todayCN } from "@ivan/core";
 import { useState } from "react";
 import {
   IconBrief,
@@ -40,7 +40,11 @@ import {
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
 import {
+  canaryBadge,
+  canaryInfoText,
   captureLines,
+  eventDatasetLine,
+  eventsBackfillText,
   issueRuleText,
   openVersionText,
   qualitySentence,
@@ -49,9 +53,15 @@ import {
   sourcesLines,
   versionStatusBadge,
 } from "../lib/data-status.ts";
-import { dateTime, MARKET_TEXT, NA } from "../lib/format.ts";
+import { dateTime, eventFactorsText, MARKET_TEXT, NA } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { DataQuality, DataStatus } from "../lib/types.ts";
+import type {
+  DataQuality,
+  DataStatus,
+  EventFactorsStatus,
+  EventsEstimate,
+  EventsStatus,
+} from "../lib/types.ts";
 import { quotaPatch } from "../lib/verify.ts";
 
 interface AdminUser {
@@ -110,6 +120,8 @@ const JOB_TEXT: Record<string, string> = {
   sweep: "参数扫描",
   sweep_child: "扫描子任务",
   verify: "复核数据",
+  events: "补齐两融与筹码数据",
+  event_cols: "补算事件因子",
 };
 const STATUS: Record<string, { text: string; tone: "neutral" | "accent" | "warn" }> = {
   queued: { text: "排队中", tone: "neutral" },
@@ -321,6 +333,125 @@ export function DataQualityCard({ quality }: { quality: DataQuality | null }) {
   );
 }
 
+/** 「补齐历史数据」确认框：估算（4 个计数请求）+ 分段执行的说明；确认后排一个 events 任务 */
+function EventsBackfillDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const qc = useQueryClient();
+  const estimate = useQuery({
+    queryKey: ["admin-events-estimate"],
+    queryFn: () => api.get<EventsEstimate>("/api/admin/events/estimate"),
+    enabled: open,
+    staleTime: 3_600_000,
+  });
+  const start = useMutation({
+    mutationFn: () => api.post<{ jobId: string }>("/api/admin/events/backfill", {}),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-data"] });
+      close();
+    },
+  });
+  const close = () => {
+    start.reset();
+    onClose();
+  };
+  return (
+    <Modal
+      open={open}
+      onClose={close}
+      title="补齐两融与筹码的历史数据"
+      icon={IconData}
+      footer={
+        <>
+          <Button onClick={close}>取消</Button>
+          <Button variant="primary" loading={start.isPending} onClick={() => start.mutate()}>
+            开始补齐
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm text-ink-2">
+        <p>从 2013 年起补齐两融明细、股东户数、限售解禁与大宗交易，已经补过的部分会跳过。</p>
+        {estimate.isLoading ? (
+          <p className="text-muted">正在估算请求数…</p>
+        ) : estimate.data ? (
+          <ul className="space-y-0.5 text-xs">
+            {estimate.data.lines.map((l) => (
+              <li key={l}>{l}</li>
+            ))}
+          </ul>
+        ) : null}
+        <ErrorNote error={estimate.error} />
+        <Callout tone="neutral" icon={IconClock}>
+          后台分段执行，每段最多 10 分钟，16:30-21:00 暂停，不影响回测与夜间更新
+        </Callout>
+        <ErrorNote error={start.error} />
+      </div>
+    </Modal>
+  );
+}
+
+/** 数据卡里的「两融与筹码数据」（S15）：每个数据集的覆盖、数据日与接口自检，后台回填进度 */
+function EventsSection({
+  events,
+  eventFactors,
+  onBackfill,
+}: {
+  events: EventsStatus;
+  eventFactors?: EventFactorsStatus;
+  onBackfill: () => void;
+}) {
+  const running = eventsBackfillText(events.backfill);
+  // 事件因子列的按年补算（S15b）
+  const factorsLine = eventFactorsText(eventFactors);
+  return (
+    <div className="mt-4 rounded-lg bg-surface-2/70 px-4 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-muted">两融与筹码数据</div>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={IconRefresh}
+          disabled={!!running}
+          onClick={onBackfill}
+        >
+          补齐历史数据
+        </Button>
+      </div>
+      <ul className="mt-1 space-y-1 text-2xs text-ink-2">
+        {PIT_DATASET_IDS.map((id) => {
+          const d = events.datasets[id];
+          if (!d) return null;
+          const badge = canaryBadge(d.canary);
+          return (
+            <li key={id} className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+              <span>{eventDatasetLine(d)} · 接口</span>
+              {badge ? <Badge tone={badge.tone}>{badge.text}</Badge> : <span>--</span>}
+              <Info label={`${d.label}接口自检：说明`}>{canaryInfoText(d)}</Info>
+            </li>
+          );
+        })}
+      </ul>
+      {running && (
+        <div className="mt-2 inline-flex items-center gap-1 text-2xs text-accent">
+          <LiveDot />
+          {running}
+        </div>
+      )}
+      {factorsLine && (
+        <div className="mt-1.5 flex items-center gap-1 text-2xs text-ink-2">
+          {eventFactors && !eventFactors.complete && eventFactors.backfillComplete !== false && (
+            <LiveDot />
+          )}
+          {factorsLine}
+          <Info label="事件因子：说明">
+            7 个两融与筹码因子按年补算历史（每次一年、北京时间 16:30–21:00
+            不补），不重算已有因子；补完之前用到它们的回测会被拒绝，今天的选股可以先用。
+          </Info>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AdminPage() {
   usePageTitle("管理");
   const me = useMe();
@@ -352,6 +483,7 @@ export function AdminPage() {
   });
   const [note, setNote] = useState("");
   const [resetting, setResetting] = useState<AdminUser | null>(null);
+  const [eventsOpen, setEventsOpen] = useState(false);
   const createInvite = useMutation({
     mutationFn: () => api.post<{ code: string }>("/api/admin/invites", { note, days: 14 }),
     onSuccess: () => {
@@ -493,6 +625,14 @@ export function AdminPage() {
             );
           })}
         </div>
+        {status?.events && (
+          <EventsSection
+            events={status.events}
+            eventFactors={status.eventFactors}
+            onBackfill={() => setEventsOpen(true)}
+          />
+        )}
+        <EventsBackfillDialog open={eventsOpen} onClose={() => setEventsOpen(false)} />
         <ErrorNote error={trigger.error} />
         {data.data?.jobs.length ? (
           <DataTable className="mt-4" minWidth={560}>

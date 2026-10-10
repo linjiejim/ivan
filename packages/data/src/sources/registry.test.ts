@@ -2,7 +2,7 @@
  * 数据源回退链（D72）：默认按封禁风险排序；环境变量只能重排、不能增删；KLINE_SOURCE 是显式单一来源、不回退。
  */
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CHAINS, INVALID_CHAIN_TEXT, resolveChain } from "./registry.ts";
+import { DEFAULT_CHAINS, INVALID_CHAIN_TEXT, klineSingleSource, resolveChain } from "./registry.ts";
 
 const ids = (c: ReturnType<typeof resolveChain>) => c.adapters.map((a) => a.id);
 
@@ -65,5 +65,13 @@ describe("resolveChain", () => {
       "tencent",
     ]);
     expect(logs[0]).toContain(INVALID_CHAIN_TEXT);
+  });
+
+  it("KLINE_SOURCE 的判断去空格、不分大小写（ETF 全收益基准与日线、指数同一个判断）", () => {
+    expect(klineSingleSource({ KLINE_SOURCE: " Tencent " })).toBe("tencent");
+    expect(ids(resolveChain("bars", "A", { KLINE_SOURCE: " Tencent " }))).toEqual(["tencent"]);
+    expect(klineSingleSource({ KLINE_SOURCE: "EASTMONEY" })).toBe("eastmoney");
+    expect(klineSingleSource({ KLINE_SOURCE: "auto" })).toBeNull();
+    expect(klineSingleSource({})).toBeNull();
   });
 });

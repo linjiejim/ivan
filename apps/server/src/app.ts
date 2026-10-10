@@ -27,11 +27,12 @@ import { worker } from "./lib/worker-client.ts";
 import { dashboard, type DataQuality, dataStatus } from "./services/dashboard.ts";
 import { exportTracking, listEntries, planOn, verifyUser } from "./services/ledger.ts";
 import { getSnapshot, listSnapshots, planOutcomes } from "./services/plans.ts";
-import { securityEvidence } from "./services/evidence.ts";
+import { securityEvents, securityEvidence } from "./services/evidence.ts";
 import {
   compareRuns,
   enqueueBacktest,
   enqueueSweep,
+  eventFactorCoverage,
   getRun,
   getTrades,
   listRuns,
@@ -84,6 +85,10 @@ async function body<T = Record<string, unknown>>(c: Context): Promise<T> {
   }
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function inviteCode(): string {
   let s = "";
@@ -133,9 +138,18 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   });
 
   // ── 因子与模板 ──
-  app.get("/api/factors", (c) => {
+  /** 因子表；事件因子（S15b）带上数据集、数据起点与是否补算完成（worker 不在时 from / ready 为空） */
+  app.get("/api/factors", async (c) => {
     const m = (c.req.query("market") ?? "A") as Market;
-    return c.json({ market: m, factors: factorsForMarket(m === "HK" ? "HK" : "A") });
+    const cov = (await eventFactorCoverage())?.factorCoverage ?? null;
+    return c.json({
+      market: m,
+      factors: factorsForMarket(m === "HK" ? "HK" : "A").map((f) =>
+        f.dataset
+          ? { ...f, from: cov?.[f.key]?.from ?? null, ready: cov?.[f.key]?.ready ?? null }
+          : f,
+      ),
+    });
   });
   app.get("/api/presets", (c) =>
     c.json(PRESETS.map((p) => ({ ...p, describe: describeSpec(validateSpec(p.spec).spec!) }))),
@@ -225,7 +239,9 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   /** 复核数据：排一个 compute 任务，立即返回「排队中」 */
   app.post("/api/runs/:id/verify", (c) => c.json(verifyRun(user(c).id, c.req.param("id")), 202));
   /** 完整重跑：新建一次 kind = reproduce 的运行 */
-  app.post("/api/runs/:id/reproduce", (c) => c.json(reproduceRun(user(c).id, c.req.param("id"))));
+  app.post("/api/runs/:id/reproduce", async (c) =>
+    c.json(await reproduceRun(user(c).id, c.req.param("id"))),
+  );
   app.get("/api/runs/:id/trades", (c) =>
     c.json(
       getTrades(user(c).id, c.req.param("id"), {
@@ -313,6 +329,18 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       }),
     ),
   );
+  /**
+   * 个股的两融与筹码明细（S15b）：asOf 当时可得且没撤下的行；只有 A 股。计入数据查询额度。
+   * datasets=margin,holders,lockups,blocks 只取其中几组。
+   */
+  app.get("/api/securities/:code/events", async (c) =>
+    c.json(
+      await securityEvents(user(c).id, c.req.param("code"), {
+        asOf: c.req.query("asOf") || undefined,
+        datasets: (c.req.query("datasets") ?? "").split(",").filter(Boolean),
+      }),
+    ),
+  );
   app.get("/api/securities/:code", async (c) =>
     c.json(await worker.get(`/internal/securities/${encodeURIComponent(c.req.param("code"))}`)),
   );
@@ -370,7 +398,9 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   });
 
   // ── 看板 ──
-  app.get("/api/dashboard", async (c) => c.json(await dashboard(user(c).id)));
+  app.get("/api/dashboard", async (c) =>
+    c.json(await dashboard(user(c).id, { admin: user(c).role === "admin" })),
+  );
 
   // ── 信号集导入（CSV：date,code） ──
   app.get("/api/signals", (c) => {
@@ -474,7 +504,12 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   /** 逐人额度覆盖：只更新请求体里出现的项（不出现 = 不变，显式 null = 清掉覆盖、回到默认） */
   app.post("/api/admin/users/:id/quota", async (c) => {
     admin(c);
-    const b = await body<Record<string, unknown>>(c);
+    const b = await body<unknown>(c);
+    if (!isPlainObject(b)) throw new AppError(400, "请求体要是一个对象");
+    const exists = env()
+      .app.sqlite.prepare(`SELECT 1 FROM "user" WHERE id = ?`)
+      .get(c.req.param("id"));
+    if (!exists) throw new AppError(404, "用户不存在");
     const set: Partial<Record<QuotaKind, number | null>> = {};
     for (const k of QUOTA_KINDS) {
       if (!(k in b)) continue;
@@ -541,7 +576,9 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       jobs: db
         .select()
         .from(jobs)
-        .where(sql`${jobs.kind} IN ('etl', 'settle', 'brief', 'check', 'backfill')`)
+        .where(
+          sql`${jobs.kind} IN ('etl', 'settle', 'brief', 'check', 'backfill', 'events', 'event_cols')`,
+        )
         .orderBy(desc(jobs.createdAt))
         .limit(30)
         .all(),
@@ -553,6 +590,26 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
     const id = Number(c.req.param("id"));
     if (!Number.isInteger(id) || id <= 0) throw new AppError(400, "数据问题编号不对");
     return c.json(await worker.post(`/internal/data-issues/${id}/resolve`, {}));
+  });
+  /** 点时事件数据回填的估算（S15）：worker 发 4 个计数请求，按起点缓存 1 小时 */
+  app.get("/api/admin/events/estimate", async (c) => {
+    admin(c);
+    const since = c.req.query("since");
+    if (since && !isDateStr(since)) throw new AppError(400, "日期格式要是 YYYY-MM-DD");
+    return c.json(
+      await worker.get(
+        `/internal/events/estimate${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      ),
+    );
+  });
+  /** 排一次点时事件数据的后台分段回填（S15，D81）：已经有一个在排队或运行时 409 */
+  app.post("/api/admin/events/backfill", async (c) => {
+    admin(c);
+    const b = await body<unknown>(c).catch(() => ({}));
+    if (!isPlainObject(b)) throw new AppError(400, "请求体要是一个对象");
+    const r = await worker.post<{ jobId: string }>("/internal/events/backfill", b);
+    void worker.kick();
+    return c.json(r);
   });
   app.post("/api/admin/etl", async (c) => {
     admin(c);

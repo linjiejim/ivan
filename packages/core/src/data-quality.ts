@@ -1,9 +1,19 @@
 /**
  * 数据健康的叫法（D73、D74）：行情仓、管理页与模型摘要共用。
  */
+import { PIT_DATASETS, type PitDatasetId } from "./pit.ts";
 
 /** 「失败沿用旧数据」的辅助步骤 */
-export type SoftStep = "fx" | "securities" | "names_szse" | "names_em" | "fundamentals";
+export type SoftStep =
+  | "fx"
+  | "securities"
+  | "names_szse"
+  | "names_em"
+  | "fundamentals"
+  // 点时事件数据集（S15）：步骤名就是数据集名
+  | PitDatasetId
+  // 事件因子的夜间填充（S15b）：失败时保留已有的值，今天的新行留空
+  | "event_factors";
 
 export const SOFT_STEP_LABEL: Record<SoftStep, string> = {
   fx: "汇率",
@@ -11,6 +21,11 @@ export const SOFT_STEP_LABEL: Record<SoftStep, string> = {
   names_szse: "深交所简称变更",
   names_em: "沪市每日简称",
   fundamentals: "财报与股本",
+  margin: PIT_DATASETS.margin.label,
+  holders: PIT_DATASETS.holders.label,
+  lockups: PIT_DATASETS.lockups.label,
+  blocks: PIT_DATASETS.blocks.label,
+  event_factors: "事件因子",
 };
 
 /** 辅助步骤连续失败多少晚才报出来（管理页横幅、stale_fundamentals 提示） */
@@ -29,6 +44,11 @@ export const ISSUE_RULE_TEXT: Record<string, string> = {
   check_adj: "周检复权不一致",
   check_volume: "周检成交量不一致",
   caliber: "复权口径换算失败",
+  // 点时事件数据集（S15）
+  partial_exchange: "只拿到一个交易所的两融",
+  avail_moved: "公告日变了",
+  row_removed: "记录被撤下",
+  row_returned: "撤下的记录又出现了",
 };
 
 /** 行级来源代码在界面上的叫法（运行的「行情来源」一行；腾讯日 K 与腾讯报价合并成腾讯） */

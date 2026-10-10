@@ -53,7 +53,7 @@ describe("fetchWithChain", () => {
     expect(http.calls.some((c) => EM.test(c.url))).toBe(false);
     const ledger = new FetchLedger();
     ledger.record("600519.SH", r);
-    expect(ledger.toJSON()).toMatchObject({ v: 1, served: { tx: 1 }, fallbacks: 1, failed: 0 });
+    expect(ledger.toJSON()).toMatchObject({ v: 2, served: { tx: 1 }, fallbacks: 1, failed: 0, datasets: {} });
   });
 
   it("东财请求中途触发风控：同样换腾讯", async () => {

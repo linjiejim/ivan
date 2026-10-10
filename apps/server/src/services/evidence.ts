@@ -5,9 +5,17 @@
  * 带跟踪与日期、而那晚有计划快照时（D68），先给第 1 版计划里这只股票的记录（当晚用户看到的、存的是当时的因子值），
  * 证据卡只作补充，不再按现在的数据重新解释名次。
  */
-import { isDateStr, type StrategySpec, specFactorKeys, toCode } from "@ivan/core";
+import {
+  EVENTS_A_ONLY_TEXT,
+  isDateStr,
+  PIT_DATASET_IDS,
+  type PitDatasetId,
+  type StrategySpec,
+  specFactorKeys,
+  toCode,
+} from "@ivan/core";
 import { AppError } from "../lib/errors.ts";
-import { consume } from "../lib/quota.ts";
+import { consume, ensureQuota } from "../lib/quota.ts";
 import { worker } from "../lib/worker-client.ts";
 import { type PlanRecord, planRecordFor } from "./plans.ts";
 import { runSpecContext } from "./runs.ts";
@@ -16,7 +24,8 @@ import { trackingVersionId } from "./trackings.ts";
 
 /** worker 返回的证据条目（与 @ivan/data 的 EvidenceItem 同形） */
 export interface EvidenceItem {
-  group: "price" | "valuation" | "financial" | "status" | "quality";
+  /** events = 「两融与筹码」组（证据第 2 版，S15b） */
+  group: "price" | "valuation" | "financial" | "status" | "quality" | "events";
   key: string;
   label: string;
   value: number | string | boolean | null;
@@ -28,6 +37,8 @@ export interface EvidenceItem {
     key: Record<string, string | number>;
     src: string | null;
     ver: number | null;
+    /** 事件表的行写它的批次（pit_batches.id） */
+    batch?: number | null;
   };
   note?: string;
 }
@@ -39,7 +50,11 @@ export interface EvidenceCaveat {
 }
 
 export interface SecurityDossier {
+  /** 证据版本（D97）：1 = S07；2 = S15b 加「两融与筹码」组 */
   evidenceVersion: number;
+  /** 生成时用的因子集与选项（第 2 版起进校验值；复核时原样带回） */
+  factorKeys?: string[];
+  options?: Record<string, unknown>;
   code: string;
   name: string | null;
   market: "A" | "HK";
@@ -175,7 +190,10 @@ export async function securityEvidence(
   if (ctx && ctx.spec.market !== market) {
     throw new AppError(400, "这只股票和策略不在同一个市场");
   }
-  consume(userId, "analyses");
+  // 归属检查都在扣额度之前：给了 runId / versionId 时 strategyContext 不看 trackingId，这里单独查一次
+  if (q.trackingId) trackingVersionId(userId, q.trackingId);
+  // 先挡住超额的；额度等证据真的拿到了再扣（没这只股票、那天没数据、worker 不在都不扣）
+  ensureQuota(userId, "analyses");
 
   // 决策日：给了决策日就用；只给成交日时取交易日历上它的前一个交易日；都没给 = 最新的已提交数据日
   let decisionDate = q.decisionDate;
@@ -193,6 +211,7 @@ export async function securityEvidence(
   const dossier = await worker.get<SecurityDossier>(
     `/internal/securities/${encodeURIComponent(code)}/dossier?${params}`,
   );
+  consume(userId, "analyses");
 
   const caveats = [...dossier.caveats];
   // 跟踪那晚的计划快照（D68）：按决策日找第 1 版，只给成交日时也按计划日找
@@ -243,4 +262,90 @@ export async function securityEvidence(
     strategy,
     caveats,
   };
+}
+
+/** worker /internal/securities/:code/events 的结果（与 @ivan/data 的 SecurityEvents 同形） */
+export interface SecurityEventsView {
+  code: string;
+  name: string | null;
+  asOf: string;
+  dataVersion: { id: number | null; asOf: string | null };
+  margin: Array<{
+    date: string;
+    availDate: string;
+    financingAmount: number | null;
+    shortAmount: number | null;
+    marginRatio: number | null;
+  }>;
+  holders: Array<{
+    endDate: string;
+    noticeDate: string;
+    holderNum: number | null;
+    qoqPct: number | null;
+  }>;
+  lockups: Array<{
+    freeDate: string;
+    type: string;
+    unlockShares: number | null;
+    ratioFloatPct: number | null;
+    availDate: string;
+    availRule: string;
+  }>;
+  blocks: Array<{
+    tradeDate: string;
+    availDate: string;
+    dealPrice: number | null;
+    closePrice: number | null;
+    premiumPct: number | null;
+    dealAmount: number | null;
+    buyerInst: boolean | null;
+    sellerInst: boolean | null;
+  }>;
+  coverage: Record<
+    string,
+    {
+      label: string;
+      coveredFrom: string | null;
+      windowThrough: string | null;
+      syncedAt: string | null;
+      failingNights: number;
+    }
+  >;
+  caveats: Array<{ id: string; level: "info" | "warn"; title: string }>;
+  hash: string;
+}
+
+/**
+ * 个股的两融与筹码明细（S15b，D85）：只看 asOf 当时可得且没撤下的行。只有 A 股：港股直接回「只有 A 股」、不扣额度；
+ * 其余计入数据查询额度（analyses）。
+ */
+export async function securityEvents(
+  userId: string,
+  codeIn: string,
+  q: { asOf?: string; datasets?: readonly string[] } = {},
+): Promise<SecurityEventsView> {
+  let code: string;
+  try {
+    code = toCode(codeIn);
+  } catch {
+    throw new AppError(400, "代码不对");
+  }
+  if (q.asOf && !isDateStr(q.asOf)) throw new AppError(400, "日期格式要是 YYYY-MM-DD");
+  const datasets = q.datasets?.length ? [...new Set(q.datasets)] : [];
+  for (const d of datasets) {
+    if (!PIT_DATASET_IDS.includes(d as PitDatasetId)) {
+      throw new AppError(400, `数据集只能是 ${PIT_DATASET_IDS.join("、")}`);
+    }
+  }
+  if (code.endsWith(".HK")) throw new AppError(404, EVENTS_A_ONLY_TEXT);
+  ensureQuota(userId, "analyses");
+  const params = new URLSearchParams();
+  if (q.asOf) params.set("asOf", q.asOf);
+  if (datasets.length) params.set("datasets", datasets.join(","));
+  const r = await worker.get<SecurityEventsView>(
+    `/internal/securities/${encodeURIComponent(code)}/events?${params}`,
+  );
+  // 拿到了才扣（不认识的代码、worker 不在都不扣）
+  consume(userId, "analyses");
+  return r;
 }

@@ -2,7 +2,8 @@
  * Phase 0 数据探针：逐项确认免费数据源能给什么、给到哪年、缺什么，输出覆盖报告。
  * 探针只读外部接口，不写任何本地数据。结论写进 spec 的决策记录。
  */
-import { addDays, type DateStr, todayCN } from "@ivan/core";
+import { addDays, type DateStr, PIT_DATASET_IDS, PIT_DATASETS, todayCN } from "@ivan/core";
+import { availEnvOf } from "./etl/trading-days.ts";
 import { Http, mapLimit } from "./http.ts";
 import { centralParity } from "./sources/chinamoney.ts";
 import { csindexHistory } from "./sources/csindex.ts";
@@ -15,6 +16,7 @@ import {
 } from "./sources/exchanges.ts";
 import { emIndexKline, emKline } from "./sources/emkline.ts";
 import { indexKline, klineOnce, klineRange } from "./sources/tencent.ts";
+import { EASTMONEY_EVENTS, EM_EVENT_DEFS } from "./sources/adapters/eastmoney-events.ts";
 import type { SourceId } from "./sources/types.ts";
 
 /**
@@ -69,6 +71,7 @@ interface ProbeContext {
 }
 
 const d10 = (v: unknown) => String(v ?? "").slice(0, 10);
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 120);
 
 const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: CheckFn }> = [
   {
@@ -78,24 +81,29 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
     async run(http, ctx) {
       const facts: string[] = [];
       let ok = false;
+      // 每个来源单独兜住：东财被拦（这正是要诊断的情况）时也要看到腾讯那一行
       for (const src of PROBE_A_BARS_ORDER) {
-        if (src === "eastmoney") {
-          // 东财一次请求整段历史；涨跌额给出交易所参考前收（D31）
-          const early = await emKline(http, "600519.SH", "raw", "2001-01-01", "2003-12-31");
-          const all = await emKline(http, "600519.SH", "raw", "2016-01-01", ctx.today);
-          ok ||= early.bars.length > 0 && all.bars.length > 0;
-          facts.push(
-            `东财：600519 不复权最早 ${early.bars[0]?.date ?? "无"}（上市 2001-08-27）；2016 至今一次请求 ${all.bars.length} 条，带成交额与涨跌额`,
-          );
-        } else {
-          const hfq = await klineOnce(http, "600519.SH", "hfq", "2016-01-04", "2016-01-08");
-          const rawSame = await klineOnce(http, "600519.SH", "raw", "2016-01-04", "2016-01-08");
-          const cap = await klineOnce(http, "600519.SH", "raw", "2016-01-01", ctx.today);
-          const factor = hfq[0] && rawSame[0] ? hfq[0].close / rawSame[0].close : NaN;
-          ok ||= hfq.length > 0 && rawSame.length > 0;
-          facts.push(
-            `腾讯（备用）：2016-01-04 后复权收盘 ${hfq[0]?.close}，不复权 ${rawSame[0]?.close}，比值 ${factor.toFixed(4)}；单次最多 ${cap.length} 条，要按窗口分段`,
-          );
+        try {
+          if (src === "eastmoney") {
+            // 东财一次请求整段历史；涨跌额给出交易所参考前收（D31）
+            const early = await emKline(http, "600519.SH", "raw", "2001-01-01", "2003-12-31");
+            const all = await emKline(http, "600519.SH", "raw", "2016-01-01", ctx.today);
+            ok ||= early.bars.length > 0 && all.bars.length > 0;
+            facts.push(
+              `东财：600519 不复权最早 ${early.bars[0]?.date ?? "无"}（上市 2001-08-27）；2016 至今一次请求 ${all.bars.length} 条，带成交额与涨跌额`,
+            );
+          } else {
+            const hfq = await klineOnce(http, "600519.SH", "hfq", "2016-01-04", "2016-01-08");
+            const rawSame = await klineOnce(http, "600519.SH", "raw", "2016-01-04", "2016-01-08");
+            const cap = await klineOnce(http, "600519.SH", "raw", "2016-01-01", ctx.today);
+            const factor = hfq[0] && rawSame[0] ? hfq[0].close / rawSame[0].close : NaN;
+            ok ||= hfq.length > 0 && rawSame.length > 0;
+            facts.push(
+              `腾讯（备用）：2016-01-04 后复权收盘 ${hfq[0]?.close}，不复权 ${rawSame[0]?.close}，比值 ${factor.toFixed(4)}；单次最多 ${cap.length} 条，要按窗口分段`,
+            );
+          }
+        } catch (e) {
+          facts.push(`${src === "eastmoney" ? "东财" : "腾讯（备用）"}：出错（${errText(e)}）`);
         }
       }
       return {
@@ -496,13 +504,23 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
       const facts: string[] = [];
       let ok = 0;
       for (const [em] of syms) {
-        const bars = await emIndexKline(http, em, "2013-01-01", "2013-01-31");
-        if (bars.length) ok++;
-        facts.push(`东财 ${em}：2013-01 ${bars.length} 条`);
+        try {
+          const bars = await emIndexKline(http, em, "2013-01-01", "2013-01-31");
+          if (bars.length) ok++;
+          facts.push(`东财 ${em}：2013-01 ${bars.length} 条`);
+        } catch (e) {
+          facts.push(`东财 ${em}：出错（${errText(e)}）`);
+        }
       }
-      const backup = await indexKline(http, syms[0]![1], "2013-01-01", "2013-01-31");
-      facts.push(`腾讯（备用）${syms[0]![1]}：2013-01 ${backup.length} 条`);
-      return { status: ok === syms.length ? "ok" : "warn", facts };
+      let backupOk = false;
+      try {
+        const backup = await indexKline(http, syms[0]![1], "2013-01-01", "2013-01-31");
+        backupOk = backup.length > 0;
+        facts.push(`腾讯（备用）${syms[0]![1]}：2013-01 ${backup.length} 条`);
+      } catch (e) {
+        facts.push(`腾讯（备用）${syms[0]![1]}：出错（${errText(e)}）`);
+      }
+      return { status: ok === syms.length ? "ok" : ok || backupOk ? "warn" : "fail", facts };
     },
   },
   {
@@ -576,6 +594,25 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
       };
     },
   },
+  // 点时事件数据（S15，D82）：每个报表跑一次夜间用的金丝雀（同一份列常量、取前几行、单位自检）
+  ...PIT_DATASET_IDS.map((id) => ({
+    id: `em.events.${id}`,
+    area: "A 股" as const,
+    title: `东财事件数据金丝雀：${PIT_DATASETS[id].label}（${EM_EVENT_DEFS[id].report}）`,
+    async run(http: Http, ctx: ProbeContext) {
+      // 探针不读行情仓：上一个交易日按休市日表推
+      const prevTd = availEnvOf(ctx.today, [], new Map()).prevTd(ctx.today);
+      const c = await EASTMONEY_EVENTS[id]!.canary({ http, today: ctx.today, log: () => {} }, ctx.today, prevTd);
+      const ok = c.status === "ok" || c.status === "empty";
+      return {
+        status: (c.status === "ok" ? "ok" : ok ? "warn" : "fail") as ProbeStatus,
+        facts: [`金丝雀 ${c.status}：${c.detail}`, `只请求 ${EM_EVENT_DEFS[id].columns.join(",")}`],
+        conclusion: ok
+          ? "字段与单位与 2026-10-05 实测一致，夜间可以照常同步"
+          : "这个数据集每晚会失败就关（不删不写）；先核对报表字段与单位再改 eastmoney-events.ts",
+      };
+    },
+  })),
   {
     id: "throughput",
     area: "吞吐",
@@ -616,6 +653,17 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
     },
   },
 ];
+
+/** 测试用：单独跑一项检查（不联网的 FakeHttp 传进来） */
+export async function runProbeCheckForTest(
+  id: string,
+  http: Http,
+  ctx: ProbeContext,
+): Promise<Omit<ProbeCheck, "id" | "area" | "title" | "ms">> {
+  const c = CHECKS.find((x) => x.id === id);
+  if (!c) throw new Error(`没有检查 ${id}`);
+  return c.run(http, ctx);
+}
 
 export async function runProbe(onProgress?: (c: ProbeCheck) => void): Promise<ProbeReport> {
   const http = probeHttp();

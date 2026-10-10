@@ -68,10 +68,7 @@
       "indexes": {
         "briefs_user_date": {
           "name": "briefs_user_date",
-          "columns": [
-            "user_id",
-            "date"
-          ],
+          "columns": ["user_id", "date"],
           "isUnique": true
         }
       },
@@ -173,9 +170,7 @@
       "indexes": {
         "drafts_user": {
           "name": "drafts_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -248,9 +243,7 @@
       "indexes": {
         "invites_code": {
           "name": "invites_code",
-          "columns": [
-            "code"
-          ],
+          "columns": ["code"],
           "isUnique": true
         }
       },
@@ -353,17 +346,12 @@
       "indexes": {
         "jobs_status": {
           "name": "jobs_status",
-          "columns": [
-            "status",
-            "created_at"
-          ],
+          "columns": ["status", "created_at"],
           "isUnique": false
         },
         "jobs_user": {
           "name": "jobs_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -477,19 +465,12 @@
       "indexes": {
         "ledger_user_seq": {
           "name": "ledger_user_seq",
-          "columns": [
-            "user_id",
-            "seq"
-          ],
+          "columns": ["user_id", "seq"],
           "isUnique": true
         },
         "ledger_subject": {
           "name": "ledger_subject",
-          "columns": [
-            "subject_type",
-            "subject_id",
-            "as_of"
-          ],
+          "columns": ["subject_type", "subject_id", "as_of"],
           "isUnique": false
         }
       },
@@ -548,10 +529,7 @@
       "indexes": {
         "messages_thread": {
           "name": "messages_thread",
-          "columns": [
-            "thread_id",
-            "created_at"
-          ],
+          "columns": ["thread_id", "created_at"],
           "isUnique": false
         }
       },
@@ -687,10 +665,7 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "plan_items_snapshot_id_seq_pk": {
-          "columns": [
-            "snapshot_id",
-            "seq"
-          ],
+          "columns": ["snapshot_id", "seq"],
           "name": "plan_items_snapshot_id_seq_pk"
         }
       },
@@ -922,18 +897,12 @@
       "indexes": {
         "plan_snapshots_edition": {
           "name": "plan_snapshots_edition",
-          "columns": [
-            "tracking_id",
-            "decision_date",
-            "edition"
-          ],
+          "columns": ["tracking_id", "decision_date", "edition"],
           "isUnique": true
         },
         "plan_snapshots_user": {
           "name": "plan_snapshots_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -1054,20 +1023,14 @@
       "indexes": {
         "run_trades_code": {
           "name": "run_trades_code",
-          "columns": [
-            "run_id",
-            "code"
-          ],
+          "columns": ["run_id", "code"],
           "isUnique": false
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "run_trades_run_id_seq_pk": {
-          "columns": [
-            "run_id",
-            "seq"
-          ],
+          "columns": ["run_id", "seq"],
           "name": "run_trades_run_id_seq_pk"
         }
       },
@@ -1294,23 +1257,17 @@
       "indexes": {
         "runs_user": {
           "name": "runs_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         },
         "runs_strategy": {
           "name": "runs_strategy",
-          "columns": [
-            "strategy_id"
-          ],
+          "columns": ["strategy_id"],
           "isUnique": false
         },
         "runs_card_hash": {
           "name": "runs_card_hash",
-          "columns": [
-            "card_hash"
-          ],
+          "columns": ["card_hash"],
           "isUnique": false
         }
       },
@@ -1445,9 +1402,7 @@
       "indexes": {
         "strategies_user": {
           "name": "strategies_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -1521,10 +1476,7 @@
       "indexes": {
         "versions_strategy_n": {
           "name": "versions_strategy_n",
-          "columns": [
-            "strategy_id",
-            "n"
-          ],
+          "columns": ["strategy_id", "n"],
           "isUnique": true
         }
       },
@@ -1584,9 +1536,7 @@
       "indexes": {
         "threads_user": {
           "name": "threads_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -1645,10 +1595,7 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "tracking_days_tracking_id_date_pk": {
-          "columns": [
-            "tracking_id",
-            "date"
-          ],
+          "columns": ["tracking_id", "date"],
           "name": "tracking_days_tracking_id_date_pk"
         }
       },
@@ -1711,9 +1658,7 @@
       "indexes": {
         "tracking_orders_t": {
           "name": "tracking_orders_t",
-          "columns": [
-            "tracking_id"
-          ],
+          "columns": ["tracking_id"],
           "isUnique": false
         }
       },
@@ -1821,11 +1766,7 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "tracking_trades_tracking_id_date_seq_pk": {
-          "columns": [
-            "tracking_id",
-            "date",
-            "seq"
-          ],
+          "columns": ["tracking_id", "date", "seq"],
           "name": "tracking_trades_tracking_id_date_seq_pk"
         }
       },
@@ -1961,9 +1902,7 @@
       "indexes": {
         "trackings_user": {
           "name": "trackings_user",
-          "columns": [
-            "user_id"
-          ],
+          "columns": ["user_id"],
           "isUnique": false
         }
       },
@@ -2034,10 +1973,7 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "usage_daily_user_id_day_pk": {
-          "columns": [
-            "user_id",
-            "day"
-          ],
+          "columns": ["user_id", "day"],
           "name": "usage_daily_user_id_day_pk"
         }
       },

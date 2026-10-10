@@ -20,10 +20,13 @@ async function recentCompleteness(
   wh: Warehouse,
   market: string,
   limit = 20,
+  o: { nightsOnly?: boolean } = {},
 ): Promise<Array<{ id: number; status: string; c: StoredCompleteness }>> {
+  // nightsOnly：不要周检的版本（只记了事件数据补扫，不是一晚的日线），免得占掉 LIMIT 的名额
   const rows = await wh.all<{ id: number; status: string; c: string; d: string | null }>(
     `SELECT id, status, completeness AS c, started_at::DATE::VARCHAR AS d FROM data_versions
      WHERE market = $m AND status IN ('ok', 'incomplete') AND completeness IS NOT NULL
+       ${o.nightsOnly ? "AND coalesce(kind, '') <> 'check'" : ""}
      ORDER BY id DESC LIMIT ${Math.max(1, Math.floor(limit))}`,
     { m: market },
   );
@@ -125,18 +128,21 @@ export async function dataQuality(wh: Warehouse, days = 7): Promise<DataQuality>
   const topCodes = await wh.all<{ code: string; name: string | null; n: number }>(
     `SELECT i.code, any_value(s.name) AS name, count(*)::INTEGER AS n
      FROM data_issues i LEFT JOIN securities s ON s.code = i.code
-     WHERE i.created_at >= ${since}
+     WHERE i.created_at >= ${since} AND i.code IS NOT NULL
      GROUP BY i.code ORDER BY n DESC, i.code LIMIT 10`,
   );
   const open = await wh.all<DataIssueRow>(
-    `SELECT i.id, i.code, s.name, i.date::VARCHAR AS date, i.rule, i.severity, i.detail
+    // 两融没到齐（partial_exchange）是整天的问题，没有代码：写 --
+    `SELECT i.id, coalesce(i.code, '--') AS code, s.name, i.date::VARCHAR AS date, i.rule, i.severity, i.detail
      FROM data_issues i LEFT JOIN securities s ON s.code = i.code
      WHERE i.resolved_ver IS NULL AND i.resolved_by IS NULL
      ORDER BY i.id DESC LIMIT 50`,
   );
   const lastVersions: DataQuality["lastVersions"] = [];
   for (const m of ["A", "HK"]) {
-    for (const v of await recentCompleteness(wh, m, 5)) {
+    for (const v of await recentCompleteness(wh, m, 5, { nightsOnly: true })) {
+      // 周检的版本只记了事件数据补扫（S15），不是一晚的日线
+      if (v.c.expected === undefined) continue;
       lastVersions.push({
         id: v.id,
         market: m,
@@ -145,7 +151,9 @@ export async function dataQuality(wh: Warehouse, days = 7): Promise<DataQuality>
         expected: v.c.expected ?? null,
         updated: v.c.updated ?? null,
         noTrade: v.c.noTrade ?? null,
-        missing: v.c.missing?.length ?? 0,
+        // 存下的缺失名单最多 200 只：按原因计数加总才是真实的只数
+        missing:
+          Object.values(v.c.missingReasons ?? {}).reduce((a, b) => a + b, 0) || (v.c.missing?.length ?? 0),
         missingCritical: v.c.missingCritical?.length ?? 0,
         accepted: v.c.accepted?.length ?? 0,
         reasons: v.c.reasons ?? [],
@@ -170,7 +178,7 @@ export async function resolveDataIssue(
   id: number,
 ): Promise<{ id: number; resolvedVer: number | null; resolvedBy: string } | null> {
   return wh.exclusive(async () => {
-    const row = await wh.one<{ code: string; resolved_ver: number | null; resolved_by: string | null }>(
+    const row = await wh.one<{ code: string | null; resolved_ver: number | null; resolved_by: string | null }>(
       `SELECT code, resolved_ver, resolved_by FROM data_issues WHERE id = $id`,
       { id },
     );
@@ -178,7 +186,8 @@ export async function resolveDataIssue(
     if (row.resolved_by) {
       return { id, resolvedVer: row.resolved_ver, resolvedBy: row.resolved_by };
     }
-    const market: Market = row.code.endsWith(".HK") ? "HK" : "A";
+    // 点时事件数据（S15）的问题只有 A 股，两融没到齐的那条没有代码
+    const market: Market = (row.code ?? "").endsWith(".HK") ? "HK" : "A";
     // 当前提交的版本（与 latestDataVersion 同一口径；这里不引它，免得和 backtest.ts 互相引用）
     const ver =
       (await wh.scalar<number>(

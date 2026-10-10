@@ -8,6 +8,7 @@
  * - 每家都被封 → 抛最早解封时间的 BlockedError，现有的等解封逻辑照常工作；
  * - 其余（有报错）→ 抛「… 所有数据源都失败：…」，带上每家的尝试。
  */
+import type { PitDatasetId } from "@ivan/core";
 import { BlockedError, type HttpLike } from "../http.ts";
 import type { ResolvedChain } from "./registry.ts";
 import { type Capability, type SourceAdapter, type SourceId, type SrcCode, srcCode } from "./types.ts";
@@ -119,9 +120,19 @@ export interface LedgerFailure {
   attempts?: Attempt[];
 }
 
-/** data_versions.sources 的内容（第 1 版） */
+/** 一个点时事件数据集这一晚由谁给的、几次请求、写了几行（S15，只在夜间记） */
+export interface DatasetLedger {
+  servedBy: SrcCode | null;
+  requests: number;
+  rows: number;
+}
+
+/**
+ * data_versions.sources 的内容。第 1 版（S12）；第 2 版（S15）加 datasets（夜间的点时事件数据集），其余不变，
+ * 读的一方（lastFetchSources）两版都认。
+ */
 export interface SourcesLedger {
-  v: 1;
+  v: 2;
   /** 各来源最终服务的股票数（同一只股票被重拉时以最后一次为准） */
   served: Partial<Record<SrcCode, number>>;
   /** 首选来源没给、换下一家才拿到的次数 */
@@ -134,6 +145,8 @@ export interface SourcesLedger {
   failures: LedgerFailure[];
   /** 各指数这次由哪家给的 */
   index: Record<string, SrcCode>;
+  /** 点时事件数据集（S15） */
+  datasets: Partial<Record<PitDatasetId, DatasetLedger>>;
 }
 
 export const LEDGER_FAILURE_CAP = 50;
@@ -145,6 +158,7 @@ export class FetchLedger {
   private readonly failedCodes = new Set<string>();
   private readonly failures: LedgerFailure[] = [];
   private readonly index: Record<string, SrcCode> = {};
+  private readonly datasets: Partial<Record<PitDatasetId, DatasetLedger>> = {};
   private fallbacks = 0;
 
   /** 一只股票沿链取到了（cap 决定行级来源代码） */
@@ -178,17 +192,27 @@ export class FetchLedger {
     if (!r.empty) this.index[sym] = srcCode(r.servedBy, "index");
   }
 
+  /** 一个点时事件数据集这一晚的结果（夜间同步记；后台回填不记） */
+  recordDataset(id: PitDatasetId, r: { servedBy: SourceId | null; requests: number; rows: number }): void {
+    this.datasets[id] = {
+      servedBy: r.servedBy ? srcCode(r.servedBy, "events") : null,
+      requests: r.requests,
+      rows: r.rows,
+    };
+  }
+
   toJSON(): SourcesLedger {
     const served: Partial<Record<SrcCode, number>> = {};
     for (const src of this.bySrc.values()) served[src] = (served[src] ?? 0) + 1;
     return {
-      v: 1,
+      v: 2,
       served,
       fallbacks: this.fallbacks,
       empty: this.emptyCodes.size,
       failed: this.failedCodes.size,
       failures: [...this.failures],
       index: { ...this.index },
+      datasets: { ...this.datasets },
     };
   }
 }

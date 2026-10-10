@@ -75,6 +75,17 @@ export async function markDone(wh: Warehouse, task: string, key: string, detail 
   );
 }
 
+/**
+ * 写进去了但不算完成（两融只拿到一个交易所，D81）：之后的回填照样重取；回填完成判断里「done 或 partial」都算覆盖。
+ */
+export async function markPartial(wh: Warehouse, task: string, key: string, detail = ""): Promise<void> {
+  await wh.run(
+    `INSERT OR REPLACE INTO etl_progress (task, key, status, detail, updated_at)
+     VALUES ($t, $k, 'partial', $d, current_timestamp)`,
+    { t: task, k: key, d: detail },
+  );
+}
+
 export async function markFailed(wh: Warehouse, task: string, key: string, err: string): Promise<void> {
   await wh.run(
     `INSERT OR REPLACE INTO etl_progress (task, key, status, detail, updated_at)

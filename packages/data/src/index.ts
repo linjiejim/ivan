@@ -8,12 +8,14 @@ export * as csindex from "./sources/csindex.ts";
 export * as chinamoney from "./sources/chinamoney.ts";
 export {
   MAINTENANCE_V3,
+  MAINTENANCE_V5,
   Warehouse,
   sqlCodeList,
   sqlDateList,
   type WarehouseOptions,
 } from "./warehouse/db.ts";
 export {
+  DOWN_TO_V4_SQL,
   FACTOR_COLUMNS,
   PROVENANCE_TABLES,
   SCHEMA_VERSION,
@@ -34,8 +36,45 @@ export {
   type DataVersionKind,
   type DataVersionStatus,
   DEFAULT_SINCE,
+  runPitSyncs,
   weeklyCheck,
 } from "./etl/pipeline.ts";
+export {
+  estimatePitBackfill,
+  finishPitBatch,
+  MARGIN_PARTIAL_SESSIONS,
+  openPitBatch,
+  pitBackfillProgress,
+  PIT_DEFAULT_SINCE,
+  PIT_SECONDS_PER_REQUEST,
+  type PitDatasetStatus,
+  pitDatasetStatus,
+  type PitEstimate,
+  type PitMode,
+  type PitSource,
+  type PitSyncOptions,
+  type PitSyncResult,
+  syncPitDataset,
+} from "./etl/pit-runner.ts";
+export {
+  BLOCKS,
+  HOLDERS,
+  LOCKUPS,
+  lockupRuleDate,
+  MARGIN,
+  monthChunks,
+  PIT_DATASET_SPECS,
+  type PitDataset,
+  sequenceBlocks,
+  yearChunks,
+} from "./etl/datasets.ts";
+export { type AvailBasis, type AvailEnv, availEnvOf, buildAvailEnv } from "./etl/trading-days.ts";
+export {
+  assertColumns,
+  CANARY_SAMPLE_ROWS,
+  EM_EVENT_DEFS,
+  GLOBAL_FORBIDDEN_RE,
+} from "./sources/adapters/eastmoney-events.ts";
 export {
   ATTR_LABEL,
   type AttrCapture,
@@ -48,6 +87,24 @@ export {
   upsertSnapshot,
 } from "./etl/snapshots.ts";
 export { computeFactors } from "./etl/factors.ts";
+export {
+  eventFactorSelect,
+  type EventSyncState,
+  type EventTarget,
+  fillEventColumns,
+  loadEventSyncState,
+} from "./compute/event-factors.ts";
+export {
+  backfillEventColumns,
+  type EventColumnsResult,
+  type EventColumnsStatus,
+  eventColsTask,
+  eventColumnsStatus,
+  type EventFactorsMeta,
+  EVENT_FACTORS_META,
+  eventSig,
+  readEventFactorsMeta,
+} from "./etl/event-columns.ts";
 export {
   fillProvisionalTr,
   INDEXES,
@@ -63,8 +120,10 @@ export {
   ADAPTERS,
   chainOf,
   DEFAULT_CHAINS,
+  DEFAULT_EVENT_CHAINS,
   INVALID_CHAIN_TEXT,
   resolveChain,
+  resolveEventChain,
   type ResolvedChain,
 } from "./sources/registry.ts";
 export {
@@ -72,6 +131,7 @@ export {
   attemptsOf,
   ChainError,
   type ChainResult,
+  type DatasetLedger,
   FetchLedger,
   fetchWithChain,
   type LedgerFailure,
@@ -114,11 +174,14 @@ export {
 } from "./query/explain.ts";
 export {
   DEFAULT_EVIDENCE_FACTORS,
+  dossierHash,
   type EvidenceCaveat,
   EvidenceError,
   type EvidenceGroup,
   type EvidenceItem,
+  type EvidenceOptions,
   EVIDENCE_VERSION,
+  EVIDENCE_VERSIONS,
   type SecurityDossier,
   securityDossier,
   verifyDossier,
@@ -135,6 +198,17 @@ export {
   lastFetchSources,
   latestDataVersion,
 } from "./query/backtest.ts";
+export {
+  type BlockRowView,
+  type EventCoverage,
+  EVENTS_A_ONLY_TEXT,
+  type HolderRowView,
+  type LockupRowView,
+  type MarginRowView,
+  type SecurityEvents,
+  securityEvents,
+} from "./query/events.ts";
+export { eventCoverage, type EventCoverageResult, eventFactorsUsed } from "./query/event-coverage.ts";
 export {
   BENCH_MISMATCH,
   benchFirstDate,
@@ -154,6 +228,7 @@ export {
   assessCompleteness,
   type Completeness,
   type CompletenessInput,
+  type DatasetCompleteness,
   IncompleteDataError,
   type MissingReason,
   missingThreshold,

@@ -51,7 +51,11 @@ beforeEach(async () => {
 });
 afterEach(() => t.cleanup());
 
-function seedRun(app: AppDbHandle, o: { kind?: string; params?: Record<string, unknown> } = {}) {
+function seedRun(
+  app: AppDbHandle,
+  o: { kind?: string; params?: Record<string, unknown>; spec?: typeof spec } = {},
+) {
+  const sp = o.spec ?? spec;
   const strategyId = newId("s_");
   const versionId = newId("v_");
   const runId = newId("r_");
@@ -60,7 +64,7 @@ function seedRun(app: AppDbHandle, o: { kind?: string; params?: Record<string, u
     .values({
       id: strategyId,
       userId: "u_test",
-      name: spec.name,
+      name: sp.name,
       market: "A",
       currentVersionId: versionId,
     })
@@ -71,8 +75,8 @@ function seedRun(app: AppDbHandle, o: { kind?: string; params?: Record<string, u
       id: versionId,
       strategyId,
       n: 1,
-      spec: spec as unknown as Record<string, unknown>,
-      specHash: specHashOf(spec),
+      spec: sp as unknown as Record<string, unknown>,
+      specHash: specHashOf(sp),
     })
     .run();
   app.db
@@ -460,6 +464,54 @@ describe("完整重跑（kind = reproduce）", () => {
   });
 });
 
+describe("早于运行卡的旧运行（引擎 1.1.0 存的结果）", () => {
+  it("原运行收尾时有待执行的卖单、存档里没有预估字段：完整重跑仍判逐笔一致（原因 none）", async () => {
+    const sp = StrategySpecSchema.parse({ ...spec, exits: { maxHoldDays: 3 } });
+    const { runId } = seedRun(t.env.app, {
+      params: { exec: undefined, end: "2025-04-04" },
+      spec: sp,
+    });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    // 假装是 1.1.0 存的：final.pending 只有 {code, name, side, reason}，没有运行卡
+    const final = runOf(runId).final as { pending: Array<Record<string, unknown>> };
+    expect(final.pending.length).toBeGreaterThan(0);
+    expect(final.pending[0]).toHaveProperty("estPrice");
+    const old = {
+      ...final,
+      pending: final.pending.map(({ code, name, side, reason }) => ({ code, name, side, reason })),
+    };
+    t.env.app.db
+      .update(runs)
+      .set({ card: null, cardHash: null, inputHash: null, engineVersion: "1.1.0", final: old })
+      .where(eq(runs.id, runId))
+      .run();
+    const reproId = seedReproduce(runId);
+    await backtestJob(fakeJobContext("backtest", { runId: reproId }));
+    expect(runOf(runId).verify).toMatchObject({
+      sameResult: true,
+      reportSame: true,
+      cause: "none",
+    });
+    // 真的不一样（成交价改了）仍然判得出来
+    const { runId: other } = seedRun(t.env.app, {
+      params: { exec: undefined, end: "2025-04-04" },
+      spec: sp,
+    });
+    await backtestJob(fakeJobContext("backtest", { runId: other }));
+    t.env.app.db
+      .update(runs)
+      .set({ card: null, cardHash: null, inputHash: null, engineVersion: "1.1.0" })
+      .where(eq(runs.id, other))
+      .run();
+    t.env.app.sqlite
+      .prepare(`UPDATE run_trades SET price = price + 1 WHERE run_id = ? AND seq = 0`)
+      .run(other);
+    const repro2 = seedReproduce(other);
+    await backtestJob(fakeJobContext("backtest", { runId: repro2 }));
+    expect(runOf(other).verify).toMatchObject({ sameResult: false });
+  });
+});
+
 describe("可信度（D65）", () => {
   const v2 = { exec: defaultExec("A") };
   const seedOf = (inputHash: string) =>
@@ -538,6 +590,17 @@ describe("可信度（D65）", () => {
     expect(checks.some((c) => c.id === "low_confidence" || c.id === "optimistic_drawdown")).toBe(
       false,
     );
+  });
+
+  it("第 2 版口径但日收益不到 60 个：没有区间，运行卡也不记种子", async () => {
+    const { runId } = seedRun(t.env.app, {
+      params: { ...v2, start: "2025-02-03", end: "2025-03-14" },
+    });
+    await backtestJob(fakeJobContext("backtest", { runId }));
+    const r = runOf(runId);
+    expect(r.status).toBe("done");
+    expect(r.validation).toBeNull();
+    expect((r.card as unknown as RunCard).seeds.validation).toBeNull();
   });
 
   it("扫描的子回测也算可信度，试错次数按服务端给每个取值算好的存", async () => {

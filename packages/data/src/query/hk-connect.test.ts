@@ -110,6 +110,16 @@ describe("港股通名单", () => {
     expect(plain.input.dataCaveats!.map((x) => x.id)).not.toContain("hk_connect_approx");
   });
 
+  it("起点正好是首次记录日：第一次决策在前一个交易日，仍提示名单为近似；再晚一天起就只说只记了深港通", async () => {
+    await seedSnapshots();
+    const at = async (start: string) =>
+      (
+        await buildSimInput(wh, specOf(true), { start, end: calendar.at(-1)!, capital: 1e6, oosMonths: 0 })
+      ).input.dataCaveats!.find((x) => x.id === "hk_connect_approx")!.detail;
+    expect(await at(calendar[10]!)).toMatch(/^港股通名单从 .* 起逐日记录/);
+    expect(await at(calendar[11]!)).toBe("目前只记录了深港通名单。");
+  });
+
   it("选股解释：Z 的原因是「不是港股通标的」；今日选股同一条路径", async () => {
     await seedSnapshots();
     const d12 = calendar[12]!;

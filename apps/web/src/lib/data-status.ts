@@ -6,15 +6,26 @@
 import {
   addDays,
   BAR_SOURCE_TEXT,
+  CANARY_STATUS_TEXT,
+  type CanaryStatus,
   type DateStr,
   ISSUE_RULE_TEXT,
   nowHmCN,
+  PIT_DATASET_IDS,
+  pitProgressText,
   type RunProvenance,
   SOFT_FAILING_ALERT,
   SOFT_STEP_LABEL,
 } from "@ivan/core";
 import { dateTime, MARKET_TEXT } from "./format.ts";
-import type { DataCapture, DataQuality, DataSources, DataStatus } from "./types.ts";
+import type {
+  DataCapture,
+  DataQuality,
+  DataSources,
+  DataStatus,
+  EventDatasetStatus,
+  EventsStatus,
+} from "./types.ts";
 
 /** 上一个结束的数据版本：完整 / 不完整 / 失败 / 休市 */
 export function versionStatusBadge(
@@ -92,7 +103,7 @@ export function sourcesLines(s: DataSources | null | undefined, today: DateStr):
   const em = s.served.em ?? 0;
   const txq = s.served.txq ?? 0;
   const tx = (s.served.tx ?? 0) + txq;
-  const when = s.date === today || !s.date ? "今晚" : `${s.date.slice(5)} 那晚`;
+  const when = s.date === today || !s.date ? "今晚" : `${s.date} 那晚`;
   const out: CaptureLine[] = [
     { text: `${when}东财 ${em} 只、腾讯 ${tx} 只（回退 ${s.fallbacks} 次）`, tone: "neutral" },
   ];
@@ -170,4 +181,44 @@ export function provenanceValue(p: RunProvenance): string {
   const unknown = p.unknownRows ? `来源未记录 ${pctText(p.unknownRows / p.total)}` : "";
   const head = known ? (unknown ? `${known}（${unknown}）` : known) : unknown;
   return `${head}；缺失 ${p.gapDays} 天`;
+}
+
+// ── 两融与筹码数据（S15，D81、D82） ──
+
+/** 「接口」徽标：健康 / 字段变了 / 单位异常 / 被风控 / 出错；还没跑过金丝雀为 null */
+export function canaryBadge(
+  c: EventDatasetStatus["canary"],
+): { text: string; tone: "down" | "warn" } | null {
+  if (!c) return null;
+  const text = CANARY_STATUS_TEXT[c.status as CanaryStatus] ?? c.status;
+  return { text, tone: c.status === "ok" || c.status === "empty" ? "down" : "warn" };
+}
+
+/** 一个数据集一行：「两融明细：自 2013-01-04 · 数据到 2026-09-29」（回填没完成写「补齐中」，空值写 --） */
+export function eventDatasetLine(d: EventDatasetStatus): string {
+  return `${d.label}：自 ${d.coveredFrom ?? "补齐中"} · 数据到 ${d.windowThrough ?? d.syncedAt ?? "--"}`;
+}
+
+/** 金丝雀 ⓘ 的说明：详情 + 时间；最近一次没更新时再写原因 */
+export function canaryInfoText(d: EventDatasetStatus): string {
+  const parts: string[] = [];
+  if (d.canary) parts.push(`接口自检（${dateTime(Date.parse(d.canary.at))}）：${d.canary.detail}`);
+  else parts.push("还没有跑过接口自检");
+  if (d.lastStatus && d.lastStatus !== "ok" && d.lastDetail)
+    parts.push(`最近一次：${d.lastDetail}`);
+  return parts.join("。");
+}
+
+/** 后台回填进行中：「后台补齐中：两融 812 / 3,330 天 · 户数 120 / 166 月」；没有在跑或排队时为 null */
+export function eventsBackfillText(b: EventsStatus["backfill"] | undefined): string | null {
+  if (!b || (b.status !== "queued" && b.status !== "running")) return null;
+  const progress = Object.fromEntries(
+    PIT_DATASET_IDS.flatMap((id) => (b.progress[id] ? [[id, b.progress[id]!]] : [])),
+  );
+  const text = pitProgressText(progress);
+  const wait =
+    b.status === "queued" && b.notBefore && b.notBefore > Date.now()
+      ? `，北京时间 ${nowHmCN(new Date(b.notBefore))} 接着补`
+      : "";
+  return `后台补齐中${text ? `：${text}` : ""}${wait}`;
 }

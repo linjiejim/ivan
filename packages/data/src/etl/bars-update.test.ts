@@ -122,7 +122,7 @@ describe("夜间增量把取数台账写进数据版本", () => {
     expect(v!.status).toBe("ok");
     const sources = JSON.parse(v!.sources);
     expect(sources).toMatchObject({
-      v: 1,
+      v: 2,
       served: { txq: 2, em: 1 },
       fallbacks: 0,
       failed: 0,

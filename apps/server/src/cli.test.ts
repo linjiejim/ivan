@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { verifyBundleFile } from "./lib/verify-bundle.ts";
+import { userPath, verifyBundleFile } from "./lib/verify-bundle.ts";
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/trace-bundle.json", import.meta.url));
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -48,5 +48,22 @@ describe("verify-bundle", () => {
     expect(bad.status).toBe(1);
     expect(bad.stderr).toContain("第 3 条出错");
     expect(existsSync(join(dir, "no-data"))).toBe(false);
+  });
+
+  it("相对路径按敲命令时的目录（pnpm 的 INIT_CWD）算，不按仓库根", () => {
+    expect(userPath("ivan-trace.json", { INIT_CWD: "/home/op" }, "/repo")).toBe(
+      "/home/op/ivan-trace.json",
+    );
+    expect(userPath("ivan-trace.json", {}, "/repo")).toBe("/repo/ivan-trace.json");
+    expect(userPath("/tmp/x.json", { INIT_CWD: "/home/op" }, "/repo")).toBe("/tmp/x.json");
+    const ok = spawnSync(
+      process.execPath,
+      ["--import", "tsx", CLI, "verify-bundle", "trace-bundle.json"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, DATA_DIR: join(dir, "no-data"), INIT_CWD: join(FIXTURE, "..") },
+      },
+    );
+    expect(ok.status).toBe(0);
   });
 });

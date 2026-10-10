@@ -282,9 +282,83 @@ export interface DataStatus {
   maintenance?: string | null;
   /** 夜间更新写库期间回测暂停（D60）：reason = etl | check */
   computePaused?: { reason: string; since: number } | null;
+  /** 点时事件数据（S15，只有 A 股）：各数据集的同步状态与金丝雀、后台回填进度 */
+  events?: EventsStatus;
+  /** 事件因子（S15b）各自的数据起点与是否补算完成 */
+  factorCoverage?: Record<string, { from: string | null; ready: boolean }>;
+  /** 事件因子列的补算进度（管理页一行） */
+  eventFactors?: EventFactorsStatus;
   workerUp: boolean;
   /** 这个用户的跟踪最近一次结算失败的（D70，只有看板给） */
   settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
+}
+
+/** 一个点时事件数据集的同步状态（S15，worker 的 pit_sync + 软步骤连续失败晚数） */
+export interface EventDatasetStatus {
+  label: string;
+  backfillFrom: string | null;
+  /** 回填全部完成后才有：数据自哪天起 */
+  coveredFrom: string | null;
+  /** 两融、大宗：最后一个完整的数据日 */
+  windowThrough: string | null;
+  /** 最近一次成功同步的日子 */
+  syncedAt: string | null;
+  nightlySince: string | null;
+  lastOkAt: string | null;
+  /** ok | partial | canary_failed | failed | blocked */
+  lastStatus: string | null;
+  lastDetail: string | null;
+  /** 金丝雀（D82）：status = ok | empty | schema_drift | unit_drift | blocked | error；at 是 ISO 时间 */
+  canary: { status: string; source: string; at: string; detail: string } | null;
+  rows: number;
+  failingNights: number;
+}
+
+/** 事件因子列按年补算的进度（S15b）：complete = 补完且签名、版本都对得上 */
+export interface EventFactorsStatus {
+  v: number;
+  sig: string;
+  complete: boolean;
+  doneYears: number;
+  totalYears: number;
+  backfillComplete?: boolean;
+}
+
+export interface EventsStatus {
+  datasets: Partial<Record<string, EventDatasetStatus>>;
+  backfill: {
+    /** idle | queued | running */
+    status: string;
+    notBefore: number | null;
+    progress: Partial<Record<string, { done: number; total: number }>>;
+    lastBatch: {
+      id: number;
+      startedAt: string | null;
+      finishedAt: string | null;
+      status: string | null;
+      note: string | null;
+      rows: number | null;
+      requests: number | null;
+    } | null;
+  };
+}
+
+/** 事件数据回填估算（4 个计数请求） */
+export interface EventsEstimate {
+  since: string;
+  requests: number;
+  lines: string[];
+  datasets: Array<{
+    id: string;
+    label: string;
+    rows: number;
+    chunks: number;
+    requestsLow: number;
+    requestsHigh: number;
+    minutesLow: number;
+    minutesHigh: number;
+    line: string;
+  }>;
 }
 
 /** 管理页「数据质量」卡（D74） */
@@ -427,7 +501,8 @@ export interface ScreenResult {
 // ── 个股证据（D67）：决策日当时可得的数据，每项带出处与数据日 ──
 
 export interface EvidenceItem {
-  group: "price" | "valuation" | "financial" | "status" | "quality";
+  /** events = 「两融与筹码」组（证据第 2 版，S15b） */
+  group: "price" | "valuation" | "financial" | "status" | "quality" | "events";
   key: string;
   label: string;
   value: number | string | boolean | null;
@@ -439,6 +514,8 @@ export interface EvidenceItem {
     key: Record<string, string | number>;
     src: string | null;
     ver: number | null;
+    /** 事件表的行写它的批次 */
+    batch?: number | null;
   };
   note?: string;
 }
@@ -453,7 +530,10 @@ export interface SecurityEvidence {
   /** 那晚第 1 版计划里这只股票的记录（带跟踪与日期且那晚有快照时，D68）；旧接口没有这个字段 */
   planRecord?: PlanRecord | null;
   dossier: {
+    /** 证据版本（D97）：1 = S07；2 = 加「两融与筹码」组 */
     evidenceVersion: number;
+    factorKeys?: string[];
+    options?: Record<string, unknown>;
     code: string;
     name: string | null;
     market: "A" | "HK";
@@ -482,6 +562,62 @@ export interface SecurityEvidence {
   } | null;
   caveats: EvidenceCaveat[];
 }
+
+/** 个股的两融与筹码明细（S15b，get_security_events 与证据弹窗的明细分页） */
+export interface SecurityEvents {
+  code: string;
+  name: string | null;
+  asOf: string;
+  dataVersion: { id: number | null; asOf: string | null };
+  margin: Array<{
+    date: string;
+    availDate: string;
+    financingAmount: number | null;
+    shortAmount: number | null;
+    marginRatio: number | null;
+  }>;
+  holders: Array<{
+    endDate: string;
+    noticeDate: string;
+    holderNum: number | null;
+    qoqPct: number | null;
+  }>;
+  lockups: Array<{
+    freeDate: string;
+    type: string;
+    unlockShares: number | null;
+    ratioFloatPct: number | null;
+    availDate: string;
+    availRule: string;
+  }>;
+  blocks: Array<{
+    tradeDate: string;
+    availDate: string;
+    dealPrice: number | null;
+    closePrice: number | null;
+    premiumPct: number | null;
+    dealAmount: number | null;
+    buyerInst: boolean | null;
+    sellerInst: boolean | null;
+  }>;
+  coverage: Partial<
+    Record<
+      string,
+      {
+        label: string;
+        coveredFrom: string | null;
+        windowThrough: string | null;
+        syncedAt: string | null;
+        failingNights: number;
+      }
+    >
+  >;
+  caveats: Array<{ id: string; level: "info" | "warn"; title: string }>;
+  hash: string;
+}
+
+/** /api/factors 的一项：事件因子多带数据起点与是否补算完成（worker 不在时为 null） */
+export type FactorInfo = FactorDef & { from?: string | null; ready?: boolean | null };
 
 export interface SpecChange {
   label: string;
@@ -669,6 +805,11 @@ export interface GroundingResult {
     value: number;
     kind: "percent" | "points" | "money" | "ratio" | "count" | "plain";
     reason: "no_match" | "sign_mismatch";
-    nearest?: { path: string; value: number };
+    /** kind 是证据的种类（之后的结果才有）：ratio 是 0.0731 这样的比率，points 是 4.25 这样的百分数 */
+    nearest?: {
+      path: string;
+      value: number;
+      kind?: "ratio" | "points" | "money" | "count" | "number";
+    };
   }>;
 }

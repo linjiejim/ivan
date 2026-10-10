@@ -15,7 +15,11 @@ import {
   DEFAULT_PARAMS,
   describeExec,
   diffDays,
+  eventNotReadyText,
+  eventStartTooEarlyText,
   ExecConfigError,
+  FACTOR_MAP,
+  factorsUsedBySpec,
   type Fan,
   type Market,
   parseExecOverrides,
@@ -47,7 +51,7 @@ import {
 import { and, asc, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
-import { applyPatch } from "../lib/jsonpatch.ts";
+import { applyPatch, isSafePatchPath } from "../lib/jsonpatch.ts";
 import { consume } from "../lib/quota.ts";
 import { worker } from "../lib/worker-client.ts";
 import type { DataStatus } from "./dashboard.ts";
@@ -99,7 +103,7 @@ export function clearDataStatusCache(): void {
   statusCache = null;
 }
 
-async function cachedDataStatus(): Promise<DataStatus | null> {
+export async function cachedDataStatus(): Promise<DataStatus | null> {
   if (statusCache && Date.now() - statusCache.at < DATA_STATUS_TTL_MS) return statusCache.value;
   try {
     const value = await worker.get<DataStatus>("/internal/data-status");
@@ -110,15 +114,44 @@ async function cachedDataStatus(): Promise<DataStatus | null> {
   }
 }
 
+/** 事件因子各自的数据起点与补算进度（编辑器、list_factors 用；worker 不在时为 null） */
+export async function eventFactorCoverage(): Promise<Pick<
+  DataStatus,
+  "factorCoverage" | "eventFactors"
+> | null> {
+  const status = await cachedDataStatus();
+  return status
+    ? { factorCoverage: status.factorCoverage, eventFactors: status.eventFactors }
+    : null;
+}
+
 /**
- * 提交前校验数据（D75、D77）：起点前一个交易日没有基准数据、港股通股票池没有名单时直接 400，
- * 不排任务、不扣额度。worker 不在或接口没给这些字段时跳过，worker 建输入时还会再查一次
- * （缓存过期前最多放过一次，由 buildSimInput 拦下）。
+ * 提交前校验数据（D75、D77、D83）：起点前一个交易日没有基准数据、港股通股票池没有名单、
+ * 用到的事件因子还没补算完或起点早于它的数据起点时直接 400，不排任务、不扣额度。
+ * worker 不在或接口没给这些字段时跳过，worker 建输入时还会再查一次（缓存过期前最多放过一次，由 buildSimInput 拦下）。
  */
 export async function checkDataReady(specs: readonly StrategySpec[], start: string): Promise<void> {
   const status = await cachedDataStatus();
   if (!status) return;
   for (const spec of specs) {
+    // 两融与筹码类因子（S15b）：补算完成才能回测；起点不能早于数据起点（覆盖起点 + 预热）
+    const used = factorsUsedBySpec(spec).filter((k) => FACTOR_MAP.get(k)?.dataset);
+    if (used.length && status.factorCoverage) {
+      if (used.some((k) => !status.factorCoverage![k]?.ready)) {
+        throw new AppError(
+          400,
+          eventNotReadyText(
+            status.eventFactors?.doneYears ?? 0,
+            status.eventFactors?.totalYears ?? 0,
+          ),
+        );
+      }
+      for (const k of used) {
+        const from = status.factorCoverage[k]?.from;
+        if (from && start < from)
+          throw new AppError(400, eventStartTooEarlyText(FACTOR_MAP.get(k)!.label, from));
+      }
+    }
     const m = status.markets?.find((x) => x.market === spec.market);
     if (!m) continue;
     if (spec.universe.hkConnect && m.hkConnect === null)
@@ -244,7 +277,7 @@ export async function enqueueSweep(
 ): Promise<{ runId: string; jobId: string; variants: number }> {
   const { db } = env().app;
   const { strategy, version } = getVersion(userId, versionId);
-  if (!/^\/[\w/-]+$/.test(sweep.path))
+  if (!/^\/[\w/-]+$/.test(sweep.path) || !isSafePatchPath(sweep.path))
     throw new AppError(400, "参数路径要是 JSON Pointer，如 /exits/stopLoss");
   if (sweep.values.length < 2 || sweep.values.length > 8)
     throw new AppError(400, "扫描取值要 2–8 个");
@@ -531,7 +564,10 @@ function origEffectiveEnd(orig: RunRow): string {
  * 完整重跑（D57）：参数完全照抄（含试错次数，让检查项也可比；终点取原运行截到的那天），新建一次 kind = reproduce 的运行，计入回测额度。
  * 跑完由 worker 比结果指纹并写回原运行的 verify；重跑不计入试错次数（countTrials 只数回测与扫描子回测）。
  */
-export function reproduceRun(userId: string, runId: string): { runId: string; jobId: string } {
+export async function reproduceRun(
+  userId: string,
+  runId: string,
+): Promise<{ runId: string; jobId: string }> {
   const orig = ownRun(userId, runId);
   if (orig.kind !== "backtest" && orig.kind !== "sweep_child")
     throw new AppError(400, "只能重跑一次回测或扫描里的子回测");
@@ -553,6 +589,12 @@ export function reproduceRun(userId: string, runId: string): { runId: string; jo
   if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
     throw new AppError(429, `同时排队的任务最多 ${MAX_ACTIVE_JOBS} 个，等前面的跑完再来`);
   }
+  // 与新回测同一道检查：用到的事件因子还在补算等情况先拒绝，不扣额度
+  const op = orig.params as { start: string; specOverride?: StrategySpec };
+  await checkDataReady(
+    [op.specOverride ?? getVersion(userId, orig.versionId).version.spec],
+    op.start,
+  );
   consume(userId, "backtests");
   const { db } = env().app;
   const newRunId = newId("r_");

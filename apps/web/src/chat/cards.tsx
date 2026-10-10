@@ -27,9 +27,11 @@ import {
   IconData,
   IconChevronDown,
   IconEvidence,
+  IconChips,
   IconPlan,
   IconWarn,
 } from "../components/icons.tsx";
+import { EventsBody } from "../components/events-body.tsx";
 import { EvidenceBody } from "../components/evidence-modal.tsx";
 import { PlanItems, PlanMeta } from "../components/plan-list.tsx";
 import { ScreenTable, ScreenTrace } from "../components/screen-table.tsx";
@@ -54,12 +56,14 @@ import {
   MARKET_TEXT,
   money,
   NA,
+  nearestValueText,
   pct,
   tone,
 } from "../lib/format.ts";
 import type {
   GroundingResult,
   PlanSnapshot,
+  SecurityEvents,
   TrackingHealth,
   Verdict,
   RunDetail,
@@ -160,11 +164,14 @@ function DraftActions({
   onConfirmed,
   confirmLabel,
   confirmIcon,
+  confirmVariant = "primary",
 }: {
   draftId: string;
   onConfirmed: (r: Record<string, string>) => void;
   confirmLabel: string;
   confirmIcon?: Icon;
+  /** 停止 / 删除用 danger（design-system §8） */
+  confirmVariant?: "primary" | "danger";
 }) {
   const d = useDraft(draftId);
   const qc = useQueryClient();
@@ -194,7 +201,7 @@ function DraftActions({
       <div className="flex items-center gap-2">
         <Button
           size="sm"
-          variant="primary"
+          variant={confirmVariant}
           icon={confirmIcon ?? IconCheck}
           loading={confirm.isPending}
           onClick={() => confirm.mutate()}
@@ -373,7 +380,10 @@ export function RunCard({ runId }: { runId: string }) {
           rows={[
             ["总收益", pct(m.totalReturn)],
             ["基准年化", pct(m.benchCagr)],
-            ["胜率", m.winRate === null ? NA : pct(m.winRate, 0, false)],
+            [
+              m.metricsVersion === 2 ? "胜率（按完整持仓）" : "胜率（卖出盈利的比例）",
+              m.winRate === null ? NA : pct(m.winRate, 0, false),
+            ],
             ["买入笔数", String(m.buys)],
             ...(r.segments?.outOfSample
               ? ([
@@ -734,6 +744,19 @@ export function EvidenceCard({ output }: { output: SecurityEvidence }) {
   );
 }
 
+/** 两融与筹码（S15b）：融资余额、股东户数、已知解禁、近 20 日大宗；只含 asOf 当时已公布的数据 */
+export function EventsCard({ output }: { output: SecurityEvents }) {
+  return (
+    <Frame
+      title="两融与筹码"
+      icon={IconChips}
+      info="两融与大宗交易按 T+1 可得、户数按公告日、解禁按规则推算的可得日（每晚同步开始后以首次见到为准）；撤下的记录在撤下之前仍算已知。"
+    >
+      <EventsBody e={output} />
+    </Frame>
+  );
+}
+
 /** 工具名 → 人话 + 图标（没有卡片的工具在对话里显示成一行小字） */
 const TOOL_META: Record<string, [string, Icon]> = {
   list_factors: ["查看可用因子", IconRules],
@@ -750,6 +773,7 @@ const TOOL_META: Record<string, [string, Icon]> = {
   screen_rules: ["按条件选股", IconScreen],
   lookup_security: ["查个股", IconScreen],
   get_security_evidence: ["查看个股证据", IconEvidence],
+  get_security_events: ["查看两融与筹码", IconChips],
   propose_tracking: ["准备上线跟踪", IconGoLive],
   get_tracking: ["读取跟踪", IconTracking],
   get_overview: ["查看看板", IconBoard],
@@ -960,7 +984,9 @@ export interface TrackingOutput {
   /** 跑赢回测同期（百分位 0–100）；早于 S10 的消息叫 deviationPct */
   beatBacktestPct?: number | null;
   deviationPct?: number | null;
-  verdict?: Verdict;
+  /** 停了的跟踪没有判词（verdict 为 null） */
+  stopped?: boolean;
+  verdict?: Verdict | null;
   health?: Pick<TrackingHealth, "state" | "signal" | "perMetric"> | null;
   lastError?: { date: string; message: string } | null;
 }
@@ -972,13 +998,17 @@ export function TrackingCard({ output }: { output: TrackingOutput }) {
       title={<>「{output.strategyName}」</>}
       icon={IconTracking}
       right={
-        output.verdict && (
-          <TrackingVerdict
-            verdict={output.verdict}
-            health={output.health}
-            lastError={output.lastError}
-            lastDate={output.lastDate}
-          />
+        output.stopped ? (
+          <Badge tone="neutral">已停止</Badge>
+        ) : (
+          output.verdict && (
+            <TrackingVerdict
+              verdict={output.verdict}
+              health={output.health}
+              lastError={output.lastError}
+              lastDate={output.lastDate}
+            />
+          )
         )
       }
     >
@@ -1040,6 +1070,7 @@ export function StopTrackingCard({
             draftId={output.draftId}
             confirmLabel="确认停止"
             confirmIcon={IconStop}
+            confirmVariant="danger"
             onConfirmed={async () => {
               await qc.invalidateQueries({ queryKey: ["tracking", output.trackingId] });
               send(`我停掉了（trackingId=${output.trackingId}）。`);
@@ -1126,7 +1157,7 @@ export function GroundingNote({ g }: { g: GroundingResult | null | undefined }) 
             rows={g.unverified.map((u) => [
               u.raw.trim(),
               u.nearest
-                ? `${u.reason === "sign_mismatch" ? "符号不符，工具数" : "最接近"} ${u.nearest.value}（${evidencePath(u.nearest.path)}）`
+                ? `${u.reason === "sign_mismatch" ? "符号不符，工具数" : "最接近"} ${nearestValueText(u.nearest, u.kind)}（${evidencePath(u.nearest.path)}）`
                 : "工具结果里没有同类的数",
             ])}
           />

@@ -1,15 +1,17 @@
 /**
  * 个股证据（D67）：决策日当时可得的数据，每行带来源与数据日，底部是数据版本与校验值。
  * 对话里的「个股证据」卡与回测页、跟踪页的「证据」弹窗渲染同一个 EvidenceBody。
+ * 证据第 2 版（S15b）多一组「两融与筹码」；A 股的弹窗多一个分页「两融与筹码明细」，按同一个决策日渲染 EventsBody。
  */
 import type { FactorDef } from "@ivan/core";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../lib/api.ts";
-import { fmtFactor, NA } from "../lib/format.ts";
-import type { EvidenceItem, SecurityEvidence } from "../lib/types.ts";
-import { IconEvidence } from "./icons.tsx";
-import { Callout, cx, ErrorNote, IconButton, Modal, Skeleton, Tag } from "./ui.tsx";
+import { fmtFactor, holdersText, NA } from "../lib/format.ts";
+import type { EvidenceItem, SecurityEvents, SecurityEvidence } from "../lib/types.ts";
+import { EventsBody } from "./events-body.tsx";
+import { IconChips, IconEvidence } from "./icons.tsx";
+import { Callout, cx, ErrorNote, IconButton, Modal, Skeleton, Tabs, Tag } from "./ui.tsx";
 
 /** 行级来源（D60）→ 来源 Tag；空 = 来源未记录 */
 const SOURCE_TAG: Record<string, string> = {
@@ -26,6 +28,7 @@ const GROUPS: Array<[string, Array<EvidenceItem["group"]>]> = [
   ["质量与成长", ["quality"]],
   ["财报", ["financial"]],
   ["数据状态", ["status"]],
+  ["两融与筹码", ["events"]],
 ];
 
 const BAND_TEXT = {
@@ -34,10 +37,13 @@ const BAND_TEXT = {
   out: (_: number, hold: number) => `在前 ${hold} 名之外，不会买入，持有的会卖出`,
 } as const;
 
-function valueText(it: EvidenceItem): string {
+export function valueText(it: EvidenceItem): string {
   const v = it.value;
   if (typeof v === "number") {
-    if (it.unit === "天" || it.unit === "条") return `${v} ${it.unit}`;
+    if (it.unit === "天" || it.unit === "条" || it.unit === "笔") return `${v} ${it.unit}`;
+    if (it.unit === "户") return holdersText(v);
+    if (it.unit === "万股")
+      return `${v.toLocaleString("en-US", { maximumFractionDigits: 2 })} 万股`;
     if (it.unit === "元" || it.unit === "港元") return `${v.toFixed(2)} ${it.unit}`;
     if (it.key === "adj") return v.toFixed(4);
   }
@@ -234,18 +240,55 @@ export function EvidenceModal({
     retry: false,
     refetchOnWindowFocus: false,
   });
+  const [tab, setTab] = useState<"evidence" | "events">("evidence");
+  // 两融与筹码明细只有 A 股；按证据的决策日取（切到这个分页才读，计入数据查询额度）
+  const aShare = !target.code.toUpperCase().endsWith(".HK") && q.data?.dossier.market !== "HK";
+  const asOf = q.data?.dossier.asOf;
+  const ev = useQuery({
+    queryKey: ["security-events", target.code, asOf],
+    queryFn: () =>
+      api.get<SecurityEvents>(
+        `/api/securities/${encodeURIComponent(target.code)}/events?asOf=${asOf}`,
+      ),
+    enabled: open && tab === "events" && !!asOf && aShare,
+    staleTime: Infinity,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const loading = (
+    <div className="space-y-2.5 py-1">
+      {Array.from({ length: 8 }, (_, i) => (
+        <Skeleton key={i} className="h-4 w-full" />
+      ))}
+    </div>
+  );
   return (
     <Modal open={open} onClose={onClose} title="个股证据" icon={IconEvidence}>
-      {q.data ? (
+      {q.data && aShare && (
+        <Tabs
+          className="mb-3"
+          value={tab}
+          onChange={setTab}
+          items={[
+            { value: "evidence", label: "证据", icon: IconEvidence },
+            { value: "events", label: "两融与筹码明细", icon: IconChips },
+          ]}
+        />
+      )}
+      {tab === "events" && aShare ? (
+        ev.data ? (
+          <EventsBody e={ev.data} />
+        ) : ev.error ? (
+          <ErrorNote error={ev.error} />
+        ) : (
+          loading
+        )
+      ) : q.data ? (
         <EvidenceBody e={q.data} />
       ) : q.error ? (
         <ErrorNote error={q.error} />
       ) : (
-        <div className="space-y-2.5 py-1">
-          {Array.from({ length: 8 }, (_, i) => (
-            <Skeleton key={i} className="h-4 w-full" />
-          ))}
-        </div>
+        loading
       )}
     </Modal>
   );

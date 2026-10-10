@@ -7,10 +7,13 @@ import {
   addDays,
   CLOSE_FINAL_HM,
   type DateStr,
+  FACTOR_CORE_VERSION,
   FACTOR_REGISTRY_VERSION,
   MARKET_LABEL,
   type Market,
   nowHmCN,
+  PIT_DATASET_IDS,
+  type PitDatasetId,
   todayCN,
 } from "@ivan/core";
 import type { HttpLike } from "../http.ts";
@@ -19,6 +22,7 @@ import type { Issue } from "../compute/hygiene.ts";
 import {
   assessCompleteness,
   type Completeness,
+  type DatasetCompleteness,
   IncompleteDataError,
   RetryableEtlError,
   type SoftOutcome,
@@ -28,6 +32,16 @@ import {
 import { emQuery } from "../sources/eastmoney.ts";
 import { type EtlContext, filledCodes, loadSecurities } from "./context.ts";
 import { computeFactors } from "./factors.ts";
+import {
+  finishPitBatch,
+  openPitBatch,
+  PIT_DEFAULT_SINCE,
+  type PitMode,
+  type PitSyncResult,
+  syncPitDataset,
+} from "./pit-runner.ts";
+import { buildAvailEnv } from "./trading-days.ts";
+import { PIT_DATASET_SPECS } from "./datasets.ts";
 import { backfillFundamentals, updateFundamentals } from "./fundamentals.ts";
 import {
   DEFAULT_SINCE,
@@ -49,13 +63,22 @@ function beforeCloseFinal(ctx: EtlContext, market: Market): boolean {
   return ctx.today === todayCN() && nowHmCN() < CLOSE_FINAL_HM[market];
 }
 
-export type BackfillStep = "securities" | "reference" | "names" | "bars" | "fundamentals" | "factors";
+export type BackfillStep =
+  | "securities"
+  | "reference"
+  | "names"
+  | "bars"
+  | "fundamentals"
+  | "events"
+  | "factors";
 export const BACKFILL_STEPS: BackfillStep[] = [
   "securities",
   "reference",
   "names",
   "bars",
   "fundamentals",
+  // 点时事件数据（S15，只有 A 股）：两融、户数、解禁、大宗的历史
+  "events",
   "factors",
 ];
 
@@ -275,6 +298,16 @@ async function backfillSteps(
       );
     }
   }
+  if (steps.has("events") && market === "A" && !opts.codes) {
+    // 不设预算、不开新的数据版本（行上 ver 为空，批次记在 pit_batches）
+    const r = await runPitSyncs(ctx, "backfill", PIT_DATASET_IDS, ver, {
+      from: opts.since ?? PIT_DEFAULT_SINCE,
+      force: opts.force,
+    });
+    ctx.log(
+      `事件数据回填：${r.results.map((x) => `${x.id} ${x.done + x.partial.length}/${x.chunks}`).join("，")}`,
+    );
+  }
   if (steps.has("factors")) {
     await computeFactors(ctx, market, since, { codes: opts.codes });
     await commitDataVersion(ctx, ver, {
@@ -366,11 +399,86 @@ export async function daily(ctx: EtlContext, market: Market, opts: DailyOptions 
   }
 }
 
+/**
+ * 按顺序同步几个点时事件数据集（同一批 pit_batches）。每个数据集自己失败就关，不抛错；each 拿到每个数据集的 run
+ * （夜间把它包进软步骤）。给了 budgetMs 时各数据集分剩下的预算，用完了后面的数据集这次不跑（记进 skipped）。
+ * 出错（比如行情仓写失败）时也把批次收尾。
+ */
+export async function runPitSyncs(
+  ctx: EtlContext,
+  mode: PitMode,
+  ids: readonly PitDatasetId[],
+  dataVersion: number | null,
+  o: {
+    from?: DateStr;
+    to?: DateStr;
+    force?: boolean;
+    budgetMs?: number;
+    note?: (results: PitSyncResult[]) => string | Promise<string>;
+    each?: (id: PitDatasetId, run: () => Promise<PitSyncResult>) => Promise<void>;
+    /** 计时（测试注入） */
+    now?: () => number;
+  } = {},
+): Promise<{ batch: number; results: PitSyncResult[]; skipped: PitDatasetId[] }> {
+  const env = await buildAvailEnv(ctx.wh, ctx.today);
+  // 周检里没有要补扫的段（两融的 check 是空的）：不跑，不花一次金丝雀请求，也不把夜间记下的「只拿到沪市」改写成 ok
+  if (mode === "check") ids = ids.filter((id) => PIT_DATASET_SPECS[id].check(env).length > 0);
+  const batch = await openPitBatch(ctx, mode, ids, dataVersion);
+  const results: PitSyncResult[] = [];
+  const skipped: PitDatasetId[] = [];
+  const now = o.now ?? Date.now;
+  const t0 = now();
+  try {
+    for (const id of ids) {
+      const budgetMs = o.budgetMs === undefined ? undefined : o.budgetMs - (now() - t0);
+      if (budgetMs !== undefined && budgetMs <= 0) {
+        skipped.push(id);
+        continue;
+      }
+      const run = async () => {
+        const r = await syncPitDataset(ctx, id, {
+          mode,
+          batch,
+          env,
+          from: o.from,
+          to: o.to,
+          force: o.force,
+          budgetMs,
+          now: o.now,
+        });
+        results.push(r);
+        return r;
+      };
+      if (o.each) await o.each(id, run);
+      else await run();
+    }
+  } finally {
+    let note: string | undefined;
+    try {
+      note = await o.note?.(results);
+    } catch {
+      note = undefined;
+    }
+    await finishPitBatch(ctx, batch, results, note);
+  }
+  return { batch, results, skipped };
+}
+
+const datasetCompleteness = (r: PitSyncResult): DatasetCompleteness => ({
+  ok: r.ok,
+  canary: r.canary?.status ?? null,
+  rows: r.rows,
+  requests: r.requests,
+  partial: r.partial,
+  ...(r.lateRows !== undefined ? { lateRows: r.lateRows } : {}),
+});
+
 /** 近 20 个版本（ok / incomplete）里记下的无成交数，最新的在前 */
 async function noTradeHistory(ctx: EtlContext, market: Market, ver: number): Promise<number[]> {
   const rows = await ctx.wh.all<{ c: string }>(
     `SELECT completeness AS c FROM data_versions
      WHERE market = $m AND id < $v AND status IN ('ok', 'incomplete') AND completeness IS NOT NULL
+       AND coalesce(kind, '') <> 'check'
      ORDER BY id DESC LIMIT 20`,
     { m: market, v: ver },
   );
@@ -464,10 +572,32 @@ async function dailySteps(
   }
   await soft("fundamentals", () => updateFundamentals(ctx, market, securities, since));
 
-  // 注册表版本变了就全量重算，否则只重算近 15 天（覆盖晚到的股本变动与数据修订）
+  // 点时事件数据（S15，只有 A 股）：四个软步骤，失败就关（不删不写），不让整晚失败；行盖今晚的版本号
+  if (market === "A") {
+    const datasets: NonNullable<Completeness["datasets"]> = {};
+    try {
+      await runPitSyncs(ctx, "nightly", PIT_DATASET_IDS, ver, {
+        each: (id, run) =>
+          soft(id, async () => {
+            const r = await run();
+            datasets[id] = datasetCompleteness(r);
+            if (!r.ok) throw new Error(r.detail);
+            return r.rows;
+          }),
+      });
+    } catch (e) {
+      ctx.log(`事件数据同步出错，先跳过：${e instanceof Error ? e.message : e}`);
+    }
+    completeness.datasets = datasets;
+  }
+
+  // 核心因子版本变了就全量重算，否则只重算近 15 天（覆盖晚到的股本变动与数据修订）。
+  // 行情仓里的键沿用 factor_registry_version:<市场>，记的是核心版本（D83）：注册表第 3 版只加事件列，不触发重算
   const reg = await ctx.wh.meta(`factor_registry_version:${market}`);
-  const from = reg === String(FACTOR_REGISTRY_VERSION) ? addDays(ctx.today, -15) : since;
-  await computeFactors(ctx, market, from);
+  const from = reg === String(FACTOR_CORE_VERSION) ? addDays(ctx.today, -15) : since;
+  const fr = await computeFactors(ctx, market, from);
+  // 事件因子是软步骤（S15b）：失败时保留已有的值，记进 completeness.soft，整晚照常提交
+  if (fr.events) softOutcomes.push(fr.events);
   await commitDataVersion(ctx, ver, { status: "ok", completeness, sources: ctx.ledger?.toJSON() });
   return { market, tradingDay: true, latest, dataVersion: ver, completeness };
 }
@@ -612,11 +742,23 @@ async function weeklyCheckSteps(
     });
   }
   if (repaired.length) await computeFactors(ctx, market, DEFAULT_SINCE, { codes: repaired });
+  // 点时事件数据的更宽补扫（S15，只有 A 股）：补上东财晚入库的行，新找到的行数记进 lateRows；失败不让抽检失败
+  let datasets: Completeness["datasets"];
+  if (market === "A") {
+    datasets = {};
+    try {
+      const { results } = await runPitSyncs(ctx, "check", PIT_DATASET_IDS, ver);
+      for (const r of results) datasets[r.id] = datasetCompleteness(r);
+    } catch (e) {
+      ctx.log(`事件数据补扫出错，先跳过：${e instanceof Error ? e.message : e}`);
+    }
+  }
   await commitDataVersion(ctx, ver, {
     status: "ok",
     revisedRows,
     maxAsOf,
     note: `抽检 ${picked.length} 只，修复 ${repaired.join(",") || "无"}，标记 ${flagged} 处`,
+    ...(datasets ? { completeness: { date: ctx.today, datasets } } : {}),
   });
   ctx.log(
     `${market} 每周抽检：${picked.length} 只，${revisedRows} 行被修订，修复 ${repaired.length} 只，标记 ${flagged} 处`,

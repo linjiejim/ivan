@@ -9,7 +9,10 @@
  * 归属一律按跟踪的 user_id 校验，不是自己的 404。
  */
 import {
+  EVENT_FACTOR_VERSION,
+  EVIDENCE_VERSION,
   EXPLAIN_VERSION,
+  FACTOR_CORE_VERSION,
   FACTOR_REGISTRY_VERSION,
   HASH_VERSION,
   HEALTH_STATE_TEXT,
@@ -42,9 +45,13 @@ import { diffPlans, ENGINE_VERSION, VALIDATION_VERSION } from "@ivan/engine";
 import { and, desc, eq, gt, gte, inArray, lte, or } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError } from "../lib/errors.ts";
-import { worker } from "../lib/worker-client.ts";
-import { dataStatus } from "./dashboard.ts";
-import { findSnapshot, type PlanOutcome, type PlanSnapshotView } from "./plans.ts";
+import {
+  cachedPlanOutcomes,
+  findSnapshot,
+  type PlanOutcome,
+  type PlanSnapshotView,
+} from "./plans.ts";
+import { cachedDataStatus } from "./runs.ts";
 import { own } from "./trackings.ts";
 
 export type LedgerKindView =
@@ -198,10 +205,26 @@ export function listEntries(
   return { entries, hasMore };
 }
 
+/** 重算的结果按（链头、条数）缓存 1 分钟：不计额度的按钮，反复点不让整条链在请求线程里一遍遍重算 */
+const VERIFY_TTL_MS = 60_000;
+const verifyCache = new Map<
+  string,
+  { key: string; at: number; value: { ok: boolean; checked: number; firstBreak: unknown } }
+>();
+
 /** 重算当前用户的整条链 */
 export function verifyUser(userId: string) {
-  const v = verifyUserChain(env().app, userId);
-  return { ok: v.ok, checked: v.checked, firstBreak: v.firstBreak ?? null };
+  const { app } = env();
+  const head = app.sqlite
+    .prepare(`SELECT max(seq) AS s, count(*) AS n FROM ledger_entries WHERE user_id = ?`)
+    .get(userId) as { s: number | null; n: number };
+  const key = `${head.s}:${head.n}`;
+  const hit = verifyCache.get(userId);
+  if (hit && hit.key === key && Date.now() - hit.at < VERIFY_TTL_MS) return hit.value;
+  const v = verifyUserChain(app, userId);
+  const value = { ok: v.ok, checked: v.checked, firstBreak: v.firstBreak ?? null };
+  verifyCache.set(userId, { key, at: Date.now(), value });
+  return value;
 }
 
 export type ReplayOutcome = "filled" | "rejected" | "not_executed";
@@ -302,24 +325,11 @@ export type PlanOnView = NonNullable<Awaited<ReturnType<typeof planOn>>>;
 
 async function outcomesFor(market: Market, s: PlanSnapshotView): Promise<PlanOutcome[] | null> {
   if (!s.benchSym || !s.items.length) return null;
-  const asOf = (await dataStatus()).markets.find((m) => m.market === market)?.asOf ?? null;
+  // 数据状态与结果都走缓存（不计额度的页面，反复打开不让 worker 一遍遍查行情仓）
+  const asOf = (await cachedDataStatus())?.markets?.find((m) => m.market === market)?.asOf ?? null;
   if (!asOf || tradingDaysAfter(market, s.decisionDate, 5) > asOf) return null;
   try {
-    const r = await worker.post<{ asOf: string | null; outcomes: PlanOutcome[] }>(
-      "/internal/plan-outcomes",
-      {
-        market,
-        benchSym: s.benchSym,
-        items: s.items.slice(0, 50).map((i) => ({
-          code: i.code,
-          side: i.side,
-          estPrice: i.estPrice,
-          decisionDate: s.decisionDate,
-          benchClose: s.benchClose,
-        })),
-      },
-    );
-    return r.outcomes;
+    return (await cachedPlanOutcomes(s, market)).outcomes;
   } catch {
     // worker 不在或算不出：这一列显示「--」，不让整块报错
     return null;
@@ -336,6 +346,9 @@ export function manifest(): BundleManifest {
     healthVersion: HEALTH_VERSION,
     validationVersion: VALIDATION_VERSION,
     hashVersion: HASH_VERSION,
+    factorCoreVersion: FACTOR_CORE_VERSION,
+    eventFactorVersion: EVENT_FACTOR_VERSION,
+    evidenceVersion: EVIDENCE_VERSION,
   };
 }
 

@@ -688,7 +688,7 @@ export function RunPage() {
             <IconChecks size={15} className="text-down" />
             诚实检查没有发现需要注意的问题
             <Info>
-              引擎按固定阈值检查：样本外是否明显变差、收益是否集中在少数股票或行业、交易是否太少、是否调参调太多次、费用是否吃掉太多收益。
+              引擎按固定阈值检查：样本外是否明显变差、收益是否集中在少数股票或行业、交易是否太少、是否调参调太多次、费用是否吃掉太多收益、超额是否可能是运气、回撤是否偏乐观。
               调参次数只数同一个策略在重叠区间里试过的不同设置（含参数扫描），新建一个策略会从零算。
             </Info>
           </span>
@@ -924,7 +924,8 @@ function Confidence({ run: r }: { run: RunDetail }) {
           <dt className="flex items-center gap-1 text-xs text-muted">
             按历史重抽样，跑赢基准的把握
             <Info label="跑赢基准的把握">
-              主动收益（策略日收益减基准日收益）的概率夏普比（PSR），按偏度与峰度修正；日收益不到 30
+              主动收益（策略日收益减基准日收益）的
+              PSR（按偏度与峰度修正的夏普比检验），是按历史算的把握， 不是预测；日收益不到 30
               个时不算。
             </Info>
           </dt>
@@ -1027,8 +1028,8 @@ function Details({ run: r }: { run: RunDetail }) {
                       <span className={cx("tabular font-medium", tone(p.ret))}>
                         {pct(p.ret, 0)}
                       </span>
-                      {/* 持仓快照的日期当作成交日：看它前一个交易日收盘后的证据 */}
-                      <EvidenceButton code={p.code} tradeDate={r.final!.date} runId={r.id} />
+                      {/* 期末持仓不是一笔成交：按期末那天收盘后的证据看（不写「次日开盘成交」） */}
+                      <EvidenceButton code={p.code} decisionDate={r.final!.date} runId={r.id} />
                     </span>
                   ))}
                 </div>

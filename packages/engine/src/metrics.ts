@@ -91,9 +91,9 @@ export function computeMetrics(
   series: readonly SeriesPoint[],
   trades: readonly Trade[],
   capital: number,
-  o: { version?: 1 | 2; anchor?: SeriesPoint } = {},
+  o: { version?: 1 | 2; anchor?: SeriesPoint; held?: ReadonlySet<string> } = {},
 ): Metrics {
-  if ((o.version ?? 1) === 2) return computeMetricsV2(series, trades, capital, o.anchor);
+  if ((o.version ?? 1) === 2) return computeMetricsV2(series, trades, capital, o.anchor, o.held);
   const base = periodMetrics(series);
   // 最大回撤的峰、谷、修复日
   let peakIdx = 0;
@@ -329,7 +329,7 @@ export interface RoundTrip {
  * 中间仓位控制的增减（reason = exposure）都算在里面。持仓没卖完时又出现建仓买入（仓位控制把它减到 0 之后），
  * 先按它最后一笔卖出结掉。到区间末还拿着的不算。
  */
-export function roundTrips(trades: readonly Trade[]): RoundTrip[] {
+export function roundTrips(trades: readonly Trade[], held?: ReadonlySet<string>): RoundTrip[] {
   const open = new Map<
     string,
     { entryDate: DateStr; pnl: number; sells: number; lastSell: Trade | null }
@@ -363,6 +363,10 @@ export function roundTrips(trades: readonly Trade[]): RoundTrip[] {
     cur.lastSell = t;
     open.set(t.code, cur);
     if (t.reason !== "exposure") close(t.code, t);
+  }
+  // 仓位控制减到 0、之后没再买的：区间末不在持仓里（held 给出时才知道），按最后一笔卖出结掉
+  if (held) {
+    for (const [code, o] of [...open]) if (o.lastSell && !held.has(code)) close(code, o.lastSell);
   }
   return out;
 }
@@ -495,6 +499,7 @@ function computeMetricsV2(
   trades: readonly Trade[],
   capital: number,
   anchor: SeriesPoint | undefined,
+  held: ReadonlySet<string> | undefined,
 ): Metrics {
   // 从投入第一笔资金算起：锚点（决策日，净值 1）只在指标里加
   const anchored = anchor ? [anchor, ...series] : series;
@@ -505,7 +510,7 @@ function computeMetricsV2(
   // 交易统计去掉仓位控制的增减
   const buys = trades.filter((t) => t.side === "buy" && t.reason !== "exposure").length;
   const sells = trades.filter((t) => t.side === "sell" && t.reason !== "exposure").length;
-  const trips = roundTrips(trades);
+  const trips = roundTrips(trades, held);
   const winPnl = trips.filter((t) => t.pnl > 0).map((t) => t.pnl);
   const lossPnl = trips.filter((t) => t.pnl < 0).map((t) => t.pnl);
   const sumWin = winPnl.reduce((s, x) => s + x, 0);
@@ -531,6 +536,8 @@ function computeMetricsV2(
 
   return {
     ...base,
+    // 数值按带锚点的序列算；起点写第一个真实的交易日（锚点是用户选的起点前一天的决策日，不是区间起点）
+    start: series[0]?.date ?? base.start,
     drawdownPeak: dd.peak,
     drawdownTrough: dd.trough,
     drawdownRecovery: dd.recovery,

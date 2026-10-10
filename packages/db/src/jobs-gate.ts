@@ -1,12 +1,12 @@
 /**
- * 行情仓写库期间暂停回测（D60）：etl 道里有夜间更新（etl）或每周抽检（check）排队或在跑时，
+ * 行情仓写库期间暂停回测（D60）：etl 道里有夜间更新（etl）、每周抽检（check）或事件因子列补算（event_cols，S15b）排队或在跑时，
  * compute 道（回测、扫描、复核）不认领新任务。worker 的 runner 用它决定认不认领，
  * server 用它告诉用户「行情正在更新，回测会在更新完成后开始」。两边读的是同一张 jobs 表。
  */
 import type Database from "better-sqlite3";
 
-/** 会写行情仓的任务 */
-export const WAREHOUSE_WRITERS: ReadonlySet<string> = new Set(["etl", "check"]);
+/** 会写行情仓的任务（events 回填只写事件表、回测不读，不算；event_cols 改 factors_daily，算） */
+export const WAREHOUSE_WRITERS: ReadonlySet<string> = new Set(["etl", "check", "event_cols"]);
 
 /**
  * 排队或在跑的第一个写库任务（null = 没有，compute 道可以认领）。

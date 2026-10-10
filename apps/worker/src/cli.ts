@@ -8,12 +8,20 @@
  *   daily --market A|HK [--critical c1,c2]   夜间增量（休市自动跳过）。完整性闸门（D73）：缺日线的股票超过阈值时
  *                                              版本记 incomplete 并报错；ETL_ACCEPT_MISSING=c1,c2 放行指定代码；
  *                                              命令行不读应用库的跟踪，持仓股要用 --critical 指定（缺了不让整晚失败）
+ *   events --market A [--datasets margin,holders,lockups,blocks] [--since 2013-01-01] [--to 日期] [--estimate] [--force]
+ *                                              点时事件数据（两融、户数、解禁、大宗）回填，不设预算、不开数据版本（D81）；
+ *                                              --estimate 只发 4 个计数请求，给出请求数与时长区间。平时用管理页「补齐历史数据」
+ *                                              （worker 分段跑，不用停）；命令行要先停 worker
+ *   event-cols --market A [--force]           事件因子列（两融与筹码，S15b）按年补算，不开数据版本；补完写完成标记。
+ *                                              平时由 worker 在事件数据回填完成后自动排（每次一年）；命令行要先停 worker，
+ *                                              --force 清掉当前签名的进度从头补
  *   factors --market A|HK [--from 日期]       重算因子
  *   backtest <spec.json> [--start 2018-01-01] [--end 日期] [--capital 1000000] [--out 结果.json]
  *                                              回测一份策略（CLI 版，不写应用库）
  *   screen <spec.json> [--date 日期] [--limit 30] 按策略在某天选股
  *   doctor                                    体检：数据源连通性 + 行情仓各表的规模与最新日期 + 失败的回填项
- *   migrate                                   升级行情仓表结构（要改大表时 worker 不自己做，见 scripts/migrate.sh）
+ *   migrate [--down 4]                        升级行情仓表结构（要改大表时 worker 不自己做，见 scripts/migrate.sh）；
+ *                                              --down 4：换回 R4 或更早的代码（包括 916a43c）之前，删掉 7 个事件因子列（D83）
  *   sql "<SQL>"                               对行情仓执行只读查询（调试用）
  *
  * 注意：worker 服务运行时独占行情仓文件，命令行要在 worker 停掉时跑（或通过管理页触发任务）。
@@ -24,13 +32,18 @@ import {
   DEFAULT_PARAMS,
   defaultExec,
   describeExec,
+  isDateStr,
   type Market,
+  PIT_DATASET_IDS,
+  type PitDatasetId,
+  pitProgressText,
   todayCN,
   validateSpec,
 } from "@ivan/core";
 import {
   acceptMissingFromEnv,
   backfill,
+  backfillEventColumns,
   BACKFILL_STEPS,
   type BackfillStep,
   buildSimInput,
@@ -40,7 +53,11 @@ import {
   screenOn,
   daily,
   type EtlContext,
+  estimatePitBackfill,
   Http,
+  pitBackfillProgress,
+  PIT_DEFAULT_SINCE,
+  runPitSyncs,
   renderProbeMarkdown,
   runProbe,
   SCHEMA_VERSION,
@@ -62,10 +79,32 @@ function market(): Market {
   return m;
 }
 
-/** ETL 上下文 + 具体的 Http（上下文里只是 HttpLike，统计要从具体实例拿）。 */
-async function openCtx(): Promise<{ ctx: EtlContext; http: Http }> {
+/** worker 运行时行情仓被独占：命令行打不开时的说明（和 doctor 同一句开头） */
+const WAREHOUSE_LOCKED_TEXT =
+  "行情仓打不开（worker 正在运行时会被独占）：估算与查看表大小请用管理页，要跑这条命令先 pm2 stop ivan-worker";
+
+/**
+ * ETL 上下文 + 具体的 Http（上下文里只是 HttpLike，统计要从具体实例拿）。
+ * light：只读性质的命令（估算）不顺手做重迁移，行情仓还没升级时直接报维护说明退出。
+ */
+async function openCtx(o: { light?: boolean } = {}): Promise<{ ctx: EtlContext; http: Http }> {
   const cfg = loadConfig();
-  const wh = await Warehouse.open(cfg.warehousePath, cfg.duckdb);
+  let wh: Warehouse;
+  try {
+    wh = await Warehouse.open(cfg.warehousePath, {
+      ...cfg.duckdb,
+      ...(o.light ? { migrate: "light" as const } : {}),
+    });
+  } catch (e) {
+    throw new Error(`${WAREHOUSE_LOCKED_TEXT}（${e instanceof Error ? e.message : e}）`, {
+      cause: e,
+    });
+  }
+  if (o.light && wh.maintenance) {
+    const m = wh.maintenance;
+    wh.close();
+    throw new Error(`${m}；升级完再估算`);
+  }
   const klineMs = process.env.KLINE_INTERVAL_MS ? Number(process.env.KLINE_INTERVAL_MS) : undefined;
   const http = new Http({
     concurrencyPerHost: cfg.fetch.concurrency,
@@ -127,6 +166,50 @@ async function main() {
       });
       console.log(r);
       printHttp(http);
+      ctx.wh.close();
+      return;
+    }
+    case "events": {
+      if (market() !== "A") throw new Error("点时事件数据只有 A 股");
+      const ids = (flag("datasets")?.split(",") ?? [...PIT_DATASET_IDS]) as PitDatasetId[];
+      for (const id of ids) {
+        if (!PIT_DATASET_IDS.includes(id))
+          throw new Error(`未知数据集 ${id}，可选 ${PIT_DATASET_IDS.join(",")}`);
+      }
+      const since = flag("since") ?? PIT_DEFAULT_SINCE;
+      const to = flag("to");
+      for (const d of [since, ...(to ? [to] : [])]) {
+        if (!isDateStr(d)) throw new Error(`日期格式要是 YYYY-MM-DD：${d}`);
+      }
+      const { ctx, http } = await openCtx({ light: has("estimate") });
+      if (has("estimate")) {
+        const r = await estimatePitBackfill(ctx, ids, since, to);
+        for (const line of r.lines) console.log(line);
+        console.log(`（共 ${r.requests} 次计数请求）`);
+      } else {
+        const r = await runPitSyncs(ctx, "backfill", ids, null, {
+          from: since,
+          to,
+          force: has("force"),
+          note: async () => pitProgressText(await pitBackfillProgress(ctx.wh, ctx.today, since)),
+        });
+        for (const x of r.results) console.log(`${x.id}：${x.detail}`);
+        console.log(pitProgressText(await pitBackfillProgress(ctx.wh, ctx.today, since), "\n"));
+      }
+      printHttp(http);
+      ctx.wh.close();
+      return;
+    }
+    case "event-cols": {
+      if (market() !== "A") throw new Error("事件因子只有 A 股");
+      const { ctx } = await openCtx();
+      const r = await backfillEventColumns(ctx, "A", { force: has("force") });
+      if (r.skipped)
+        console.log("事件数据的历史回填还没完成（有数据集没有覆盖起点），先运行 pnpm ivan events");
+      else
+        console.log(
+          `补了 ${r.years.join("、") || "无"}（${r.rows} 行）；${r.complete ? `已补完（第 ${r.v} 版，签名 ${r.sig}）` : `还剩 ${r.remaining} 年`}`,
+        );
       ctx.wh.close();
       return;
     }
@@ -304,8 +387,9 @@ async function main() {
           `SELECT market, count(*) AS 因子行数, max(date)::VARCHAR AS 最新 FROM factors_daily GROUP BY market ORDER BY market`,
         ),
       );
-      if (await wh.pendingHeavyMigration()) {
-        console.log("\n⚠️  行情仓还是第 2 版，需要升级：bash scripts/migrate.sh");
+      const heavy = await wh.pendingHeavyMigrationText();
+      if (heavy) {
+        console.log(`\n⚠️  ${heavy}（bash scripts/migrate.sh）`);
       } else {
         console.table(
           await q(
@@ -325,9 +409,22 @@ async function main() {
       return;
     }
     case "migrate": {
-      // 改大表的升级（第 3 版在约 2500 万行日线上补列）：worker 要先停掉，scripts/migrate.sh 负责停与拉起
+      // 改大表的升级（第 3 版在约 2500 万行日线上补列、第 5 版在约 1600 万行因子表上加列）：
+      // worker 要先停掉，scripts/migrate.sh 负责停与拉起
       const cfg = loadConfig();
       const t0 = Date.now();
+      const down = flag("down");
+      if (down !== undefined) {
+        // 回滚到 R4 之前（D83）：light 打开（不先把要删的列加回来），删掉 7 个事件因子列，版本号写回 4
+        const wh = await Warehouse.open(cfg.warehousePath, { ...cfg.duckdb, migrate: "light" });
+        await wh.migrateDown(Number(down));
+        await wh.checkpoint();
+        wh.close();
+        console.log(
+          `行情仓已降到第 ${down} 版（删掉了事件因子列），用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒；现在可以换回 R4 或更早的代码（包括 916a43c）`,
+        );
+        return;
+      }
       const wh = await Warehouse.open(cfg.warehousePath, { ...cfg.duckdb, migrate: "auto" });
       await wh.checkpoint();
       wh.close();
@@ -346,7 +443,7 @@ async function main() {
     }
     default:
       console.log(
-        "用法：pnpm ivan <probe|backfill|daily|factors|backtest|screen|doctor|migrate|sql> [参数]，详见 apps/worker/src/cli.ts",
+        "用法：pnpm ivan <probe|backfill|daily|events|event-cols|factors|backtest|screen|doctor|migrate|sql> [参数]，详见 apps/worker/src/cli.ts",
       );
       process.exitCode = cmd ? 1 : 0;
   }

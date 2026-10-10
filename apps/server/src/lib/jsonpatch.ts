@@ -7,13 +7,29 @@ export interface PatchOp {
   value?: unknown;
 }
 
+/** 会改到原型链的键：一律拒绝（否则 /__proto__/x 会写到整个进程共用的 Object.prototype 上） */
+const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
 function parsePath(path: string): string[] {
   if (path === "" || path === "/") return [];
   if (!path.startsWith("/")) throw new Error(`补丁路径要以 / 开头：${path}`);
-  return path
+  const keys = path
     .slice(1)
     .split("/")
     .map((s) => s.replaceAll("~1", "/").replaceAll("~0", "~"));
+  for (const k of keys)
+    if (FORBIDDEN_KEYS.has(k)) throw new Error(`补丁路径里不能有 ${k}：${path}`);
+  return keys;
+}
+
+/** 补丁路径是否可用（不含原型链上的键）：扫描参数先用它挡一下 */
+export function isSafePatchPath(path: string): boolean {
+  try {
+    parsePath(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function applyPatch<T>(doc: T, ops: readonly PatchOp[]): T {
@@ -24,7 +40,12 @@ export function applyPatch<T>(doc: T, ops: readonly PatchOp[]): T {
     let parent = root as Record<string, unknown> | unknown[];
     for (let i = 0; i < keys.length - 1; i++) {
       const k = keys[i]!;
-      let next = Array.isArray(parent) ? parent[Number(k)] : parent[k];
+      // 只往下走自己的属性（不走原型链上继承来的）
+      let next = Array.isArray(parent)
+        ? parent[Number(k)]
+        : Object.hasOwn(parent, k)
+          ? parent[k]
+          : undefined;
       if (next === undefined || next === null) {
         if (op.op === "remove") throw new Error(`路径不存在：${op.path}`);
         next = /^\d+$/.test(keys[i + 1]!) || keys[i + 1] === "-" ? [] : {};

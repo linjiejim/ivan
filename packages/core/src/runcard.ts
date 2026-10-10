@@ -9,6 +9,7 @@ import type { DateStr } from "./dates.ts";
 import type { ExecConfig } from "./exec.ts";
 import type { Market } from "./market.ts";
 import type { RunProvenance, SimResult } from "./backtest.ts";
+import type { PitDatasetId } from "./pit.ts";
 
 export type RunCardKind = "backtest" | "sweep_child" | "reproduce";
 
@@ -33,12 +34,27 @@ export interface RunCard {
     caveatsHash: string;
     /** 行情来源占比、缺失与数据问题（S13）；S13 之前的运行没有 */
     provenance?: RunProvenance;
+    /** 事件因子（S15b）：只在策略用到两融与筹码类因子时才有 */
+    events?: RunCardEvents;
   };
   /** 可信度的自助法种子（S06，来自 inputHash） */
   seeds: { validation: number | null };
   outputs: { coreHash: string; reportHash: string };
   /** 覆盖卡片本身（不含 runId、createdAt） */
   cardHash: string;
+}
+
+/** 运行卡里的事件因子信息：口径版本、补算签名与批次、各数据集的覆盖起点与同步到哪天 */
+export interface RunCardEvents {
+  version: number;
+  sig: string | null;
+  batch: number | null;
+  datasets: Partial<
+    Record<
+      PitDatasetId,
+      { coveredFrom: DateStr | null; windowThrough: DateStr | null; syncedAt: DateStr | null }
+    >
+  >;
 }
 
 export type HashFn = (v: unknown) => string;

@@ -15,6 +15,7 @@ import { and, asc, count, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
 import { worker } from "../lib/worker-client.ts";
+import { cachedDataStatus } from "./runs.ts";
 
 export interface PlanItemView {
   seq: number;
@@ -303,13 +304,43 @@ export interface PlanOutcome {
   excess20: number | null;
 }
 
+/** 计划结果回看的缓存：同一版计划、同一个已提交的数据版本，结果不会变（不计额度，所以不让反复刷新压到 worker） */
+const outcomesCache = new Map<string, { asOf: string | null; outcomes: PlanOutcome[] }>();
+const OUTCOMES_CACHE_MAX = 500;
+
 /** 计划结果回看（D79）：这一版每条计划项后来怎么样；只用提交过的数据，不计额度（只有主人能看、最多 50 条） */
 export async function planOutcomes(userId: string, id: string) {
   const s = getSnapshot(userId, id);
   const t = ownTracking(userId, s.trackingId);
   if (!s.benchSym) return { asOf: null, outcomes: [] as PlanOutcome[] };
+  return cachedPlanOutcomes(s, t.market);
+}
+
+/**
+ * 一版计划的结果回看，按（快照、市场当前提交的数据版本）缓存：/api/plans/:id/outcomes 与回溯页的 plan-on 共用。
+ * 拿不到数据版本（worker 不在）时不缓存。
+ */
+export async function cachedPlanOutcomes(
+  s: PlanSnapshotView,
+  market: string,
+): Promise<{ asOf: string | null; outcomes: PlanOutcome[] }> {
+  const dv =
+    (await cachedDataStatus())?.markets?.find((m) => m.market === market)?.dataVersion ?? null;
+  const key = dv === null ? null : `${s.id}:${dv}`;
+  const hit = key ? outcomesCache.get(key) : undefined;
+  if (hit) return hit;
+  const r = await fetchOutcomes(s, market);
+  if (key) {
+    if (outcomesCache.size >= OUTCOMES_CACHE_MAX)
+      outcomesCache.delete(outcomesCache.keys().next().value!);
+    outcomesCache.set(key, r);
+  }
+  return r;
+}
+
+function fetchOutcomes(s: PlanSnapshotView, market: string) {
   return worker.post<{ asOf: string | null; outcomes: PlanOutcome[] }>("/internal/plan-outcomes", {
-    market: t.market,
+    market,
     benchSym: s.benchSym,
     items: s.items.slice(0, 50).map((i) => ({
       code: i.code,

@@ -19,6 +19,7 @@ import {
   compareRuns,
   enqueueBacktest,
   enqueueSweep,
+  eventFactorCoverage,
   getRun,
   listRuns,
   queryRun,
@@ -32,7 +33,12 @@ import {
   versionNOf,
 } from "../services/strategies.ts";
 import { dataStatus, overview } from "../services/dashboard.ts";
-import { type SecurityEvidence, securityEvidence } from "../services/evidence.ts";
+import {
+  type SecurityEvidence,
+  securityEvents,
+  type SecurityEventsView,
+  securityEvidence,
+} from "../services/evidence.ts";
 import { findSnapshot } from "../services/plans.ts";
 import {
   getTracking,
@@ -112,17 +118,49 @@ function navFanOf(summary: unknown): { percentile: number | null; band: string |
   return { percentile: s.navFanPercentile ?? null, band: s.navFanBand ?? null };
 }
 
-/** 证据给模型的分组顺序：估值、质量、价格、财报、数据状态 */
-const EVIDENCE_GROUP_ORDER = ["valuation", "quality", "price", "financial", "status"] as const;
+/** 证据给模型的分组顺序：估值、质量、价格、财报、数据状态、两融与筹码（S15b） */
+const EVIDENCE_GROUP_ORDER = [
+  "valuation",
+  "quality",
+  "price",
+  "financial",
+  "status",
+  "events",
+] as const;
 
-/** 给模型看的个股证据摘要：最多 12 项、数值四舍五入（卡片已展示全部条目与出处） */
+/**
+ * 每组最多给模型几项（按组留位置）：因子（估值与质量合计）最多 7 项，再给价格、财报、数据状态、两融与筹码各留几项，
+ * 免得默认的十几个因子把收盘价、财报、事件挤掉（核对数字时模型要能引用到它们）
+ */
+const EVIDENCE_GROUP_CAP: Record<(typeof EVIDENCE_GROUP_ORDER)[number], number> = {
+  valuation: 7,
+  quality: 7,
+  price: 2,
+  financial: 3,
+  status: 2,
+  events: 3,
+};
+/** 估值与质量共用一份名额 */
+const capKey = (g: string) => (g === "quality" ? "valuation" : g);
+const EVIDENCE_MODEL_MAX = 16;
+
+/** 给模型看的个股证据摘要：最多 16 项（按组留位置）、数值四舍五入（卡片已展示全部条目与出处） */
 export function evidenceForModel(e: SecurityEvidence) {
   const d = e.dossier;
+  const taken = new Map<string, number>();
   const items = d.items
     .filter((i) => i.value !== null && i.key !== "adj")
     .map((i, n) => ({ i, n, g: EVIDENCE_GROUP_ORDER.indexOf(i.group) }))
     .sort((a, b) => a.g - b.g || a.n - b.n)
-    .slice(0, 12)
+    .filter(({ i }) => {
+      const k = capKey(i.group);
+      const n = taken.get(k) ?? 0;
+      const cap = EVIDENCE_GROUP_CAP[i.group as keyof typeof EVIDENCE_GROUP_CAP] ?? 2;
+      if (n >= cap) return false;
+      taken.set(k, n + 1);
+      return true;
+    })
+    .slice(0, EVIDENCE_MODEL_MAX)
     .map(({ i }) => ({
       label: i.label,
       value: typeof i.value === "number" ? r2(i.value, 2) : i.value,
@@ -186,6 +224,65 @@ export function evidenceForModel(e: SecurityEvidence) {
   };
 }
 
+/**
+ * 给模型看的两融与筹码摘要（S15b）：最新一条两融与 20 条前的变化、最近 4 期户数、接下来 3 次已知解禁、近 20 个交易日大宗。
+ * 百分数的键都以 Pct 结尾（数字核对按百分点归类，S09）；金额是元，户数、股数是计数。卡片已展示全部明细。
+ */
+export function eventsForModel(e: SecurityEventsView) {
+  const m = e.margin;
+  const lastM = m.at(-1) ?? null;
+  const base = m.length >= 21 ? m[m.length - 21]! : null;
+  const dealAmount = e.blocks.reduce((a, b) => a + (b.dealAmount ?? 0), 0);
+  const weighted = e.blocks.reduce((a, b) => a + (b.premiumPct ?? 0) * (b.dealAmount ?? 0), 0);
+  return {
+    code: e.code,
+    name: e.name,
+    asOf: e.asOf,
+    dataVersion: e.dataVersion.id,
+    margin: lastM
+      ? {
+          date: lastM.date,
+          availDate: lastM.availDate,
+          financingAmount: lastM.financingAmount,
+          marginRatioPct: r2(lastM.marginRatio, 2),
+          marginChg20dPct:
+            base?.financingAmount && lastM.financingAmount !== null
+              ? r2((lastM.financingAmount / base.financingAmount - 1) * 100, 2)
+              : null,
+          ...(base ? { comparedWith: base.date } : {}),
+        }
+      : null,
+    holders: e.holders.slice(0, 4).map((h) => ({
+      endDate: h.endDate,
+      noticeDate: h.noticeDate,
+      holderNum: h.holderNum,
+      qoqPct: r2(h.qoqPct, 2),
+    })),
+    lockups: e.lockups.slice(0, 3).map((l) => ({
+      freeDate: l.freeDate,
+      type: l.type,
+      unlockShares: l.unlockShares,
+      ratioFloatPct: r2(l.ratioFloatPct, 2),
+      availDate: l.availDate,
+      availRule: l.availRule,
+    })),
+    blocks: {
+      count: e.blocks.length,
+      dealAmount,
+      premium20dPct: dealAmount > 0 ? r2(weighted / dealAmount, 2) : null,
+      last: e.blocks.slice(0, 5).map((b) => ({
+        tradeDate: b.tradeDate,
+        dealPrice: b.dealPrice,
+        premiumPct: r2(b.premiumPct, 2),
+        dealAmount: b.dealAmount,
+        buyerInst: b.buyerInst,
+      })),
+    },
+    caveats: e.caveats.map((c) => c.title),
+    note: "只含 asOf 当时已公布、没撤下的数据（两融与大宗 T+1、户数按公告日、解禁按规则推算的可得日）；卡片已展示全部明细。不是投资建议。",
+  };
+}
+
 /** 名称或代码 → 唯一的证券代码；对不上或有多只时把候选写进错误，让模型问清楚 */
 async function resolveSecurity(query: string): Promise<string> {
   const q = query.trim();
@@ -217,16 +314,27 @@ export function buildTools(ctx: AgentContext): ToolSet {
     list_factors: tool({
       description: "列出某个市场可用的因子（名字、单位、口径）。只能用这里的因子写策略。",
       inputSchema: z.object({ market: z.enum(["A", "HK"]) }),
-      execute: async ({ market }) => ({
-        market,
-        factors: factorsForMarket(market as Market).map((f) => ({
-          key: f.key,
-          label: f.label,
-          kind: f.kind,
-          unit: f.unit ?? null,
-          describe: f.describe,
-        })),
-      }),
+      execute: async ({ market }) => {
+        // 事件因子（两融与筹码，S15b）带数据集、数据起点与是否补算完成：没补完的不能回测
+        const cov = market === "A" ? ((await eventFactorCoverage())?.factorCoverage ?? null) : null;
+        return {
+          market,
+          factors: factorsForMarket(market as Market).map((f) => ({
+            key: f.key,
+            label: f.label,
+            kind: f.kind,
+            unit: f.unit ?? null,
+            describe: f.describe,
+            ...(f.dataset
+              ? {
+                  dataset: f.dataset,
+                  from: cov?.[f.key]?.from ?? null,
+                  ready: cov?.[f.key]?.ready ?? null,
+                }
+              : {}),
+          })),
+        };
+      },
       toModelOutput: ({ output }) => json(output),
     }),
 
@@ -491,7 +599,10 @@ export function buildTools(ctx: AgentContext): ToolSet {
         "按某个策略版本在最新数据日（或指定 date）选股，返回排名与关键因子。这是按规则算出的结果，不是投资建议。",
       inputSchema: z.object({
         versionId: z.string().optional(),
-        date: z.string().optional(),
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "日期格式要是 YYYY-MM-DD")
+          .optional(),
         limit: z.number().int().optional(),
       }),
       execute: async (input) => {
@@ -588,6 +699,25 @@ export function buildTools(ctx: AgentContext): ToolSet {
       toModelOutput: ({ output }) => json(evidenceForModel(output)),
     }),
 
+    get_security_events: tool({
+      description:
+        "查看个股（只有 A 股）的融资融券、股东户数、限售解禁与大宗交易明细：只含 asOf 当时已公布、没撤下的数据。" +
+        "问个股的融资余额、户数变化、什么时候解禁、大宗折价时用它；问「为什么那天选了它」用 get_security_evidence",
+      inputSchema: z.object({
+        query: z.string().describe("名称或代码，如 贵州茅台、600519"),
+        asOf: z.string().optional().describe("截至哪天 YYYY-MM-DD（默认最新的已提交数据日）"),
+        datasets: z
+          .array(z.enum(["margin", "holders", "lockups", "blocks"]))
+          .optional()
+          .describe("只看其中几组：margin 两融、holders 户数、lockups 解禁、blocks 大宗"),
+      }),
+      execute: async (input) => {
+        const code = await resolveSecurity(input.query);
+        return securityEvents(userId, code, { asOf: input.asOf, datasets: input.datasets });
+      },
+      toModelOutput: ({ output }) => json(eventsForModel(output)),
+    }),
+
     propose_tracking: tool({
       description:
         "提议把一个策略版本上线向前跟踪（模拟盘，每个交易日收盘后结算）。只生成待确认卡片，用户确认后才上线。",
@@ -618,7 +748,11 @@ export function buildTools(ctx: AgentContext): ToolSet {
         const id = trackingId ?? ctx.page.trackingId;
         if (!id) throw new Error("没有指定跟踪");
         const t = getTracking(userId, id);
-        const v = verdictView(t, await dataStatus());
+        // 停了的跟踪没有判词（最后结算日永远落后于数据，不是「数据未更新」）
+        const stopped = t.status !== "active";
+        const v = stopped
+          ? { verdict: null, health: null, lastError: null }
+          : verdictView(t, await dataStatus());
         return {
           trackingId: t.id,
           strategyName: t.strategyName,
@@ -634,6 +768,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
           navFanPercentile: r2(navFanOf(t.summary).percentile, 0),
           navFanBand: navFanOf(t.summary).band,
           // 判词与健康度（D70）：确定性算好的，模型原样说
+          stopped,
           verdict: v.verdict,
           health: v.health
             ? { state: v.health.state, signal: v.health.signal, perMetric: v.health.perMetric }
@@ -647,23 +782,28 @@ export function buildTools(ctx: AgentContext): ToolSet {
           })),
         };
       },
-      toModelOutput: ({ output }) =>
-        json({
+      toModelOutput: ({ output }) => {
+        // 早于判词（S10）存下的结果：原样给，不替工具编一个判词或「观察期」
+        if (output.verdict === undefined) return json(output);
+        if (output.verdict === null) return json({ ...output, verdict: "已停止", health: null });
+        const verdict = output.verdict;
+        return json({
           ...output,
-          verdict: VERDICT_TEXT[output.verdict],
-          health: {
-            state: output.health ? HEALTH_STATE_TEXT[output.health.state] : "观察期",
-            verdict: VERDICT_TEXT[output.verdict],
-            perMetric: output.health
-              ? Object.fromEntries(
+          verdict: VERDICT_TEXT[verdict],
+          health: output.health
+            ? {
+                state: HEALTH_STATE_TEXT[output.health.state],
+                verdict: VERDICT_TEXT[verdict],
+                perMetric: Object.fromEntries(
                   Object.entries(output.health.perMetric).map(([k, m]) => [
                     k,
                     { value: r2(m.value, k === "beatBacktestPct" ? 0 : 2), signal: m.signal },
                   ]),
-                )
-              : {},
-          },
-        }),
+                ),
+              }
+            : null,
+        });
+      },
     }),
 
     get_overview: tool({
@@ -701,7 +841,10 @@ export function buildTools(ctx: AgentContext): ToolSet {
         spec: z
           .record(z.string(), z.any())
           .describe("与 propose_strategy 相同的 spec（name 可省略）"),
-        date: z.string().optional(),
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "日期格式要是 YYYY-MM-DD")
+          .optional(),
         limit: z.number().int().optional().describe("最多返回几只，默认 20，最多 50"),
       }),
       execute: async ({ spec, date, limit }) => {

@@ -26,7 +26,7 @@ import {
   hashSimInput,
   SCHEMA_VERSION,
 } from "@ivan/data";
-import { changeCause } from "@ivan/engine";
+import { changeCause, legacyView } from "@ivan/engine";
 import {
   newId,
   packJson,
@@ -116,6 +116,8 @@ function specHashFor(run: RunRow): string {
 
 /**
  * 从存档里算结果指纹（原运行早于运行卡时，完整重跑用它比）：两边都经过同一套存储再算，口径一致。
+ * 早于运行卡的运行是引擎 1.1.0 存的，两边都先投影成 1.1.0 存过的字段（legacyView，冻结）再算：
+ * 1.2.0 在旧口径下也会多写一些字段（final.pending 的预估价与股数、成交的 slip / part），不能因此报「结果不同」。
  */
 export function storedResultHashes(runId: string): { coreHash: string; reportHash: string } {
   const { db } = env().app;
@@ -142,18 +144,17 @@ export function storedResultHashes(runId: string): { coreHash: string; reportHas
       slip: t.slip ?? undefined,
       part: t.part ?? undefined,
     }));
-  return {
-    coreHash: sha256Canonical({
-      series: unpackJson(r.seriesZ),
-      trades,
-      holdings: unpackJson(r.holdingsZ),
-      metrics: r.metrics,
-      segments: r.segments,
-      attribution: r.attribution,
-      final: r.final,
-    }),
-    reportHash: sha256Canonical(r.checks ?? []),
-  };
+  const { checks, ...core } = legacyView({
+    series: unpackJson(r.seriesZ),
+    trades,
+    holdings: unpackJson(r.holdingsZ),
+    metrics: r.metrics,
+    segments: r.segments,
+    attribution: r.attribution,
+    final: r.final,
+    checks: r.checks ?? [],
+  } as unknown as SimResult);
+  return { coreHash: sha256Canonical(core), reportHash: sha256Canonical(checks) };
 }
 
 /** 跑一个 run 并写回结果与运行卡（回测、扫描子回测、完整重跑共用） */
@@ -220,8 +221,11 @@ async function execute(
         caveatsHash,
         // 行情来源占比、缺失与数据问题（S13）：只是报告，不进输入指纹
         provenance: built.provenance,
+        // 事件因子（S15b）：只在策略用到两融与筹码类因子时才写（不用的运行卡片与以前逐字节一致）
+        ...(built.events ? { events: built.events } : {}),
       },
-      seeds: { validation: seed },
+      // 日收益不够、没算区间时不记种子（不为不存在的区间声称一个种子）
+      seeds: { validation: validation ? seed : null },
       outputs: resultHashes({ ...result, validation }, sha256Canonical),
     },
     sha256Canonical,

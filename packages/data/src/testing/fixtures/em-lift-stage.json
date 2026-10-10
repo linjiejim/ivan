@@ -1,0 +1,42 @@
+{
+ "version": null,
+ "result": {
+  "pages": 1,
+  "data": [
+   {
+    "SECUCODE": "300005.SZ",
+    "FREE_DATE": "2013-01-04 00:00:00",
+    "FREE_SHARES_TYPE": "首发原股东限售股份",
+    "CURRENT_FREE_SHARES": 9180.0,
+    "ABLE_FREE_SHARES": 7650.0,
+    "FREE_SHARES": 17280.0,
+    "FREE_RATIO": 1.133333333333,
+    "TOTAL_RATIO": 0.53125
+   },
+   {
+    "SECUCODE": "002150.SZ",
+    "FREE_DATE": "2026-10-12 00:00:00",
+    "FREE_SHARES_TYPE": "股权激励限售股份",
+    "CURRENT_FREE_SHARES": 156.24,
+    "ABLE_FREE_SHARES": 156.24,
+    "FREE_SHARES": 61803.12,
+    "FREE_RATIO": 0.002534434833,
+    "TOTAL_RATIO": 0.002518
+   },
+   {
+    "SECUCODE": "301358.SZ",
+    "FREE_DATE": "2026-10-15 00:00:00",
+    "FREE_SHARES_TYPE": "定向增发机构配售股份",
+    "CURRENT_FREE_SHARES": 8253.7493,
+    "ABLE_FREE_SHARES": 8253.7493,
+    "FREE_SHARES": 84581.5647,
+    "FREE_RATIO": 0.108135536917,
+    "TOTAL_RATIO": 0.097582
+   }
+  ],
+  "count": 3
+ },
+ "success": true,
+ "message": "ok",
+ "code": 0
+}

@@ -5,6 +5,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { GROUNDING_VERSION } from "@ivan/ai";
 import { defaultExec, LEGACY_EXEC, specFactorKeys, todayCN, validateSpec } from "@ivan/core";
 import { loadConfig } from "@ivan/core/config";
 import { specHashOf } from "@ivan/core/node";
@@ -22,7 +23,7 @@ import {
   writeBriefEdition,
 } from "@ivan/db";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { buildTools, evidenceForModel } from "./agent/tools.ts";
+import { buildTools, eventsForModel, evidenceForModel } from "./agent/tools.ts";
 import { createApp } from "./app.ts";
 import { clearDataStatusCache } from "./services/runs.ts";
 import { createAuth, migrateAuth } from "./auth.ts";
@@ -134,6 +135,26 @@ describe("账号与邀请码（验收 8）", () => {
       body: { chatMessages: null, backtests: null },
       cookie: admin,
     });
+  });
+});
+
+describe("管理接口的请求体", () => {
+  it("额度：请求体不是对象 400；用户不存在 404；事件回填：请求体不是对象 400（不转给 worker）", async () => {
+    for (const body of [[1], 3, "x"]) {
+      const r = await call(`/api/admin/users/${adminId}/quota`, { body, cookie: admin });
+      expect(r.status).toBe(400);
+      expect(r.json.error).toBe("请求体要是一个对象");
+      const e = await call("/api/admin/events/backfill", { body, cookie: admin });
+      expect(e.status).toBe(400);
+    }
+    const nobody = await call(`/api/admin/users/u_nobody/quota`, {
+      body: { backtests: 3 },
+      cookie: admin,
+    });
+    expect(nobody.status).toBe(404);
+    expect(
+      handle.sqlite.prepare(`SELECT 1 FROM user_quotas WHERE user_id = 'u_nobody'`).get(),
+    ).toBeUndefined();
   });
 });
 
@@ -459,14 +480,14 @@ describe("对话链路（模拟模型）", () => {
       r.stream.lastIndexOf('"type":"finish"'),
     );
     expect(r.parts.find((p) => p.type === "text")?.text).toBe("这个策略超额 +99.9%，很稳。");
-    expect(r.grounding).toMatchObject({ version: 1, checked: 1 });
+    expect(r.grounding).toMatchObject({ version: GROUNDING_VERSION, checked: 1 });
     expect(r.grounding!.unverified).toHaveLength(1);
     expect(r.grounding!.unverified[0]).toMatchObject({ raw: "+99.9%", reason: "no_match" });
     expect(r.usage).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       model: "mock-chat",
-      grounding: { version: 1, checked: 1, unverified: 1 },
+      grounding: { version: GROUNDING_VERSION, checked: 1, unverified: 1 },
     });
     // 管理页按天统计核对没通过的回复
     const u = await call("/api/admin/usage", { cookie: admin });
@@ -495,7 +516,11 @@ describe("对话链路（模拟模型）", () => {
       if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
       const reply = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
       if (url.pathname === "/internal/securities/search")
-        return reply([{ code: "600519.SH", name: "贵州茅台", market: "A" }]);
+        return reply(
+          (url.searchParams.get("q") ?? "").includes("00700")
+            ? [{ code: "00700.HK", name: "腾讯控股", market: "HK" }]
+            : [{ code: "600519.SH", name: "贵州茅台", market: "A" }],
+        );
       if (url.pathname === "/internal/securities/600519.SH")
         return reply({
           security: { code: "600519.SH", name: "贵州茅台", market: "A" },
@@ -1040,6 +1065,29 @@ describe("运行合约（D55、D57、D59）", () => {
     });
   });
 
+  it("补丁路径不能碰原型链：扫描与草稿给 /__proto__/x、/constructor/prototype/x 都 400，Object.prototype 不变", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    for (const path of [
+      "/__proto__/polluted",
+      "/constructor/prototype/polluted",
+      "/rank/__proto__/polluted",
+    ]) {
+      const sw = await call("/api/runs/sweep", {
+        body: { versionId: v.versionId, path, values: [1, 2], start: "2020-01-02" },
+        cookie: admin,
+      });
+      expect(sw.status).toBe(400);
+      const d = await call("/api/drafts", {
+        body: { strategyId: v.strategyId, patch: [{ op: "add", path, value: "yes" }] },
+        cookie: admin,
+      });
+      expect(d.status).toBe(400);
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    clearJobs();
+  });
+
   it("完整重跑的终点钉在原运行卡记下的那天；复核与重跑互斥；重跑本身不能复核", async () => {
     clearJobs();
     const v = await presetVersion();
@@ -1292,6 +1340,17 @@ describe("个股证据（D67、D59）", () => {
         );
       }
       const m = /^\/internal\/securities\/([^/]+)\/dossier$/.exec(url.pathname);
+      if (m && m[1] === "600009.SH") {
+        // worker 内部出错：原文带 SQL 与文件路径
+        return new Response(
+          JSON.stringify({
+            error: "Binder Error: column x not found in /root/ivan/data/market.duckdb",
+          }),
+          { status: 500 },
+        );
+      }
+      if (m && m[1] === "600008.SH")
+        return new Response(JSON.stringify({ error: "这只股票那天还没有数据" }), { status: 404 });
       if (m) {
         const asOf = url.searchParams.get("asOf") ?? DATA_VERSION.asOf;
         const factors = (url.searchParams.get("factors") ?? "pe_ttm").split(",").filter(Boolean);
@@ -1382,6 +1441,36 @@ describe("个股证据（D67、D59）", () => {
       cookie: admin,
     });
     expect(none.status).toBe(400);
+    // 没拿到证据不扣额度
+    expect(await used()).toBe(before + 1);
+    const missing = await call("/api/securities/600008/evidence", { cookie: admin });
+    expect(missing.status).toBe(404);
+    expect(missing.json.error).toBe("这只股票那天还没有数据");
+    expect(await used()).toBe(before + 1);
+  });
+
+  it("worker 内部出错：只给通用的中文原因，不把 SQL 与文件路径传给用户；不扣额度", async () => {
+    fakeWorker();
+    const before = await used();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const r = await call("/api/securities/600009/evidence", { cookie: admin });
+    errSpy.mockRestore();
+    expect(r.status).toBe(500);
+    expect(r.json.error).toBe("行情服务出错，请稍后再试");
+    expect(JSON.stringify(r.json)).not.toMatch(/Binder|duckdb/);
+    expect(await used()).toBe(before);
+  });
+
+  it("给了别人的跟踪（同时给了自己的版本）：先 404，不扣额度", async () => {
+    fakeWorker();
+    const v = await aVersion();
+    const before = await used();
+    const r = await call(
+      `/api/securities/600001/evidence?versionId=${v.versionId}&trackingId=t_nobody&decisionDate=2024-03-01`,
+      { cookie: admin },
+    );
+    expect(r.status).toBe(404);
+    expect(await used()).toBe(before);
   });
 
   it("扫描子回测按它自己的 specOverride 解释；运行卡记的数据版本和现在不同时提示数据修订过", async () => {
@@ -1455,7 +1544,7 @@ describe("个股证据（D67、D59）", () => {
     expect(r.json.error).toBe("行情服务（worker）没有运行");
   });
 
-  it("get_security_evidence：只读、计入额度；名字对应多只时把候选写进错误；给模型的摘要最多 12 项", async () => {
+  it("get_security_evidence：只读、计入额度；名字对应多只时把候选写进错误；给模型的摘要按组留位置", async () => {
     fakeWorker();
     const tools = buildTools({ userId: adminId, threadId: "th_test", page: {} });
     const opts = { toolCallId: "t", messages: [] } as never;
@@ -1473,11 +1562,26 @@ describe("个股证据（D67、D59）", () => {
       tools.get_security_evidence!.execute!({ query: "银行" }, opts) as Promise<unknown>,
     ).rejects.toThrow("「银行」对应多只股票：甲银行（600001.SH）、乙银行（600002.SH）");
 
-    // 一份 20 个因子的证据：模型只拿到 12 项，数值四舍五入到 2 位
+    // 一份 20 个因子的证据：因子只给 7 项，收盘价、财报、两融与筹码不被挤掉；数值四舍五入到 2 位
     const many = dossierFor(
       "600001.SH",
       "2024-03-01",
       Array.from({ length: 20 }, (_, i) => `f${i}`),
+    );
+    const ev = (key: string, value: number) => ({
+      group: "events",
+      key,
+      label: key,
+      value,
+      asOf: "2024-03-01",
+      availDate: "2024-03-01",
+      ref: { table: "factors_daily", key: {}, src: null, ver: null },
+    });
+    many.items.push(
+      ev("margin_ratio", 1.1) as never,
+      ev("unlock_days", 181) as never,
+      ev("holder_num_qoq", -3) as never,
+      ev("block_premium_20d", -2) as never,
     );
     const m = evidenceForModel({
       planRecord: null,
@@ -1488,7 +1592,14 @@ describe("个股证据（D67、D59）", () => {
         { id: "restated_possible", level: "info", title: "财报数值为最新版本，可能含事后更正" },
       ],
     });
-    expect(m.items).toHaveLength(12);
+    expect(m.items.map((i) => i.label)).toEqual([
+      ...["f0", "f1", "f2", "f3", "f4", "f5", "f6"],
+      "收盘价（不复权）",
+      "归母净利润",
+      "margin_ratio",
+      "unlock_days",
+      "holder_num_qoq",
+    ]);
     expect(m.items[0]).toEqual({ label: "f0", value: 1.23, unit: null, availDate: "2024-03-01" });
     expect(m).toMatchObject({
       code: "600001.SH",
@@ -1718,9 +1829,13 @@ describe("决策账本与计划快照（D68）", () => {
 describe("决策回溯（D71）", () => {
   const opts = { toolCallId: "t", messages: [] } as never;
   let calls: string[] = [];
+  /** 假 worker 报的已提交数据版本（测缓存时改它） */
+  let dataVersion = 9;
   /** 假 worker：A 股数据截至 2024-04-30；计划结果回看按条目回一个固定值 */
   function fakeWorker() {
     calls = [];
+    dataVersion = 9;
+    clearDataStatusCache();
     const real = globalThis.fetch;
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input instanceof Request ? input.url : input));
@@ -1729,9 +1844,7 @@ describe("决策回溯（D71）", () => {
       const reply = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
       if (url.pathname === "/internal/data-status") {
         return reply({
-          markets: [
-            { market: "A", asOf: "2024-04-30", dataVersion: 9, lastEtl: null, day: "traded" },
-          ],
+          markets: [{ market: "A", asOf: "2024-04-30", dataVersion, lastEtl: null, day: "traded" }],
           maintenance: null,
           computePaused: null,
         });
@@ -1759,7 +1872,11 @@ describe("决策回溯（D71）", () => {
       return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
     });
   }
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    // 回溯页的数据状态走 60 秒缓存：别让这里的假数据带到后面的用例
+    clearDataStatusCache();
+  });
 
   /** 经确认卡上线一个跟踪，再按 worker 的写法补上两版计划、一条拒单、状态变化与重放差异；另有别的跟踪与一版简报 */
   async function seeded() {
@@ -1960,6 +2077,33 @@ describe("决策回溯（D71）", () => {
     ).toBeNull();
   });
 
+  it("计划结果回看按（快照、已提交的数据版本）缓存：反复打开回溯页与结果接口只算一次，数据版本变了才重算", async () => {
+    fakeWorker();
+    const { trackingId, id1 } = await seeded();
+    calls = [];
+    clearDataStatusCache();
+    const outcomesCalls = () => calls.filter((p) => p === "/internal/plan-outcomes").length;
+    const planOn = () =>
+      call(`/api/trackings/${trackingId}/plan-on?date=2024-03-04`, { cookie: admin });
+    expect((await planOn()).json.outcomes).toEqual([expect.objectContaining({ ret5: 0.021 })]);
+    expect(outcomesCalls()).toBe(1);
+    expect((await planOn()).json.outcomes).toEqual([expect.objectContaining({ ret5: 0.021 })]);
+    // 结果接口与回溯页同一份缓存（第 1 版就是 plan-on 算过的那份）
+    const direct = await call(`/api/plans/${id1}/outcomes`, { cookie: admin });
+    expect(direct.status).toBe(200);
+    expect(direct.json.outcomes).toEqual([expect.objectContaining({ code: "600001.SH" })]);
+    expect(outcomesCalls()).toBe(1);
+    // 数据状态也走缓存：三次请求只问了 worker 一次
+    expect(calls.filter((p) => p === "/internal/data-status")).toHaveLength(1);
+    // 提交了新的数据版本：重算一次
+    dataVersion = 10;
+    clearDataStatusCache();
+    await planOn();
+    expect(outcomesCalls()).toBe(2);
+    await call(`/api/plans/${id1}/outcomes`, { cookie: admin });
+    expect(outcomesCalls()).toBe(2);
+  });
+
   it("导出：离线校验通过；别的跟踪与简报只有哈希；校验接口；别人 404", async () => {
     const { trackingId, other } = await seeded();
     const r = await app.request(`/api/trackings/${trackingId}/export`, {
@@ -1974,7 +2118,13 @@ describe("决策回溯（D71）", () => {
     expect(verifyBundle(bundle)).toMatchObject({ ok: true, checked: bundle.entries.length });
     expect(bundle.chain.ok).toBe(true);
     expect(bundle.tracking).toMatchObject({ id: trackingId, startDate: expect.any(String) });
-    expect(bundle.manifest).toMatchObject({ engineVersion: expect.any(String), hashVersion: 2 });
+    expect(bundle.manifest).toMatchObject({
+      engineVersion: expect.any(String),
+      hashVersion: 2,
+      factorCoreVersion: 2,
+      eventFactorVersion: 1,
+      evidenceVersion: 2,
+    });
     expect(bundle.verification.canonicalJson).toMatch(/canonicalJson/);
     expect(text).not.toContain(other);
     expect(text).not.toContain("别的跟踪的上线内容");
@@ -2119,6 +2269,63 @@ describe("跟踪判词（D70）", () => {
     expect(stale.json.verdict).toBe("STALE_DATA");
   });
 
+  it("看板的数据状态只给横幅用得到的字段；失败原因与维护说明只给管理员", async () => {
+    const { dashboardDataStatus } = await import("./services/dashboard.ts");
+    const full = {
+      markets: [
+        {
+          market: "A",
+          asOf: "2026-09-30",
+          dataVersion: 3,
+          lastEtl: {
+            status: "failed",
+            finishedAt: 1,
+            error: "IO Error: /root/ivan/data/market.duckdb",
+          },
+          day: "stale" as const,
+          sources: {
+            versionId: 3,
+            status: "ok",
+            date: null,
+            served: { em: 1 },
+            fallbacks: 0,
+            failed: 0,
+            empty: 0,
+            index: {},
+          },
+          soft: [{ step: "fx", lastOkDate: null, failingNights: 3, firstFailDate: null }],
+          capture: { attrs: [], financialsSeen: { rows: 1, new7d: 0 } },
+        },
+      ],
+      maintenance: "行情仓要升级到第 5 版：先停 worker 跑 scripts/migrate.sh",
+      computePaused: { reason: "etl", since: 1 },
+      events: {
+        datasets: {},
+        backfill: { status: "idle", notBefore: null, progress: {}, lastBatch: null },
+      },
+      workerUp: true,
+    };
+    const user = dashboardDataStatus(full, false);
+    expect(user).toEqual({
+      markets: [
+        {
+          market: "A",
+          asOf: "2026-09-30",
+          dataVersion: 3,
+          lastEtl: { status: "failed", finishedAt: 1, error: null },
+          day: "stale",
+        },
+      ],
+      maintenance: "行情仓维护中",
+      computePaused: { reason: "etl", since: 1 },
+      workerUp: true,
+    });
+    const adminView = dashboardDataStatus(full, true);
+    expect(adminView.markets[0]!.lastEtl!.error).toMatch(/IO Error/);
+    expect(adminView.maintenance).toMatch(/migrate/);
+    expect(adminView).not.toHaveProperty("events");
+  });
+
   it("get_tracking：带判词与健康度，字段叫 beatBacktestPct；给模型的判词是中文", async () => {
     fakeDataStatus({ day: "closed", asOf: "2026-09-30" });
     const trackingId = await trackingWith({ lastDate: "2026-09-30", health });
@@ -2143,6 +2350,29 @@ describe("跟踪判词（D70）", () => {
         },
       },
     });
+  });
+
+  it("get_tracking：停了的跟踪没有判词（不说「数据未更新」）；早于判词存下的结果原样给模型", async () => {
+    fakeDataStatus({ day: "traded", asOf: "2026-09-30" });
+    const trackingId = await trackingWith({ lastDate: "2026-09-01", health });
+    handle.sqlite.prepare(`UPDATE trackings SET status = 'stopped' WHERE id = ?`).run(trackingId);
+    const tools = buildTools({ userId: adminId, threadId: "th_test", page: { trackingId } });
+    const out = (await tools.get_tracking!.execute!({}, opts)) as Record<string, unknown>;
+    expect(out).toMatchObject({ stopped: true, verdict: null, health: null });
+    const toModel = async (output: unknown) =>
+      (
+        (await tools.get_tracking!.toModelOutput!({
+          toolCallId: "t",
+          input: {},
+          output: output as never,
+        })) as unknown as {
+          value: Record<string, unknown>;
+        }
+      ).value;
+    expect(await toModel(out)).toMatchObject({ verdict: "已停止", health: null });
+    // S10 之前存下的输出：没有 verdict / health，不替它编「观察期」
+    const old = { trackingId, strategyName: "x", days: 3, excess: 0.01, deviationPct: 40 };
+    expect(await toModel(old)).toEqual(old);
   });
 });
 
@@ -2289,6 +2519,60 @@ describe("数据质量（D74）", () => {
       expect(calls).toContain("GET /internal/data-quality?days=7");
       expect(calls).toContain("POST /internal/data-issues/3/resolve");
       expect(calls.filter((c) => c.includes("resolve"))).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("点时事件数据回填（S15）", () => {
+  it("估算与排回填只有管理员能用，转给 worker；已经有一个在排队时 409 原样转回", async () => {
+    const calls: string[] = [];
+    let queued = false;
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      calls.push(`${init?.method ?? "GET"} ${url.pathname}${url.search}`);
+      const reply = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+      if (url.pathname === "/internal/events/estimate")
+        return reply({
+          since: url.searchParams.get("since") ?? "2013-01-01",
+          requests: 4,
+          lines: ["两融明细：约 600 万行，12,000-15,330 次请求，按 0.6 秒 / 次约 2.0-2.6 小时"],
+          datasets: [],
+        });
+      if (url.pathname === "/internal/events/backfill") {
+        if (queued) return reply({ error: "已经有一个事件数据回填在排队或运行" }, 409);
+        queued = true;
+        return reply({ jobId: "j_events" });
+      }
+      if (url.pathname === "/internal/jobs/kick") return reply({ ok: true });
+      return reply({ error: "没有" }, 404);
+    });
+    try {
+      const inv = await call("/api/admin/invites", { body: { note: "ev" }, cookie: admin });
+      const user = await signUp("ev@test.local", String(inv.json.code));
+      expect((await call("/api/admin/events/estimate", { cookie: user.cookie })).status).toBe(403);
+      expect(
+        (await call("/api/admin/events/backfill", { body: {}, cookie: user.cookie })).status,
+      ).toBe(403);
+      expect(calls).toEqual([]);
+
+      const est = await call("/api/admin/events/estimate?since=2015-01-01", { cookie: admin });
+      expect(est.status).toBe(200);
+      expect(est.json).toMatchObject({ since: "2015-01-01", requests: 4 });
+      expect(
+        (await call("/api/admin/events/estimate?since=2015-1-1", { cookie: admin })).status,
+      ).toBe(400);
+
+      const first = await call("/api/admin/events/backfill", { body: {}, cookie: admin });
+      expect(first.json).toEqual({ jobId: "j_events" });
+      const second = await call("/api/admin/events/backfill", { body: {}, cookie: admin });
+      expect(second.status).toBe(409);
+      expect(second.json.error).toBe("已经有一个事件数据回填在排队或运行");
+      expect(calls).toContain("GET /internal/events/estimate?since=2015-01-01");
+      expect(calls.filter((c) => c === "POST /internal/events/backfill")).toHaveLength(2);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2454,5 +2738,291 @@ describe("提交前校验基准与港股通名单（D75、D77）", () => {
         .status,
     ).toBe(200);
     clearJobs();
+  });
+});
+
+describe("两融与筹码（S15b）", () => {
+  type Coverage = Record<string, { from: string | null; ready: boolean }>;
+  /** 假 worker：data-status 带事件因子的覆盖；证券搜索与两融与筹码明细；记下请求 */
+  function fakeWorker(o: { ready: boolean; done?: number; total?: number }) {
+    const calls: string[] = [];
+    const real = globalThis.fetch;
+    const factorCoverage: Coverage = {
+      margin_ratio: { from: "2013-01-11", ready: o.ready },
+      margin_chg_20d: { from: "2013-02-13", ready: o.ready },
+      margin_eligible: { from: "2013-01-11", ready: o.ready },
+      holder_num_qoq: { from: "2013-07-20", ready: o.ready },
+      unlock_days: { from: "2013-01-01", ready: o.ready },
+      unlock_ratio_30d: { from: "2013-01-01", ready: o.ready },
+      block_premium_20d: { from: "2013-02-10", ready: o.ready },
+    };
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      calls.push(`${url.pathname}${url.search}`);
+      const reply = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+      if (url.pathname === "/internal/data-status")
+        return reply({
+          markets: [{ market: "A", asOf: "2026-09-30", dataVersion: 5, lastEtl: null }],
+          maintenance: null,
+          computePaused: null,
+          factorCoverage,
+          eventFactors: {
+            v: 1,
+            sig: "abcd1234",
+            complete: o.ready,
+            doneYears: o.done ?? 7,
+            totalYears: o.total ?? 14,
+          },
+        });
+      if (url.pathname === "/internal/securities/search")
+        return reply(
+          (url.searchParams.get("q") ?? "").includes("00700")
+            ? [{ code: "00700.HK", name: "腾讯控股", market: "HK" }]
+            : [{ code: "600519.SH", name: "贵州茅台", market: "A" }],
+        );
+      if (url.pathname === "/internal/securities/600519.SH/events")
+        return reply({
+          code: "600519.SH",
+          name: "贵州茅台",
+          asOf: url.searchParams.get("asOf") ?? "2026-09-30",
+          dataVersion: { id: 5, asOf: "2026-09-30" },
+          margin: Array.from({ length: 21 }, (_, i) => ({
+            date: `2026-09-${String(i + 1).padStart(2, "0")}`,
+            availDate: `2026-09-${String(i + 2).padStart(2, "0")}`,
+            financingAmount: 1e10 + i * 1e8,
+            shortAmount: 1e8,
+            marginRatio: 1.0953,
+          })),
+          holders: [
+            { endDate: "2026-06-30", noticeDate: "2026-08-01", holderNum: 48212, qoqPct: -9.75 },
+          ],
+          lockups: [],
+          blocks: [
+            {
+              tradeDate: "2026-09-29",
+              availDate: "2026-09-30",
+              dealPrice: 11.84,
+              closePrice: 13.13,
+              premiumPct: -9.825,
+              dealAmount: 1.2e7,
+              buyerInst: true,
+              sellerInst: false,
+            },
+          ],
+          coverage: {},
+          caveats: [],
+          hash: "h".repeat(64),
+        });
+      return reply({ ok: true });
+    });
+    return calls;
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearDataStatusCache();
+  });
+
+  const backtestsToday = () =>
+    (
+      handle.sqlite
+        .prepare(
+          `SELECT coalesce(sum(backtests), 0) AS n FROM usage_daily WHERE user_id = ? AND day = ?`,
+        )
+        .get(adminId, todayCN()) as { n: number }
+    ).n;
+  const analyses = async () =>
+    ((await call("/api/me", { cookie: admin })).json.usage as { analyses: number }).analyses;
+  const clearJobs = () =>
+    handle.sqlite.prepare(`UPDATE jobs SET status = 'done' WHERE user_id = ?`).run(adminId);
+  async function versionOf(spec: Record<string, unknown>): Promise<string> {
+    const d = await call("/api/drafts", { body: { spec }, cookie: admin });
+    const c = await call(`/api/drafts/${d.json.draftId}/confirm`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    return String(c.json.versionId);
+  }
+  const eventSpec = {
+    name: "避开解禁",
+    market: "A",
+    filters: [{ factor: "margin_chg_20d", op: ">", value: 0 }],
+    rank: { terms: [{ factor: "pe_ttm", weight: 1, better: "low" }], top: 5 },
+  };
+
+  it("历史还没补算完：用到事件因子的回测与扫描 400、不扣额度；不用的照常", async () => {
+    clearJobs();
+    fakeWorker({ ready: false, done: 7, total: 14 });
+    const versionId = await versionOf(eventSpec);
+    const used = backtestsToday();
+    const runs0 = count("runs");
+    const bad = await call("/api/runs", {
+      body: { versionId, start: "2020-01-02" },
+      cookie: admin,
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toBe(
+      "两融与筹码类因子的历史还在补算（7/14 年），补完后才能回测；今天的选股可以先用",
+    );
+    const sweep = await call("/api/runs/sweep", {
+      body: { versionId, path: "/rank/top", values: [3, 5], start: "2020-01-02" },
+      cookie: admin,
+    });
+    expect(sweep.status).toBe(400);
+    expect(backtestsToday()).toBe(used);
+    expect(count("runs")).toBe(runs0);
+    const plain = await versionOf({ ...eventSpec, name: "不用事件因子", filters: [] });
+    expect(
+      (await call("/api/runs", { body: { versionId: plain, start: "2020-01-02" }, cookie: admin }))
+        .status,
+    ).toBe(200);
+    clearJobs();
+  });
+
+  it("完整重跑也先查：历史还没补算完时 400、不扣额度、不建运行", async () => {
+    clearJobs();
+    fakeWorker({ ready: false, done: 7, total: 14 });
+    const versionId = await versionOf({ ...eventSpec, name: "避开解禁-重跑" });
+    const { strategy_id: strategyId } = handle.sqlite
+      .prepare(`SELECT strategy_id FROM strategy_versions WHERE id = ?`)
+      .get(versionId) as { strategy_id: string };
+    const runId = `r_test_${Math.random().toString(36).slice(2, 10)}`;
+    handle.sqlite
+      .prepare(
+        `INSERT INTO runs (id, user_id, strategy_id, version_id, kind, params, status, engine_version, finished_at)
+         VALUES (?, ?, ?, ?, 'backtest', ?, 'done', '1.2.0', ?)`,
+      )
+      .run(
+        runId,
+        adminId,
+        strategyId,
+        versionId,
+        JSON.stringify({ start: "2020-01-02", end: "2024-12-31", capital: 1e6, oosMonths: 12 }),
+        Date.now(),
+      );
+    const used = backtestsToday();
+    const runs0 = count("runs");
+    const r = await call(`/api/runs/${runId}/reproduce`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe(
+      "两融与筹码类因子的历史还在补算（7/14 年），补完后才能回测；今天的选股可以先用",
+    );
+    expect(backtestsToday()).toBe(used);
+    expect(count("runs")).toBe(runs0);
+    clearJobs();
+  });
+
+  it("起点早于数据起点：「因子『…』从 … 起才有数据」，不扣额度", async () => {
+    clearJobs();
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      if (url.pathname === "/internal/data-status")
+        return new Response(
+          JSON.stringify({
+            markets: [],
+            maintenance: null,
+            computePaused: null,
+            factorCoverage: { margin_chg_20d: { from: "2019-03-15", ready: true } },
+            eventFactors: { v: 1, sig: "x", complete: true, doneYears: 14, totalYears: 14 },
+          }),
+        );
+      return new Response(JSON.stringify({ ok: true }));
+    });
+    const versionId = await versionOf({ ...eventSpec, name: "两融变化2" });
+    const used = backtestsToday();
+    const bad = await call("/api/runs", {
+      body: { versionId, start: "2019-01-02" },
+      cookie: admin,
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toBe(
+      "因子「融资余额 20 日变化」从 2019-03-15 起才有数据，请把起点设在这之后",
+    );
+    expect(backtestsToday()).toBe(used);
+    expect(
+      (await call("/api/runs", { body: { versionId, start: "2019-03-15" }, cookie: admin })).status,
+    ).toBe(200);
+    clearJobs();
+  });
+
+  it("/api/securities/:code/events：计入数据查询额度；港股直接回「只有 A 股」、不扣额度；参数不对 400", async () => {
+    const calls = fakeWorker({ ready: true });
+    const before = await analyses();
+    const r = await call("/api/securities/600519/events?asOf=2026-09-30&datasets=margin,blocks", {
+      cookie: admin,
+    });
+    expect(r.status).toBe(200);
+    expect(r.json.code).toBe("600519.SH");
+    expect(calls).toContain(
+      "/internal/securities/600519.SH/events?asOf=2026-09-30&datasets=margin%2Cblocks",
+    );
+    expect(await analyses()).toBe(before + 1);
+    const hk = await call("/api/securities/00700/events", { cookie: admin });
+    expect(hk.status).toBe(404);
+    expect(hk.json.error).toBe("两融、股东户数、解禁、大宗交易目前只有 A 股");
+    expect(
+      (await call("/api/securities/600519/events?datasets=nope", { cookie: admin })).status,
+    ).toBe(400);
+    expect(
+      (await call("/api/securities/600519/events?asOf=2026-9-1", { cookie: admin })).status,
+    ).toBe(400);
+    expect(await analyses()).toBe(before + 1);
+  });
+
+  it("get_security_events：只读、计入额度；港股报错；给模型的摘要百分数都叫 *Pct，户数照抄", async () => {
+    fakeWorker({ ready: true });
+    const tools = buildTools({ userId: adminId, threadId: "th_test", page: {} });
+    const opts = { toolCallId: "t", messages: [] } as never;
+    const tables = ["strategies", "strategy_versions", "trackings", "drafts", "runs", "jobs"];
+    const before = tables.map(count);
+    const usedBefore = await analyses();
+    const out = await tools.get_security_events!.execute!({ query: "贵州茅台" }, opts);
+    expect(tables.map(count)).toEqual(before);
+    expect(await analyses()).toBe(usedBefore + 1);
+    const m = eventsForModel(out as Parameters<typeof eventsForModel>[0]);
+    expect(m).toMatchObject({
+      code: "600519.SH",
+      dataVersion: 5,
+      margin: {
+        date: "2026-09-21",
+        marginRatioPct: 1.1,
+        comparedWith: "2026-09-01",
+        marginChg20dPct: 20,
+      },
+      holders: [{ holderNum: 48212, qoqPct: -9.75 }],
+      blocks: { count: 1, dealAmount: 1.2e7, premium20dPct: -9.82 },
+    });
+    await expect(
+      tools.get_security_events!.execute!({ query: "00700" }, opts) as Promise<unknown>,
+    ).rejects.toThrow("两融、股东户数、解禁、大宗交易目前只有 A 股");
+    expect(await analyses()).toBe(usedBefore + 1);
+    // list_factors 带上事件因子的数据集、数据起点与是否补算完成
+    const lf = (await tools.list_factors!.execute!({ market: "A" }, opts)) as {
+      factors: Array<{
+        key: string;
+        dataset?: string;
+        from?: string | null;
+        ready?: boolean | null;
+      }>;
+    };
+    expect(lf.factors.find((f) => f.key === "unlock_days")).toMatchObject({
+      dataset: "lockups",
+      from: "2013-01-01",
+      ready: true,
+    });
+    expect(lf.factors.find((f) => f.key === "pe_ttm")!.dataset).toBeUndefined();
+    const api = await call("/api/factors?market=A", { cookie: admin });
+    expect(
+      (api.json.factors as Array<{ key: string; from?: string }>).find(
+        (f) => f.key === "margin_chg_20d",
+      )!.from,
+    ).toBe("2013-02-13");
   });
 });

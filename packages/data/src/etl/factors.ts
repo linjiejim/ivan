@@ -2,14 +2,22 @@
  * 因子物化（D8）：逐股算时间序列因子写入暂存表，再用 SQL 补横截面因子（行业内比较、全市场市值排名），
  * 替换 factors_daily 里 fromDate 之后的行。全量重建与夜间增量走同一条路（增量只是 fromDate 近一些）。
  */
-import { addYears, type DateStr, FACTOR_REGISTRY_VERSION, type Market } from "@ivan/core";
+import { addDays, addYears, type DateStr, FACTOR_CORE_VERSION, type Market } from "@ivan/core";
 import { resolveActions } from "../compute/adjust.ts";
 import { deriveFinancials, type FinRow } from "../compute/financials.ts";
 import { type NameChange, stResolver } from "../compute/names.ts";
 import { type ShareChange, SPLIT_REASON_RE } from "../compute/series.ts";
 import { computeStockFactors, type StockBars } from "../compute/stock-factors.ts";
+import {
+  clearNewEventColumns,
+  fillEventColumns,
+  loadEventSyncState,
+  restoreEventColumns,
+} from "../compute/event-factors.ts";
 import { FACTOR_COLUMNS } from "../warehouse/schema.ts";
-import { type EtlContext, loadSecurities } from "./context.ts";
+import type { SoftOutcome } from "./completeness.ts";
+import { type EtlContext, errMsg, loadSecurities } from "./context.ts";
+import { EVENT_FACTORS_OK_META, reopenEventYears } from "./event-columns.ts";
 
 /** 港股汇率查询：同一币种按日期二分，取当日或之前最近的汇率。 */
 async function fxLookup(ctx: EtlContext): Promise<(ccy: string, date: DateStr) => number | null> {
@@ -61,7 +69,7 @@ async function loadBars(ctx: EtlContext, code: string, from: DateStr): Promise<S
 }
 
 /**
- * 从暂存表 s 取出 factors_daily 全部列：时间序列因子原样带过来，横截面因子在这里补算
+ * 从暂存表 s 取出 factors_daily 全部列：时间序列因子与事件因子（S15b，已填进暂存表）原样带过来，横截面因子在这里补算
  * （PE / 行业中位数、行业市值排名、全市场市值排名 D49）。列顺序 = 表的列顺序。
  */
 export function crossSectionSelect(): string {
@@ -85,12 +93,53 @@ export function crossSectionSelect(): string {
     .join(",\n  ");
 }
 
+/**
+ * 暂存表的事件列（S15b，只有 A 股）：按自然年分段跑事件 SQL（全量重算时每段一年，夜间就是近 15 天这一段）。
+ * 软步骤（D83）：出错（事件表缺失、内存不够、字面量异常）就把这段日期的事件列从正式表原样拷回来，
+ * 今天的新行留空，返回 ok: false 由夜间记进 completeness.soft，整晚照常提交。在 computeFactors 的写库段里调用。
+ */
+async function fillStageEvents(ctx: EtlContext, fromDate: DateStr): Promise<SoftOutcome> {
+  try {
+    const state = await loadEventSyncState(ctx.wh);
+    const last = await ctx.wh.scalar<string>(
+      `SELECT max(date)::VARCHAR FROM factors_stage WHERE market = 'A'`,
+    );
+    let rows = 0;
+    if (last) {
+      for (let y = Number(fromDate.slice(0, 4)); y <= Number(last.slice(0, 4)); y++) {
+        const from = y === Number(fromDate.slice(0, 4)) ? fromDate : `${y}-01-01`;
+        rows += await fillEventColumns(ctx.wh, "factors_stage", state, from, `${y}-12-31`);
+      }
+      // 之前连续失败的晚上留空的日子已经滑出这次重算的范围：重开那几年的按年补算，免得永久留空
+      const prev = await ctx.wh.meta(EVENT_FACTORS_OK_META);
+      if (prev && addDays(prev, 1) < fromDate) {
+        const years = await reopenEventYears(ctx.wh, addDays(prev, 1), addDays(fromDate, -1));
+        ctx.log(`事件因子在 ${prev} 之后、${fromDate} 之前的日子之前没算成功，重新按年补算 ${years.join("、")} 年`);
+      }
+      await ctx.wh.setMeta(EVENT_FACTORS_OK_META, last);
+    }
+    return { step: "event_factors", ok: true, rows };
+  } catch (e) {
+    const error = errMsg(e);
+    ctx.log(`事件因子计算失败，沿用已有的值（今天的新行留空）：${error}`);
+    try {
+      await restoreEventColumns(ctx.wh, fromDate);
+    } catch (e2) {
+      // 拷回也失败（多半同样是内存不够）：已经补完的年份是同一条 SQL 算的、照样有效；正式表之后的新日子置空，
+      // 仍然不让整晚失败（D83）
+      ctx.log(`事件因子拷回也失败，正式表之后的新日子留空：${errMsg(e2)}`);
+      await clearNewEventColumns(ctx.wh).catch((e3) => ctx.log(`事件因子置空也失败：${errMsg(e3)}`));
+    }
+    return { step: "event_factors", ok: false, error: error.slice(0, 200) };
+  }
+}
+
 export async function computeFactors(
   ctx: EtlContext,
   market: Market,
   fromDate: DateStr,
   opts: { codes?: string[] } = {},
-): Promise<{ stocks: number; rows: number }> {
+): Promise<{ stocks: number; rows: number; events?: SoftOutcome }> {
   let securities = await loadSecurities(ctx.wh, market, fromDate);
   if (opts.codes) securities = securities.filter((s) => opts.codes!.includes(s.code));
   const fx = market === "HK" ? await fxLookup(ctx) : undefined;
@@ -188,9 +237,12 @@ export async function computeFactors(
   }
   await flush();
 
-  // 横截面因子（行业内比较、全市场市值排名），然后替换正式表
+  // 事件因子（S15b，只有 A 股）→ 横截面因子（行业内比较、全市场市值排名），然后替换正式表
   const select = crossSectionSelect();
+  let events: SoftOutcome | undefined;
   await ctx.wh.exclusive(async () => {
+    // 在并入别的股票、删正式表之前：失败时要从正式表把旧的事件列拷回来
+    if (market === "A") events = await fillStageEvents(ctx, fromDate);
     const codeFilter = opts.codes
       ? `AND code IN (${opts.codes.map((c) => `'${c.replace(/'/g, "")}'`).join(",")})`
       : "";
@@ -211,9 +263,10 @@ export async function computeFactors(
     }
     await ctx.wh.run(`INSERT INTO factors_daily SELECT\n  ${select}\nFROM factors_stage s`);
     await ctx.wh.run(`DROP TABLE factors_stage`);
-    await ctx.wh.setMeta(`factor_registry_version:${market}`, String(FACTOR_REGISTRY_VERSION));
+    // 记的是核心因子版本（D83）：键名沿用，回滚到 R4 的代码读到 '2' 不会触发全量重算
+    await ctx.wh.setMeta(`factor_registry_version:${market}`, String(FACTOR_CORE_VERSION));
     await ctx.wh.checkpoint();
   });
   ctx.log(`因子 ${market}：${securities.length} 只，写入 ${total} 行（${fromDate} 起）`);
-  return { stocks: securities.length, rows: total };
+  return { stocks: securities.length, rows: total, ...(events ? { events } : {}) };
 }

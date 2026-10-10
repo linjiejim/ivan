@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  canaryBadge,
+  canaryInfoText,
   captureLines,
+  eventDatasetLine,
+  eventsBackfillText,
   openVersionText,
   provenanceText,
   qualitySentence,
@@ -9,7 +13,7 @@ import {
   sourcesLines,
   versionStatusBadge,
 } from "./data-status.ts";
-import type { DataQuality, DataStatus } from "./types.ts";
+import type { DataQuality, DataStatus, EventDatasetStatus } from "./types.ts";
 
 describe("versionStatusBadge", () => {
   it("四种结束状态", () => {
@@ -93,7 +97,7 @@ describe("sourcesLines", () => {
       "2026-10-21",
     );
     expect(lines).toEqual([
-      { text: "10-20 那晚东财 3 只、腾讯 0 只（回退 0 次）", tone: "neutral" },
+      { text: "2026-10-20 那晚东财 3 只、腾讯 0 只（回退 0 次）", tone: "neutral" },
       { text: "2 只日线所有数据源都没拿到", tone: "warn" },
     ]);
     expect(sourcesLines(null, "2026-10-21")).toEqual([]);
@@ -193,5 +197,78 @@ describe("provenanceText（S13）", () => {
         gapDays: 3,
       }),
     ).toBe("行情来源：东方财富 50%（来源未记录 50%）；缺失 3 天");
+  });
+});
+
+describe("两融与筹码数据（S15）", () => {
+  const d = (o: Partial<EventDatasetStatus> = {}): EventDatasetStatus => ({
+    label: "两融明细",
+    backfillFrom: "2013-01-01",
+    coveredFrom: null,
+    windowThrough: null,
+    syncedAt: null,
+    nightlySince: null,
+    lastOkAt: null,
+    lastStatus: null,
+    lastDetail: null,
+    canary: null,
+    rows: 0,
+    failingNights: 0,
+    ...o,
+  });
+
+  it("每个数据集一行：覆盖起点（没补完写「补齐中」）与数据日", () => {
+    expect(eventDatasetLine(d({ coveredFrom: "2013-01-04", windowThrough: "2026-09-29" }))).toBe(
+      "两融明细：自 2013-01-04 · 数据到 2026-09-29",
+    );
+    expect(eventDatasetLine(d({ label: "限售解禁", syncedAt: "2026-10-09" }))).toBe(
+      "限售解禁：自 补齐中 · 数据到 2026-10-09",
+    );
+    expect(eventDatasetLine(d())).toBe("两融明细：自 补齐中 · 数据到 --");
+  });
+
+  it("接口徽标：健康 / 字段变了 / 单位异常 / 被风控 / 出错", () => {
+    const c = (status: string) => ({
+      status,
+      source: "eastmoney",
+      at: "2026-10-09T09:30:00Z",
+      detail: "x",
+    });
+    expect(canaryBadge(null)).toBeNull();
+    expect(canaryBadge(c("ok"))).toEqual({ text: "健康", tone: "down" });
+    expect(canaryBadge(c("empty"))).toEqual({ text: "健康", tone: "down" });
+    expect(canaryBadge(c("schema_drift"))).toEqual({ text: "字段变了", tone: "warn" });
+    expect(canaryBadge(c("unit_drift"))).toEqual({ text: "单位异常", tone: "warn" });
+    expect(canaryBadge(c("blocked"))).toEqual({ text: "被风控", tone: "warn" });
+    expect(canaryBadge(c("error"))).toEqual({ text: "出错", tone: "warn" });
+  });
+
+  it("ⓘ 写自检详情与时间；没更新时写原因", () => {
+    const text = canaryInfoText(
+      d({
+        canary: {
+          status: "schema_drift",
+          source: "eastmoney",
+          at: "2026-10-09T09:30:00Z",
+          detail: "字段不存在",
+        },
+        lastStatus: "canary_failed",
+        lastDetail: "东财「两融明细」接口字段变了：字段不存在，今晚没更新",
+      }),
+    );
+    expect(text).toMatch(/^接口自检（.+）：字段不存在。最近一次：东财「两融明细」接口字段变了/);
+    expect(canaryInfoText(d())).toBe("还没有跑过接口自检");
+  });
+
+  it("后台补齐进度：只在排队或运行时显示", () => {
+    const b = {
+      status: "running",
+      notBefore: null,
+      progress: { margin: { done: 812, total: 3330 }, lockups: { done: 15, total: 15 } },
+      lastBatch: null,
+    };
+    expect(eventsBackfillText(b)).toBe("后台补齐中：两融 812 / 3,330 天 · 解禁 15 / 15 年");
+    expect(eventsBackfillText({ ...b, status: "idle" })).toBeNull();
+    expect(eventsBackfillText(undefined)).toBeNull();
   });
 });

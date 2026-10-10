@@ -3,20 +3,24 @@
  * - A 股日线：一次请求不复权日 K，涨跌额给出交易所参考前收（D31）→ raw+ref_prev_close
  * - 港股日线：不复权 + 后复权两次请求 → raw+hfq_affine（东财港股后复权 3 位小数）
  * - 指数：价格指数日 K（secid 如 1.000300、100.HSI）
+ * - 点时事件数据（S15）：数据中心四个报表，实现在 eastmoney-events.ts
  * push2his 串行、0.6 秒间隔（D31），是默认链的第一家。
  */
 import { marketOf } from "@ivan/core";
 import { emIndexKline, emKline } from "../emkline.ts";
 import type { SourceAdapter } from "../types.ts";
+import { EASTMONEY_EVENTS } from "./eastmoney-events.ts";
 
 const HOST = "push2his.eastmoney.com";
+const DATACENTER = "datacenter-web.eastmoney.com";
 
 export const eastmoneyAdapter: SourceAdapter = {
   id: "eastmoney",
   label: "东财",
-  hosts: { bars: [HOST], index: [HOST] },
+  hosts: { bars: [HOST], index: [HOST], events: [DATACENTER] },
   banRisk: 1,
-  capabilities: { bars: ["A", "HK"], index: ["A", "HK"] },
+  capabilities: { bars: ["A", "HK"], index: ["A", "HK"], events: ["A"] },
+  events: EASTMONEY_EVENTS,
   async dailyBars(ctx, code, from, to) {
     const raw = await emKline(ctx.http, code, "raw", from, to);
     if (marketOf(code) === "A") {

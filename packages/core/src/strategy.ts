@@ -282,6 +282,9 @@ export function specFactorKeys(s: StrategySpec): string[] {
   return [...new Set(keys)];
 }
 
+/** 策略用到的因子（筛选 + 排序 + 弱势排序，去重）：事件因子的补算与覆盖检查用（S15b），与 specFactorKeys 同一套 */
+export const factorsUsedBySpec = specFactorKeys;
+
 // ── 人话描述（卡片、LLM 上下文共用） ──
 
 const OP_TEXT: Record<string, string> = { ">": ">", ">=": "≥", "<": "<", "<=": "≤" };

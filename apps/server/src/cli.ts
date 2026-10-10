@@ -9,7 +9,7 @@
 import { loadConfig } from "@ivan/core/config";
 import { type AppDbHandle, invites, newId, openAppDb } from "@ivan/db";
 import { hashPassword } from "better-auth/crypto";
-import { verifyBundleFile } from "./lib/verify-bundle.ts";
+import { userPath, verifyBundleFile } from "./lib/verify-bundle.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
 const cfg = loadConfig();
@@ -30,7 +30,7 @@ async function main() {
     case "verify-bundle": {
       const [file] = args;
       if (!file) throw new Error("用法：verify-bundle <导出的 JSON 文件>");
-      const r = verifyBundleFile(file);
+      const r = verifyBundleFile(userPath(file));
       (r.code === 0 ? console.log : console.error)(r.message);
       process.exitCode = r.code;
       return;

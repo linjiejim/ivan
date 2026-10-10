@@ -41,6 +41,62 @@ describe("引擎 1.1.0 金标准", () => {
   }
 });
 
+/**
+ * 收尾时有待执行订单（final.pending）的旧口径运行：10 个金标准夹具都以空的 pending 收尾，这里把其中几个截到区间中途，
+ * 让 pending 的构造分支（止损、止盈、调出、调仓、持有到期卖出，建仓、信号买入）也被钉住。
+ * 指纹是在未改动的 1.1.0 引擎（916a43c）上算的 legacyView 指纹（另录在这里，legacy-1.1.0.json 不重录）；
+ * 1.2.0 在旧口径下给 pending 多写预估价、股数这些字段，legacyView 投影掉之后必须逐字节一致——
+ * 完整重跑比早于运行卡的旧运行时，worker 用的就是这个投影（storedResultHashes）。
+ */
+const PENDING_END_1_1_0: Array<[name: string, end: string, hash: string]> = [
+  ["base", "2025-06-05", "0ad29398ab7b22869631e88a4ed8bfeaccebfa5bf39a3b555c551a3d70ae6396"],
+  ["monthly", "2025-06-30", "b2e0507601f355384cdb0166cca59cc9bf7c60aa09a451cc9e2ebdf2786e1ec0"],
+  ["hk", "2021-12-31", "d23b6693c0b1e4084828fa44311a382230cc612da8e888a19712f3b197d9010c"],
+  ["signals", "2024-03-14", "7c06cb9711efa5ed2f61a5c0c7ca682019147c49044e30b3df9d13fc9bad0e7b"],
+  ["signals", "2024-03-18", "6eb17937441587f0a3e7cd55081e0f3f929dffe42613db04530237bf872698d3"],
+  ["signals", "2024-04-09", "d04fb3fd971bfea4552f5f3c60e68e80bbc09095b5cff2234d03e62fe8324a35"],
+];
+
+describe("引擎 1.1.0 金标准：收尾有待执行订单", () => {
+  for (const [name, end, hash] of PENDING_END_1_1_0) {
+    it(`${name} 截到 ${end}：pending 非空，legacyView 指纹与 1.1.0 一致（exec 缺省与 LEGACY_EXEC）`, () => {
+      const build = (): SimInput => {
+        const x = LEGACY_FIXTURES[name]!();
+        return { ...x, params: { ...x.params, end } };
+      };
+      const r = simulate(build());
+      expect(r.final.pending.length).toBeGreaterThan(0);
+      // 新引擎旧口径下也给 pending 写了预估字段：1.1.0 存的结果里没有它们
+      expect(r.final.pending.some((p) => "estPrice" in p)).toBe(true);
+      expect(sha256Canonical(legacyView(r))).toBe(hash);
+      const withLegacy = simulate({
+        ...build(),
+        params: { ...build().params, exec: LEGACY_EXEC },
+      });
+      expect(sha256Canonical(legacyView(withLegacy))).toBe(hash);
+    });
+  }
+  it("覆盖买卖两边与各种原因", () => {
+    const kinds = new Set(
+      PENDING_END_1_1_0.flatMap(([name, end]) => {
+        const x = LEGACY_FIXTURES[name]!();
+        return simulate({ ...x, params: { ...x.params, end } }).final.pending.map(
+          (p) => `${p.side}:${p.reason}`,
+        );
+      }),
+    );
+    expect([...kinds].sort()).toEqual([
+      "buy:entry",
+      "buy:signal",
+      "sell:filtered",
+      "sell:max_hold",
+      "sell:rebalance",
+      "sell:stop_loss",
+      "sell:take_profit",
+    ]);
+  });
+});
+
 // 夹具的用意写在这里：之后谁改了夹具、让它不再走到要盯的分支，这里先报，而不是金标准悄悄失去覆盖
 describe("金标准夹具确实走到要盯的分支", () => {
   it("信号：满仓、停牌、重复持有三条跳过分支都走到", () => {

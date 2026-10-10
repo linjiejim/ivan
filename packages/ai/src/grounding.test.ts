@@ -19,6 +19,11 @@ describe("数字核对：规范化与抽数", () => {
     expect(normalizeText("1,234 亿与 1，234,567 元")).toBe("1234 亿与 1234567 元");
     // 代码之间的逗号不是千分位
     expect(normalizeText("600519,000001")).toBe("600519,000001");
+    // 小数或中文逗号隔开的两个数不合并
+    expect(normalizeText("收盘 1460.52，128 只")).toBe("收盘 1460.52，128 只");
+    expect(normalizeText("0.82，200 日均线")).toBe("0.82，200 日均线");
+    expect(normalizeText("1,234,567")).toBe("1234567");
+    expect(normalizeText("1,234.56 元")).toBe("1234.56 元");
   });
 
   it("按单位分类：百分数、百分点、金额、倍数、计数、裸整数", () => {
@@ -137,6 +142,18 @@ describe("数字核对：匹配（表驱动）", () => {
     expect(held.unverified[0]).toMatchObject({ raw: "23 天", reason: "no_match" });
   });
 
+  it("行首的 Markdown 列表符号不是负号；「回落」「缩水」「少了」说清了方向", () => {
+    const f = extractFigures("- 12.5%\n  + 3.1%\n跌幅 - 2%").figures;
+    expect(f.map((x) => [x.raw, x.negative])).toEqual([
+      ["12.5%", false],
+      ["3.1%", false],
+      ["- 2%", true],
+    ]);
+    for (const w of ["回落", "缩水", "少了"]) {
+      expect(check(`净值${w} 3.1%`, { periodReturn: -0.031 }).unverified).toEqual([]);
+    }
+  });
+
   it("行首序号不核对", () => {
     const r = check("1. 年化超额 7.3%\n2、最大回撤 -27%", {
       excessCagr: 0.073,
@@ -150,5 +167,86 @@ describe("数字核对：匹配（表驱动）", () => {
     const text = "年化 7.3%，回撤 -99.9%";
     const r = check(text, { cagr: 0.073, maxDrawdown: -0.27 });
     expect(redactUnverified(text, r)).toBe("年化 7.3%，回撤 [待核对]");
+  });
+});
+
+describe("数字核对第 2 版（S15b）：户是计数单位，带万 / 亿的计数按写出的精度核对", () => {
+  const ev = (payload: unknown) => collectEvidence("get_security_events", payload);
+  it("版本号是 2", () => {
+    expect(GROUNDING_VERSION).toBe(2);
+  });
+
+  it("「4.8 万户」对 48,212 成立，对 48,600 不成立", () => {
+    expect(
+      checkGrounding("股东户数 4.8 万户", ev({ holders: [{ holderNum: 48212 }] })).unverified,
+    ).toEqual([]);
+    const r = checkGrounding("股东户数 4.8 万户", ev({ holders: [{ holderNum: 48600 }] }));
+    expect(r.unverified).toHaveLength(1);
+    expect(r.unverified[0]).toMatchObject({ raw: "4.8 万户", kind: "count", reason: "no_match" });
+  });
+
+  it("精度按写出的小数位：「4.82 万户」要在 50 户以内；「5 万户」在 5000 户以内", () => {
+    expect(checkGrounding("4.82 万户", ev({ holderNum: 48212 })).unverified).toEqual([]);
+    expect(checkGrounding("4.82 万户", ev({ holderNum: 48260 })).unverified).toHaveLength(1);
+    expect(checkGrounding("约 5 万户", ev({ holderNum: 47600 })).unverified).toEqual([]);
+  });
+
+  it("照抄整数的户数要一模一样；户数不和金额比", () => {
+    expect(checkGrounding("股东 48212 户", ev({ holderNum: 48212 })).unverified).toEqual([]);
+    expect(checkGrounding("股东 48213 户", ev({ holderNum: 48212 })).unverified).toHaveLength(1);
+    expect(checkGrounding("4.8 万户", ev({ financingAmount: 48000 })).unverified).toHaveLength(1);
+  });
+
+  it("裸「股」不是计数单位（同第 1 版）：「每 10 股派 3 元」「10 转 5 股」里的整数不核对", () => {
+    const { figures } = extractFigures(
+      "公司 2026 年每 10 股派 3 元，并每 10 股转增 5 股，10 转 5 股。",
+    );
+    expect(figures.map((f) => [f.raw.trim(), f.kind])).toEqual([
+      ["10", "plain"],
+      ["3 元", "money"],
+      ["10", "plain"],
+      ["5", "plain"],
+      ["10", "plain"],
+      ["5", "plain"],
+    ]);
+    const r = checkGrounding("每 10 股派 3 元", collectEvidence("get_security", { cash: 0.3 }));
+    expect(r.unverified.map((u) => u.raw)).toEqual(["3 元"]);
+    // 带万 / 亿的股数照常核对
+    expect(extractFigures("解禁 2500 万股").figures[0]).toMatchObject({
+      kind: "count",
+      value: 2.5e7,
+    });
+  });
+
+  it("证据项的单位「户」「万股」「笔」按计数归类", () => {
+    const items = {
+      items: [
+        { key: "holders.latest", value: 48212, unit: "户" },
+        { key: "lockup.next", value: 2500, unit: "万股" },
+      ],
+    };
+    expect(checkGrounding("户数 4.8 万户，下一次解禁 2500 万股", ev(items)).unverified).toEqual([]);
+  });
+
+  it("融资余额是金额：「172.3 亿」对 172.3 亿元的 financingAmount", () => {
+    expect(
+      checkGrounding("融资余额 172.3 亿", ev({ margin: { financingAmount: 1.7233e10 } }))
+        .unverified,
+    ).toEqual([]);
+    expect(
+      checkGrounding("融资余额 172.3 亿", ev({ margin: { financingAmount: 1.74e10 } })).unverified,
+    ).toHaveLength(1);
+  });
+
+  it("百分数要写成 *Pct 键（占流通市值、环比、折溢价）", () => {
+    const r = checkGrounding(
+      "融资余额占流通市值 1.1%，户数环比 -9.8%，大宗折价 9.8%",
+      ev({
+        margin: { marginRatioPct: 1.0953 },
+        holders: [{ qoqPct: -9.75 }],
+        blocks: { premium20dPct: -9.825 },
+      }),
+    );
+    expect(r.unverified).toEqual([]);
   });
 });

@@ -4,6 +4,8 @@
 import { env } from "../env.ts";
 import { AppError } from "./errors.ts";
 
+const PASS_THROUGH = new Set<number>([400, 404, 409, 503]);
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const { cfg } = env();
   let res: Response;
@@ -21,8 +23,14 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new AppError(503, "行情服务（worker）没有运行");
   }
   const body = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok)
-    throw new AppError(res.status === 404 ? 404 : 500, body.error ?? `worker 返回 ${res.status}`);
+  if (!res.ok) {
+    // 400 参数或数据不对、404 不存在、409 冲突（比如已经有一个事件数据回填在排队）、503 维护中：
+    // 都是 worker 有意给出的中文原因，原样转给前端；其余（500）是 worker 内部出错，原文（SQL、文件路径）只记日志
+    if (PASS_THROUGH.has(res.status) && body.error)
+      throw new AppError(res.status as 400 | 404 | 409 | 503, body.error);
+    console.error(`worker ${path} 返回 ${res.status}：${body.error ?? ""}`);
+    throw new AppError(500, "行情服务出错，请稍后再试");
+  }
   return body as T;
 }
 

@@ -73,6 +73,11 @@ export interface BacktestPreset {
 /** 单笔上限的可选值（不限 / 5% / 10% / 20%）；预填了别的值时也列出来 */
 const PARTICIPATION_CHOICES = [null, 0.05, 0.1, 0.2] as const;
 
+/** 成交假设里用户能填的数在范围内（单边滑点 0–200 bp）；不在时「开始回测」不能点 */
+function slipValid(exec: ExecConfig): boolean {
+  return Number.isFinite(exec.slippageBps) && exec.slippageBps >= 0 && exec.slippageBps <= 200;
+}
+
 /**
  * 成交假设（D64）：默认收起，展开后可改单边滑点、半个最小价位、冲击成本与单笔上限；
  * 默认值直接取 @ivan/core 的 defaultExec（纯函数，不另开接口）；「恢复默认」连规则表与指标版本一起恢复。
@@ -88,7 +93,7 @@ function ExecFields({
 }) {
   const choices: Array<number | null> = [...PARTICIPATION_CHOICES];
   if (!choices.includes(exec.participation)) choices.push(exec.participation);
-  const slipOk = exec.slippageBps >= 0 && exec.slippageBps <= 200;
+  const slipOk = slipValid(exec);
   return (
     <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-4">
       <Field
@@ -203,6 +208,7 @@ export function BacktestDialog({
             variant="primary"
             icon={IconRun}
             loading={run.isPending}
+            disabled={!slipValid(exec)}
             onClick={() => run.mutate()}
           >
             开始回测

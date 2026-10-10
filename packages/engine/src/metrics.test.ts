@@ -124,6 +124,18 @@ describe("完整持仓（D63）", () => {
     ]);
   });
 
+  it("仓位控制减到 0、之后没再买：知道区间末不持有时按最后一笔卖出结掉；还持有或不知道时不算", () => {
+    const zeroed: Trade[] = [
+      t({ date: "2024-01-02", side: "buy", reason: "entry" }),
+      t({ date: "2024-01-09", side: "sell", reason: "exposure", pnl: 4, holdDays: 5 }),
+    ];
+    expect(roundTrips(zeroed, new Set())).toEqual([
+      { code: "600001.SH", entryDate: "2024-01-02", exitDate: "2024-01-09", pnl: 4, holdDays: 5 },
+    ]);
+    expect(roundTrips(zeroed, new Set(["600001.SH"]))).toEqual([]);
+    expect(roundTrips(zeroed)).toEqual([]);
+  });
+
   it("第 2 版的买卖次数不数仓位控制的增减，胜率按完整持仓", () => {
     const s = pts(
       weekdays("2024-01-02", 22),
@@ -205,7 +217,8 @@ describe("从投入第一笔资金算起（D63）", () => {
     const lastJan = s.filter((p) => p.date.startsWith("2018-01")).at(-1)!;
     expect(m.monthly[0]!.ret).toBe(lastJan.nav / 1 - 1);
     expect(m.risk!.consistency.years).toBe(1);
-    expect(m.start).toBe("2017-12-29");
+    // 起点写第一个真实交易日（锚点只参与数值）
+    expect(m.start).toBe("2018-01-02");
   });
 });
 
@@ -251,6 +264,19 @@ describe("检查项（指标第 2 版）", () => {
     // 第 2 版：(110000 + 2000 − 105000) = 7000 → 28.6%
     const c2 = run(metrics({ ...base, metricsVersion: 2 })).find((c) => c.id === "cost_drag")!;
     expect(c2.detail).toContain("占超额收益的 28.6%");
+  });
+
+  it("调参次数多：第 2 版补一句「新建一个策略会从零算」，第 1 版的文字原样", () => {
+    const withTrials = (m: Metrics) =>
+      runChecks({
+        input: { ...input(), priorVersionsOnPeriod: 12 },
+        metrics: m,
+        segments: { inSample: m, outOfSample: null },
+        attribution: { byStock: [], byIndustry: [] },
+        trades: [],
+      }).find((c) => c.id === "tuning_count")!;
+    expect(withTrials(metrics({ metricsVersion: 2 })).detail).toMatch(/新建一个策略会从零算。$/);
+    expect(withTrials(metrics({})).detail).toMatch(/或向前跟踪。$/);
   });
 
   it("各年表现不一致：只在第 2 版、至少 3 年、跑赢不到一半而年化超额为正时提示", () => {

@@ -62,6 +62,7 @@ export function fmtFactor(value: unknown, unit?: string): string {
     if (unit === "亿") return `${value.toFixed(value >= 100 ? 0 : 1)} 亿`;
     if (unit === "名") return `${value.toFixed(0)}`;
     if (unit === "年") return `${value.toFixed(0)} 年`;
+    if (unit === "天") return `${value.toFixed(0)} 天`;
     return value.toFixed(2);
   }
   return String(value);
@@ -177,7 +178,7 @@ export function verdictNote(v: Verdict, lastDate?: string | null): string {
     case "DRIFTING":
       return "最近的读数持续不在正常范围，和回测的表现有偏离；回到正常范围就恢复。";
     case "DECAYED":
-      return "最近的读数持续处在衰减或严重的范围，建议复核规则是否仍然有效。跟踪不会被自动停止。";
+      return "最近的读数持续处在衰减或严重的范围，建议复核规则是否仍然有效。系统不会替你做任何操作。";
     case "WARMING_UP":
       return `跟踪满 ${HEALTH_THRESHOLDS.minDays} 个交易日、且有上线前的回测可对照，才开始判断；样本不足从不算正常。`;
     case "STALE_DATA":
@@ -251,8 +252,17 @@ export function outcomeText(
       ? [o.ret5, o.excess5, "（5 天）"]
       : [null, null, ""];
   if (ret === null) return NA;
-  const head = `${o.side === "sell" ? "卖出后 " : ""}${pct(ret)}`;
-  return `${head}${has(excess) ? `，跑赢基准 ${pct(excess)}` : ""}${note}`;
+  // 卖出：只说这只股票之后的走势与相对基准（「跑赢」读起来像是卖对了，其实是卖掉的那只后来更好）；
+  // 买入：超额为负写「跑输」，不写「跑赢基准 -0.4%」
+  if (o.side === "sell") {
+    return `卖出后 ${pct(ret)}${has(excess) ? `，相对基准 ${pct(excess)}` : ""}${note}`;
+  }
+  const vs = has(excess)
+    ? excess! < 0
+      ? `，跑输基准 ${pct(-excess!, 1, false)}`
+      : `，跑赢基准 ${pct(excess)}`
+    : "";
+  return `${pct(ret)}${vs}${note}`;
 }
 
 /** 时间线条目的徽标文字：计划第 2 版起写「修订」 */
@@ -281,4 +291,106 @@ export function reasonDetailShort(d: string | null | undefined): string {
   if (d === "ranked_out") return "掉出名次线";
   if (d === "failed_filter") return "不再满足条件";
   return (REASON_DETAIL_TEXT as Record<string, string>)[d] ?? d;
+}
+
+// ── 两融与筹码（S15b） ──
+
+/** 解禁可得日依据的 Tag 文字（LockupAvailRule） */
+export const LOCKUP_RULE_TAG: Record<string, string> = {
+  ipo_terms: "上市时已知",
+  notice_bound: "按公告推算",
+  "notice_bound:weekday": "按工作日推算",
+  first_seen: "首次记录",
+};
+
+/** 解禁可得日依据的说明（Tag 的 ⓘ、证据项的注释） */
+export function lockupRuleText(rule: string, leadTd = 3): string {
+  switch (rule) {
+    case "ipo_terms":
+      return "首发限售，上市时招股书就写明了";
+    case "notice_bound":
+      return `按解禁前 ${leadTd} 个交易日的提示性公告推算可得日`;
+    case "notice_bound:weekday":
+      return `按解禁前 ${leadTd} 个工作日推算可得日（那一年没有交易日历）`;
+    case "first_seen":
+      return "每晚同步首次见到它的那天起算";
+    default:
+      return rule;
+  }
+}
+
+/** 已经是百分数（0–100）的值：带符号、默认 1 位小数，如 +2.0%、-9.8% */
+export function pctPoints(x: number | null | undefined, digits = 1): string {
+  if (x === null || x === undefined || !Number.isFinite(x)) return NA;
+  return `${x > 0 ? "+" : ""}${x.toFixed(digits)}%`;
+}
+
+/** 大宗交易折溢价（百分数）：负数说「折价」、正数说「溢价」，不靠正负号 */
+export function premiumText(p: number | null | undefined, digits = 1): string {
+  if (p === null || p === undefined || !Number.isFinite(p)) return NA;
+  const a = Math.abs(p).toFixed(digits);
+  if (Number(a) === 0) return "平价";
+  return p < 0 ? `折价 ${a}%` : `溢价 ${a}%`;
+}
+
+/** 股数：一万股以上写成「x 万股」（最多 2 位小数），以下写「x 股」 */
+export function sharesText(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return NA;
+  if (Math.abs(n) < 1e4) return `${Math.round(n).toLocaleString("en-US")} 股`;
+  return `${(n / 1e4).toLocaleString("en-US", { maximumFractionDigits: 2 })} 万股`;
+}
+
+/** 户数：整数加千分位 */
+export function holdersText(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return NA;
+  return `${Math.round(n).toLocaleString("en-US")} 户`;
+}
+
+/**
+ * 编辑器因子下拉里事件因子（两融与筹码）的后缀与是否禁用：历史还没补算完 →「（补算中）」并禁用；
+ * 补完了 →「自 2013-02-13」；不是事件因子或不知道（worker 不在）时什么都不加。
+ */
+export function eventFactorOption(f: {
+  dataset?: string;
+  from?: string | null;
+  ready?: boolean | null;
+}): { suffix: string; disabled: boolean } {
+  if (!f.dataset || f.ready === undefined || f.ready === null)
+    return { suffix: "", disabled: false };
+  if (!f.ready) return { suffix: "（补算中）", disabled: true };
+  return { suffix: f.from ? ` 自 ${f.from}` : "", disabled: false };
+}
+
+/** 管理页一行：「事件因子：补算中（7 / 14 年）」「已补算（第 1 版）」；S15 的历史回填没完成时「等事件数据补齐」 */
+export function eventFactorsText(
+  s:
+    | {
+        v: number;
+        complete: boolean;
+        doneYears: number;
+        totalYears: number;
+        backfillComplete?: boolean;
+      }
+    | undefined,
+): string | null {
+  if (!s) return null;
+  if (s.complete) return `事件因子：已补算（第 ${s.v} 版）`;
+  if (s.backfillComplete === false) return "事件因子：等事件数据的历史补齐后再补算";
+  return `事件因子：补算中（${s.doneYears} / ${s.totalYears} 年）`;
+}
+
+/**
+ * 数字核对 ⓘ 里「最接近的工具数」：按证据的种类排版（比率写成百分数、金额写万 / 亿），
+ * 好和文字里的数对照；不知道种类（旧结果）时保留 4 位有效数字。
+ */
+export function nearestValueText(
+  n: { value: number; kind?: "ratio" | "points" | "money" | "count" | "number" },
+  figureKind: string,
+): string {
+  const percentish = figureKind === "percent" || figureKind === "points";
+  if (n.kind === "ratio" && percentish) return pct(n.value, 2);
+  if (n.kind === "points") return `${num(n.value, 2)}%`;
+  if (n.kind === "money") return money(n.value);
+  if (n.kind === "count") return num(n.value, 0);
+  return n.value.toLocaleString("zh-CN", { maximumSignificantDigits: 4 });
 }

@@ -1,16 +1,16 @@
 /**
- * 数据源接口（D9 的实现，D72）：本轮只开日线、实时报价、指数三种能力，只为本轮真的会用的东西开口子。
- * token、显式专用来源、本地导入这些成员不在这里，接 Tushare / 本地导入时再加。
+ * 数据源接口（D9 的实现，D72）：日线、实时报价、指数三种能力，S15 加点时事件数据（events，D81）。
+ * token 成员见 S16；本地导入仍在三期。
  *
  * 价格口径 PriceCaliber 没有「前复权」：前复权的历史价每次除权都会变，换不回「不复权 + 等比因子」，
  * 所以根本声明不了；其余口径由 compute/normalize.ts 统一换成 Ivan 的口径，换不成的在接口处拒收。
  */
-import type { DateStr, Market } from "@ivan/core";
+import type { CanaryStatus, DateStr, Market, PitDatasetId } from "@ivan/core";
 import type { HttpLike } from "../http.ts";
 import type { KBar, Quote } from "./tencent.ts";
 
 export type SourceId = "eastmoney" | "tencent" | "csindex";
-export type Capability = "bars" | "quotes" | "index";
+export type Capability = "bars" | "quotes" | "index" | "events";
 
 /**
  * 来源给出的价格口径：
@@ -54,6 +54,103 @@ export interface IndexBar {
   close: number;
 }
 
+/** 点时事件数据的一块（回填与夜间窗口都按块取、按块写）：id 是 etl_progress 的键 */
+export interface PitChunk {
+  id: string;
+  from: DateStr;
+  to: DateStr;
+}
+
+export interface PitFetchResult<R> {
+  /** 规范化后的行（单位已统一） */
+  rows: R[];
+  /** 来源给的原始行数（含 ETF、基金这些后来丢掉的） */
+  rawCount: number;
+  requests: number;
+  /** 两融到齐检查用：原始行按交易所计数（含 ETF） */
+  byExchange?: { sh: number; sz: number };
+}
+
+/** 金丝雀的结果（D82）：detail 不含 URL 与查询串 */
+export interface CanaryResult {
+  status: CanaryStatus;
+  source: SourceId;
+  at: string;
+  detail: string;
+}
+
+/**
+ * 一个点时事件数据集在某家来源上的实现（D81）：运行器只认这两个方法与规范化的行，
+ * 不认来源的报表名、列名与过滤串。
+ */
+export interface PitFetcher<R> {
+  fetchChunk(sctx: SourceCtx, chunk: PitChunk): Promise<PitFetchResult<R>>;
+  canary(sctx: SourceCtx, today: DateStr, prevTd: DateStr): Promise<CanaryResult>;
+  /** 回填估算：这个区间里大约多少行（一次计数请求）；不实现就不估 */
+  estimateRows?(sctx: SourceCtx, from: DateStr, to: DateStr): Promise<number>;
+}
+
+/**
+ * 来源报告「结构变了」（字段不存在、请求过的键缺失）：这个数据集这次不删不写（D82）。各家来源的错误类带
+ * `schemaDrift = true`，运行器只认这个标记，不认具体来源的错误类。
+ */
+export function isSchemaDrift(e: unknown): boolean {
+  return !!e && typeof e === "object" && (e as { schemaDrift?: unknown }).schemaDrift === true;
+}
+
+/** 来源报告「翻页对不上」（行数不符、重复行）：这一块失败，之后重跑 */
+export function isPageDrift(e: unknown): boolean {
+  return !!e && typeof e === "object" && (e as { pageDrift?: unknown }).pageDrift === true;
+}
+
+/** 两融明细一行（金额元、融券余量股；rzyezb 是来源原样的 %） */
+export interface MarginRow {
+  code: string;
+  date: DateStr;
+  rzye: number | null;
+  rzmre: number | null;
+  rzche: number | null;
+  rqye: number | null;
+  rqyl: number | null;
+  floatMcap: number | null;
+  rzyezb: number | null;
+}
+
+/** 股东户数一行：endDate 截至日，noticeDate 公告日 */
+export interface HolderRow {
+  code: string;
+  endDate: DateStr;
+  noticeDate: DateStr;
+  holderNum: number;
+  preHolderNum: number | null;
+  preEndDate: DateStr | null;
+}
+
+/** 限售解禁一行：股数为股，比例为小数 */
+export interface LockupRow {
+  code: string;
+  freeDate: DateStr;
+  type: string;
+  unlockShares: number | null;
+  ableShares: number | null;
+  floatAfter: number | null;
+  ratioFloat: number | null;
+  ratioTotal: number | null;
+}
+
+/** 大宗交易一笔：premium 是相对当日收盘的小数，金额元、数量股 */
+export interface BlockRow {
+  code: string;
+  tradeDate: DateStr;
+  dealPrice: number | null;
+  closePrice: number | null;
+  premium: number | null;
+  dealVolume: number | null;
+  dealAmount: number | null;
+  buyerInst: boolean;
+  sellerInst: boolean;
+}
+
 export interface SourceAdapter {
   id: SourceId;
   /** 中文名（管理页、日志） */
@@ -68,6 +165,8 @@ export interface SourceAdapter {
   quotes?(ctx: SourceCtx, codes: string[]): Promise<Quote[]>;
   /** sym 是这家来源自己的指数代码（东财 secid、腾讯原始代码、中证指数代码） */
   indexBars?(ctx: SourceCtx, sym: string, from: DateStr, to: DateStr): Promise<IndexBar[]>;
+  /** 点时事件数据集（S15，只有 A 股） */
+  events?: Partial<Record<PitDatasetId, PitFetcher<unknown>>>;
 }
 
 /** 行级来源代码（bars_daily / index_bars / corp_actions 的 src 列）：em 东财、tx 腾讯日 K、txq 腾讯报价、csi 中证 */

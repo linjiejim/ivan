@@ -5,29 +5,40 @@
  * - eff_date ≤ asOf 的最新一期财报，数值优先用 financials_seen 里 first_seen ≤ asOf 的那一版（当时首次见到的值，D61）；
  * - 近 365 天的分红送转、ST 判定的精确度档位、近 20 个交易日的停牌 / 无成交 / 缺数据、未解决的数据问题、行业属性快照。
  *
- * 每项带出处（表、键、来源、版本）与数据日；整份的校验值 hash = sha256Canonical(items)（证据第 1 版，D97），可复核。
+ * 每项带出处（表、键、来源、版本）与数据日，可复核。证据带版本（D97）：
+ * - 第 1 版 = S07 的条目，校验值 hash = sha256Canonical(items)（旧值照样能复核）；
+ * - 第 2 版 = S15b 给 A 股加「两融与筹码」组（7 个事件因子 + 最近一条两融、最近一期户数、下一次已知解禁、近 20 个交易日大宗），
+ *   校验值 = sha256Canonical({evidenceVersion, factorKeys, options, items})。
+ * securityDossier(..., {version}) 能按任一版本的条目集合重新生成；新生成的用当前版本。
  * asOf 是决策日（成交日的前一个交易日），不是成交日：用成交日当天的收盘价就是偷看一天。
  */
 import {
   addDays,
   canonicalJson,
   type DateStr,
+  EVIDENCE_VERSION,
+  EVIDENCE_VERSIONS,
   FACTOR_MAP,
   FACTORS,
   type FactorDef,
   isDateStr,
+  LOCKUP_NOTICE_LEAD_TD,
   type Market,
+  PIT_DATASET_IDS,
+  PIT_DATASETS,
+  SOFT_FAILING_ALERT,
 } from "@ivan/core";
 import { sha256Canonical } from "@ivan/core/node";
 import { FIN_FIELDS, finRowHash } from "../etl/fundamentals.ts";
 import { attrAsOf } from "../etl/snapshots.ts";
 import type { Warehouse } from "../warehouse/db.ts";
 import { type DataVersionInfo, lastTradingDay, latestDataVersion } from "./backtest.ts";
+import { softStepStatus } from "./data-health.ts";
 
-/** 证据条目的版本（D97）：第 1 版 = 本切片的条目，校验值只覆盖 items */
-export const EVIDENCE_VERSION = 1;
+/** 证据的版本（D97）定义在 @ivan/core（决策回溯的导出清单要写出它），这里原样再导出 */
+export { EVIDENCE_VERSION, EVIDENCE_VERSIONS };
 
-export type EvidenceGroup = "price" | "valuation" | "financial" | "status" | "quality";
+export type EvidenceGroup = "price" | "valuation" | "financial" | "status" | "quality" | "events";
 
 export interface EvidenceItem {
   group: EvidenceGroup;
@@ -39,7 +50,14 @@ export interface EvidenceItem {
   asOf: DateStr;
   /** 什么时候起可得（≤ 证据的 asOf） */
   availDate: DateStr;
-  ref: { table: string; key: Record<string, string | number>; src: string | null; ver: number | null };
+  /** 出处；事件表（S15）的行还带写它的批次 batch（pit_batches.id） */
+  ref: {
+    table: string;
+    key: Record<string, string | number>;
+    src: string | null;
+    ver: number | null;
+    batch?: number | null;
+  };
   note?: string;
 }
 
@@ -49,8 +67,14 @@ export interface EvidenceCaveat {
   title: string;
 }
 
+/** 证据的可选项（S17c 的趋势、多期财报、同业分位在这里加；第 2 版还没有，恒为 {}） */
+export type EvidenceOptions = Record<string, unknown>;
+
 export interface SecurityDossier {
-  evidenceVersion: typeof EVIDENCE_VERSION;
+  evidenceVersion: number;
+  /** 生成时实际用的因子集（默认一组或策略的因子，按市场过滤、去重；不含随后补上的风险标记与事件因子） */
+  factorKeys: string[];
+  options: EvidenceOptions;
   code: string;
   name: string | null;
   market: Market;
@@ -103,7 +127,20 @@ const GROUP_OF: Record<FactorDef["group"], EvidenceGroup> = {
   growth: "quality",
   category: "status",
   flag: "status",
+  event: "events",
 };
+
+/** 校验值：第 1 版只覆盖条目；第 2 版起连同版本、因子集与选项一起 */
+export function dossierHash(
+  version: number,
+  factorKeys: readonly string[],
+  options: EvidenceOptions,
+  items: readonly EvidenceItem[],
+): string {
+  return version === 1
+    ? sha256Canonical(items)
+    : sha256Canonical({ evidenceVersion: version, factorKeys, options, items });
+}
 
 /** 财报数值项：列、标签、单位（金额按亿显示） */
 const FIN_ITEMS: Array<{ key: string; label: string; unit: "亿" | "%"; aOnly?: boolean }> = [
@@ -146,9 +183,15 @@ export async function securityDossier(
   wh: Warehouse,
   code: string,
   asOfIn?: DateStr | null,
-  o: { factorKeys?: readonly string[] } = {},
+  o: { factorKeys?: readonly string[]; version?: number; options?: EvidenceOptions } = {},
 ): Promise<SecurityDossier> {
   if (asOfIn && !isDateStr(asOfIn)) throw new EvidenceError(400, "日期格式要是 YYYY-MM-DD");
+  const version = o.version ?? EVIDENCE_VERSION;
+  if (!(EVIDENCE_VERSIONS as readonly number[]).includes(version)) {
+    throw new EvidenceError(400, `证据版本只能是 ${EVIDENCE_VERSIONS.join("、")}`);
+  }
+  const options: EvidenceOptions = o.options ?? {};
+  if (Object.keys(options).length) throw new EvidenceError(400, "这个版本的证据没有可选项");
   const sec = await wh.one<{ name: string | null; market: string; industry_l1: string | null }>(
     `SELECT name, market, industry_l1 FROM securities WHERE code = $c`,
     { c: code },
@@ -190,10 +233,13 @@ export async function securityDossier(
   );
 
   // ── 因子：默认一组常用的，带策略时用策略的筛选与排序因子；外加为真的风险标记（group === 'flag'，D97） ──
-  const wanted = (o.factorKeys?.length ? o.factorKeys : DEFAULT_EVIDENCE_FACTORS).filter((k) =>
-    FACTOR_MAP.get(k)?.markets.includes(market),
-  );
-  const keys = [...new Set(wanted)];
+  // 事件因子不在这里：第 1 版没有它们，第 2 版起统一放进「两融与筹码」组
+  const wanted = (o.factorKeys?.length ? o.factorKeys : DEFAULT_EVIDENCE_FACTORS).filter((k) => {
+    const f = FACTOR_MAP.get(k);
+    return !!f && f.markets.includes(market) && !f.dataset;
+  });
+  const factorKeys = [...new Set(wanted)];
+  const keys = [...factorKeys];
   for (const f of FACTORS as readonly FactorDef[]) {
     if (f.group === "flag" && f.markets.includes(market) && row[f.key] === true && !keys.includes(f.key)) {
       keys.push(f.key);
@@ -220,8 +266,15 @@ export async function securityDossier(
   // ── 数据状态 ──
   items.push(...(await statusItems(wh, code, market, asOf, dataDate, sec.industry_l1, caveats)));
 
+  // ── 两融与筹码（第 2 版起，只有 A 股） ──
+  if (version >= 2 && market === "A") {
+    items.push(...(await eventItems(wh, code, asOf, dataDate, row, factorRef, caveats)));
+  }
+
   return {
-    evidenceVersion: EVIDENCE_VERSION,
+    evidenceVersion: version,
+    factorKeys,
+    options,
     code,
     name: sec.name ?? null,
     market,
@@ -230,8 +283,234 @@ export async function securityDossier(
     dataVersion,
     items,
     caveats,
-    hash: sha256Canonical(items),
+    hash: dossierHash(version, factorKeys, options, items),
   };
+}
+
+const LOCKUP_RULE_NOTE = (rule: string, firstSeen: string): string =>
+  rule === "ipo_terms"
+    ? "首发限售，上市时已知"
+    : rule === "first_seen"
+      ? `${firstSeen} 首次记录`
+      : `按解禁前 ${LOCKUP_NOTICE_LEAD_TD} 个交易日的提示性公告推算可得日`;
+
+/**
+ * 「两融与筹码」组（证据第 2 版，D85）：7 个事件因子（引用 factors_daily）、最近一条两融、最近一期户数、
+ * 下一次已知解禁、近 20 个交易日大宗。每项的可得日 ≤ 决策日，只看 asOf 时可得且没撤下的行；引用带 src、ver、batch。
+ */
+async function eventItems(
+  wh: Warehouse,
+  code: string,
+  asOf: DateStr,
+  dataDate: DateStr,
+  row: Record<string, unknown>,
+  factorRef: EvidenceItem["ref"],
+  caveats: EvidenceCaveat[],
+): Promise<EvidenceItem[]> {
+  const out: EvidenceItem[] = [];
+  const base = { group: "events" as const };
+  for (const f of FACTORS as readonly FactorDef[]) {
+    if (!f.dataset) continue;
+    out.push({
+      ...base,
+      key: f.key,
+      label: f.label,
+      value: itemValue(row[f.key]),
+      ...(f.unit ? { unit: f.unit } : {}),
+      asOf: dataDate,
+      availDate: dataDate,
+      ref: factorRef,
+    });
+  }
+
+  const m = await wh.one<{
+    date: string;
+    avail: string;
+    rzye: number | null;
+    src: string | null;
+    ver: number | null;
+    batch: number | null;
+  }>(
+    `SELECT date::VARCHAR AS date, avail_date::VARCHAR AS avail, rzye, src, ver, batch FROM margin_daily
+     WHERE code = $c AND avail_date <= $a::DATE ORDER BY date DESC LIMIT 1`,
+    { c: code, a: asOf },
+  );
+  out.push(
+    m
+      ? {
+          ...base,
+          key: "margin.latest",
+          label: `融资余额（${m.date}）`,
+          value: m.rzye === null ? null : m.rzye / 1e8,
+          unit: "亿",
+          asOf: m.date,
+          availDate: m.avail,
+          ref: { table: "margin_daily", key: { code, date: m.date }, src: m.src, ver: num(m.ver), batch: num(m.batch) },
+        }
+      : {
+          ...base,
+          key: "margin.latest",
+          label: "融资余额",
+          value: null,
+          unit: "亿",
+          asOf,
+          availDate: dataDate,
+          ref: { table: "margin_daily", key: { code }, src: null, ver: null, batch: null },
+          note: "当时没有两融记录（不是两融标的，或两融数据还没覆盖到）",
+        },
+  );
+
+  const h = await wh.one<{
+    end: string;
+    notice: string;
+    avail: string;
+    n: number | null;
+    src: string | null;
+    ver: number | null;
+    batch: number | null;
+  }>(
+    `SELECT end_date::VARCHAR AS "end", notice_date::VARCHAR AS notice, avail_date::VARCHAR AS avail,
+            holder_num AS n, src, ver, batch FROM holder_counts
+     WHERE code = $c AND avail_date <= $a::DATE AND (gone_from IS NULL OR gone_from > $a::DATE)
+     ORDER BY end_date DESC, notice_date DESC LIMIT 1`,
+    { c: code, a: asOf },
+  );
+  out.push(
+    h
+      ? {
+          ...base,
+          key: "holders.latest",
+          label: `股东户数（截至 ${h.end}，${h.notice} 公告）`,
+          value: itemValue(h.n),
+          unit: "户",
+          asOf: h.end,
+          availDate: h.avail,
+          ref: {
+            table: "holder_counts",
+            key: { code, end_date: h.end, notice_date: h.notice },
+            src: h.src,
+            ver: num(h.ver),
+            batch: num(h.batch),
+          },
+        }
+      : {
+          ...base,
+          key: "holders.latest",
+          label: "股东户数",
+          value: null,
+          unit: "户",
+          asOf,
+          availDate: dataDate,
+          ref: { table: "holder_counts", key: { code }, src: null, ver: null, batch: null },
+          note: "当时还没有公告过的户数",
+        },
+  );
+
+  const l = await wh.one<{
+    free: string;
+    type: string;
+    shares: number | null;
+    avail: string;
+    rule: string;
+    first: string;
+    src: string | null;
+    ver: number | null;
+    batch: number | null;
+  }>(
+    `SELECT free_date::VARCHAR AS free, type, unlock_shares AS shares, avail_date::VARCHAR AS avail,
+            avail_rule AS rule, first_seen::VARCHAR AS first, src, ver, batch FROM lockups
+     WHERE code = $c AND avail_date <= $a::DATE AND (gone_from IS NULL OR gone_from > $a::DATE)
+       AND free_date > $a::DATE
+     ORDER BY free_date, type LIMIT 1`,
+    { c: code, a: asOf },
+  );
+  out.push(
+    l
+      ? {
+          ...base,
+          key: "lockup.next",
+          label: `下一次已知解禁（${l.free}，${l.type}）`,
+          value: l.shares === null ? null : l.shares / 1e4,
+          unit: "万股",
+          asOf: l.free,
+          availDate: l.avail,
+          ref: {
+            table: "lockups",
+            key: { code, free_date: l.free, type: l.type },
+            src: l.src,
+            ver: num(l.ver),
+            batch: num(l.batch),
+          },
+          note: LOCKUP_RULE_NOTE(l.rule, l.first),
+        }
+      : {
+          ...base,
+          key: "lockup.next",
+          label: "下一次已知解禁",
+          value: null,
+          unit: "万股",
+          asOf,
+          availDate: dataDate,
+          ref: { table: "lockups", key: { code }, src: null, ver: null, batch: null },
+          note: "当时已知的解禁里没有",
+        },
+  );
+
+  // 近 20 个交易日（按可得日）的大宗交易：笔数、成交额、按成交额加权的折溢价
+  const days = await wh.all<{ d: string }>(
+    `SELECT DISTINCT date::VARCHAR AS d FROM trade_calendar WHERE market = 'A' AND date <= $a::DATE
+     ORDER BY d DESC LIMIT 20`,
+    { a: asOf },
+  );
+  const from = days.at(-1)?.d ?? asOf;
+  const b = await wh.one<{ n: number; amt: number | null; prem: number | null }>(
+    `SELECT count(*) AS n, sum(deal_amount) AS amt,
+            sum(premium * deal_amount) / nullif(sum(deal_amount), 0) AS prem
+     FROM block_trades WHERE code = $c AND avail_date >= $f::DATE AND avail_date <= $a::DATE`,
+    { c: code, f: from, a: asOf },
+  );
+  const bref = { table: "block_trades", key: { code, from, to: asOf }, src: null, ver: null, batch: null };
+  const bbase = { ...base, asOf, availDate: dataDate, ref: bref };
+  const n = Number(b?.n ?? 0);
+  out.push(
+    { ...bbase, key: "blocks.20d.count", label: "近 20 个交易日大宗交易", value: n, unit: "笔" },
+    {
+      ...bbase,
+      key: "blocks.20d.amount",
+      label: "近 20 个交易日大宗成交额",
+      value: n && b?.amt !== null && b?.amt !== undefined ? b.amt / 1e8 : null,
+      unit: "亿",
+    },
+    {
+      ...bbase,
+      key: "blocks.20d.premium",
+      label: "近 20 个交易日大宗折溢价（按成交额加权）",
+      value: n && b?.prem !== null && b?.prem !== undefined ? b.prem * 100 : null,
+      unit: "%",
+    },
+  );
+
+  // 数据集连续 3 晚没更新成功：提示（不进校验值）
+  const soft = await softStepStatus(wh, "A");
+  for (const id of PIT_DATASET_IDS) {
+    const st = soft.find((x) => x.step === id);
+    if (st && st.failingNights >= SOFT_FAILING_ALERT) {
+      caveats.push({
+        id: "event_stale",
+        level: "warn",
+        title: `「${PIT_DATASETS[id].label}」已经 ${st.failingNights} 晚没更新成功，两融与筹码数据可能是旧的`,
+      });
+    }
+  }
+  const calc = soft.find((x) => x.step === "event_factors")?.failingNights ?? 0;
+  if (calc >= SOFT_FAILING_ALERT) {
+    caveats.push({
+      id: "event_stale",
+      level: "warn",
+      title: `两融与筹码类因子已经 ${calc} 晚没算成功，这几天的因子值为空`,
+    });
+  }
+  return out;
 }
 
 async function financialItems(
@@ -448,8 +727,10 @@ async function statusItems(
   // 未解决的数据问题
   const issues = Number(
     (await wh.scalar(
+      // 只数日线的问题：点时事件数据（S15）的撤下、公告日变动属于事件组（S15b），不改第 1 版证据的值
       `SELECT count(*) FROM data_issues
-       WHERE code = $c AND coalesce(date, created_at::DATE) <= $a::DATE AND resolved_by IS NULL`,
+       WHERE code = $c AND dataset = 'bars' AND coalesce(date, created_at::DATE) <= $a::DATE
+         AND resolved_by IS NULL`,
       { c: code, a: asOf },
     )) ?? 0,
   );
@@ -518,24 +799,52 @@ function round(x: number, d: number): number {
 }
 
 /**
- * 复核一份证据：按同样的代码、决策日与因子集重新生成，比校验值。带上原来的条目时逐项比出变了哪些
- * （新增、删掉的也算；删掉的给原来那一项）。
+ * 复核一份证据（D97）：按同样的代码、决策日、版本、因子集与选项重新生成，比校验值。给了版本就按那一版；
+ * 没给（S07 时代存下的旧值）就先按第 1 版、再按当前版本试。matchedVersion = 对上的那一版（没对上为 null）。
+ * 带上原来的条目时逐项比出变了哪些（新增、删掉的也算；删掉的给原来那一项；没给版本时和第 1 版比）。
  */
 export async function verifyDossier(
   wh: Warehouse,
   code: string,
   asOf: DateStr,
   hash: string,
-  o: { factorKeys?: readonly string[]; items?: readonly EvidenceItem[] } = {},
-): Promise<{ same: boolean; hash: string; changed: EvidenceItem[] }> {
-  const cur = await securityDossier(wh, code, asOf, { factorKeys: o.factorKeys });
-  if (cur.hash === hash) return { same: true, hash: cur.hash, changed: [] };
-  const changed: EvidenceItem[] = [];
-  if (o.items) {
-    const before = new Map(o.items.map((it) => [it.key, canonicalJson(it)]));
-    const now = new Set(cur.items.map((it) => it.key));
-    for (const it of cur.items) if (before.get(it.key) !== canonicalJson(it)) changed.push(it);
-    for (const it of o.items) if (!now.has(it.key)) changed.push(it);
+  o: {
+    factorKeys?: readonly string[];
+    items?: readonly EvidenceItem[];
+    evidenceVersion?: number;
+    options?: EvidenceOptions;
+  } = {},
+): Promise<{ same: boolean; hash: string; matchedVersion: number | null; changed: EvidenceItem[] }> {
+  const versions =
+    o.evidenceVersion !== undefined ? [o.evidenceVersion] : [...new Set([1, EVIDENCE_VERSION])];
+  const tried: SecurityDossier[] = [];
+  for (const version of versions) {
+    const d = await securityDossier(wh, code, asOf, {
+      factorKeys: o.factorKeys,
+      version,
+      ...(o.options ? { options: o.options } : {}),
+    });
+    if (d.hash === hash) return { same: true, hash: d.hash, matchedVersion: version, changed: [] };
+    tried.push(d);
   }
-  return { same: false, hash: cur.hash, changed };
+  // 没对上：带了条目时和最接近的那一版逐项比；没带时给最后试的版本（当前版本）的校验值
+  let cur = tried.at(-1)!;
+  let changed: EvidenceItem[] = [];
+  if (o.items) {
+    const diffs = tried.map((d) => ({ d, c: diffItems(o.items!, d.items) }));
+    const best = diffs.reduce((a, b) => (b.c.length < a.c.length ? b : a));
+    cur = best.d;
+    changed = best.c;
+  }
+  return { same: false, hash: cur.hash, matchedVersion: null, changed };
+}
+
+/** 逐项比：变了的与新增的给现在的那一项，删掉的给原来那一项 */
+function diffItems(before: readonly EvidenceItem[], now: readonly EvidenceItem[]): EvidenceItem[] {
+  const prev = new Map(before.map((it) => [it.key, canonicalJson(it)]));
+  const keys = new Set(now.map((it) => it.key));
+  const out: EvidenceItem[] = [];
+  for (const it of now) if (prev.get(it.key) !== canonicalJson(it)) out.push(it);
+  for (const it of before) if (!keys.has(it.key)) out.push(it);
+  return out;
 }
