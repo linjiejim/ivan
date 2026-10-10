@@ -28,6 +28,7 @@ import {
   DataTable,
   ErrorNote,
   Field,
+  Info,
   Input,
   LiveDot,
   Modal,
@@ -65,6 +66,8 @@ interface UsageDay {
   analyses: number | null;
   chatTokens: number;
   briefTokens: number;
+  /** 数字核对没通过的助手回复条数（D69） */
+  groundingFlagged?: number;
 }
 interface Invite {
   id: string;
@@ -537,6 +540,12 @@ export function AdminPage() {
                 <Th align="right">数据查询</Th>
                 <Th align="right">对话 token</Th>
                 <Th align="right">简报 token</Th>
+                <Th align="right">
+                  数字核对未通过
+                  <Info label="数字核对未通过：说明">
+                    助手回复里有工具结果找不到的数字、在回复下方标注出来的条数。简报的核对不在这里：没通过的简报改用模板，原因写在任务日志里。
+                  </Info>
+                </Th>
               </tr>
             </thead>
             <tbody>
@@ -549,6 +558,9 @@ export function AdminPage() {
                   <Td align="right">{d.chatTokens.toLocaleString()}</Td>
                   <Td align="right" className="text-ink-2">
                     {d.briefTokens.toLocaleString()}
+                  </Td>
+                  <Td align="right" className={d.groundingFlagged ? "text-warn" : "text-ink-2"}>
+                    {d.groundingFlagged ?? 0}
                   </Td>
                 </tr>
               ))}

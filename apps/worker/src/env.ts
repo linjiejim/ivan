@@ -5,6 +5,7 @@ import { type Config, loadConfig } from "@ivan/core/config";
 import { type DateStr, todayCN } from "@ivan/core";
 import { type EtlContext, Http, type HttpLike, Warehouse } from "@ivan/data";
 import { type AppDbHandle, openAppDb } from "@ivan/db";
+import type { LanguageModel } from "ai";
 
 export interface WorkerEnv {
   cfg: Config;
@@ -13,6 +14,8 @@ export interface WorkerEnv {
   http: HttpLike;
   /** 「今天」（北京时间）；测试注入固定日期 */
   today?: () => DateStr;
+  /** 简报用的模型；测试注入假模型（平时按配置建） */
+  briefModel?: LanguageModel;
 }
 
 let handle: WorkerEnv | undefined;

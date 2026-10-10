@@ -4,16 +4,21 @@
  *   reset-password <邮箱> <新密码>       重置密码（v1 没有邮件服务）
  *   invite [备注]                       生成一个 14 天有效的邀请码
  *   set-role <邮箱> <admin|user>        改角色
+ *   verify-bundle <file.json>           离线校验决策回溯的导出文件（不读库；通过退出码 0，否则 1）
  */
 import { loadConfig } from "@ivan/core/config";
-import { invites, newId, openAppDb } from "@ivan/db";
+import { type AppDbHandle, invites, newId, openAppDb } from "@ivan/db";
 import { hashPassword } from "better-auth/crypto";
+import { verifyBundleFile } from "./lib/verify-bundle.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
 const cfg = loadConfig();
-const { sqlite, db } = openAppDb(cfg.appDbPath);
+// 应用库按需打开：verify-bundle 只读文件，不碰库
+let opened: AppDbHandle | null = null;
+const app = () => (opened ??= openAppDb(cfg.appDbPath));
 
 function userByEmail(email: string) {
+  const { sqlite } = app();
   const u = sqlite.prepare(`SELECT id, email, role FROM "user" WHERE email = ?`).get(email) as
     { id: string; email: string; role: string } | undefined;
   if (!u) throw new Error(`没有用户 ${email}`);
@@ -22,7 +27,16 @@ function userByEmail(email: string) {
 
 async function main() {
   switch (cmd) {
+    case "verify-bundle": {
+      const [file] = args;
+      if (!file) throw new Error("用法：verify-bundle <导出的 JSON 文件>");
+      const r = verifyBundleFile(file);
+      (r.code === 0 ? console.log : console.error)(r.message);
+      process.exitCode = r.code;
+      return;
+    }
     case "users": {
+      const { sqlite } = app();
       console.table(
         sqlite
           .prepare(`SELECT email, name, role, substr(createdAt, 1, 16) AS created FROM "user"`)
@@ -36,6 +50,7 @@ async function main() {
         throw new Error("用法：reset-password <邮箱> <至少 8 位的新密码>");
       const u = userByEmail(email);
       const hash = await hashPassword(password);
+      const { sqlite } = app();
       const r = sqlite
         .prepare(`UPDATE account SET password = ? WHERE userId = ? AND providerId = 'credential'`)
         .run(hash, u.id);
@@ -48,6 +63,7 @@ async function main() {
       const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
       let code = "";
       for (let i = 0; i < 8; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+      const { sqlite, db } = app();
       const admin = sqlite.prepare(`SELECT id FROM "user" WHERE role = 'admin' LIMIT 1`).get() as
         { id: string } | undefined;
       db.insert(invites)
@@ -66,13 +82,15 @@ async function main() {
       const [email, role] = args;
       if (!email || (role !== "admin" && role !== "user"))
         throw new Error("用法：set-role <邮箱> <admin|user>");
-      sqlite.prepare(`UPDATE "user" SET role = ? WHERE id = ?`).run(role, userByEmail(email).id);
+      app()
+        .sqlite.prepare(`UPDATE "user" SET role = ? WHERE id = ?`)
+        .run(role, userByEmail(email).id);
       console.log(`${email} → ${role}`);
       return;
     }
     default:
       console.log(
-        "用法：pnpm admin <users|reset-password|invite|set-role> …（详见 apps/server/src/cli.ts）",
+        "用法：pnpm admin <users|reset-password|invite|set-role|verify-bundle> …（详见 apps/server/src/cli.ts）",
       );
       process.exitCode = cmd ? 1 : 0;
   }
@@ -83,4 +101,4 @@ main()
     console.error(e instanceof Error ? e.message : e);
     process.exitCode = 1;
   })
-  .finally(() => sqlite.close());
+  .finally(() => opened?.sqlite.close());

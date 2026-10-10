@@ -12,7 +12,10 @@ import {
   nextTradingDay,
   resolveExec,
   todayCN,
+  type TrackingHealth,
+  type Verdict,
 } from "@ivan/core";
+import { trackingVerdict } from "@ivan/engine";
 import {
   appendLedger,
   drafts,
@@ -30,6 +33,7 @@ import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import type { SeriesPoint } from "@ivan/core";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
+import type { DataStatus } from "./dashboard.ts";
 import { latestSnapshot } from "./plans.ts";
 import { downsample, latestDoneRun } from "./runs.ts";
 import { getVersion, trackingExec } from "./strategies.ts";
@@ -119,6 +123,34 @@ function view(t: TrackingRow, name: string) {
   };
 }
 
+/** 判词与它的依据（D70）：看板、跟踪页、对话共用 */
+export interface VerdictView {
+  verdict: Verdict;
+  health: TrackingHealth | null;
+  /** 最近一次结算失败（成功后清掉） */
+  lastError: { date: string; message: string } | null;
+}
+
+/** 判词要看这个市场今天的状态与最新提交的数据日（D78）：都来自 /internal/data-status；worker 没跑时只看状态与失败 */
+export function verdictView(
+  t: { market: string; lastDate: string | null; summary: unknown },
+  data: Pick<DataStatus, "markets">,
+): VerdictView {
+  const m = data.markets.find((x) => x.market === t.market);
+  const s = (t.summary ?? {}) as {
+    health?: TrackingHealth;
+    lastError?: { date: string; message: string };
+  };
+  return {
+    verdict: trackingVerdict(t.summary, t.lastDate, {
+      marketDay: m?.day ?? null,
+      committedAsOf: m?.asOf ?? null,
+    }),
+    health: s.health ?? null,
+    lastError: s.lastError ?? null,
+  };
+}
+
 export function listTrackings(userId: string, opts: { activeOnly?: boolean } = {}) {
   const { db } = env().app;
   const rows = db
@@ -135,7 +167,8 @@ export function listTrackings(userId: string, opts: { activeOnly?: boolean } = {
   return rows.map((r) => view(r.t, r.name));
 }
 
-function own(userId: string, id: string) {
+/** 跟踪行与策略名；不是自己的一律 404 */
+export function own(userId: string, id: string) {
   const { db } = env().app;
   const r = db
     .select({ t: trackings, name: strategies.name })

@@ -23,6 +23,7 @@ import {
   IconWarn,
 } from "../components/icons.tsx";
 import { useMe } from "../components/layout.tsx";
+import { TrackingVerdict } from "../components/verdict.tsx";
 import {
   ArtCard,
   Badge,
@@ -54,12 +55,20 @@ import {
   pct,
   REASON_TEXT,
   tone,
+  VERDICT_TEXT,
 } from "../lib/format.ts";
 import type { StrategyLine } from "../lib/multi-series.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { Dashboard, DataStatus, PresetView, RunSummary, TrackingChart } from "../lib/types.ts";
+import type {
+  BriefFactsView,
+  Dashboard,
+  DataStatus,
+  PresetView,
+  RunSummary,
+  TrackingChart,
+} from "../lib/types.ts";
 
-/** 只在出问题时出现：worker 没跑、行情仓维护中、某个市场最近一次更新失败 */
+/** 只在出问题时出现：worker 没跑、行情仓维护中、某个市场最近一次更新失败、某个跟踪结算失败 */
 export function DataBanner({ data }: { data: DataStatus }) {
   const isAdmin = useMe().data?.user.role === "admin";
   if (!data.workerUp) {
@@ -79,9 +88,31 @@ export function DataBanner({ data }: { data: DataStatus }) {
     );
   }
   const failed = data.markets.filter((m) => m.lastEtl?.status === "failed");
-  if (!failed.length) return null;
+  const settle = data.settleFailures ?? [];
+  if (!failed.length && !settle.length) return null;
   return (
     <div className="space-y-2">
+      {/* 结算失败不只进日志（D70）：这个跟踪的数字还是上一次成功结算的 */}
+      {settle.map((f) => (
+        <Callout
+          key={f.trackingId}
+          tone="warn"
+          icon={IconWarn}
+          title={`「${f.name}」最近一次结算失败`}
+          action={<Info label="失败原因">{f.message}</Info>}
+        >
+          <span className="font-mono">{f.date}</span>{" "}
+          的数据没能结算，这个跟踪的数字还是上一次成功结算的，判词显示「结算失败」。
+          {isAdmin && (
+            <Link
+              to="/admin"
+              className="ml-1 font-medium text-warn underline decoration-warn/40 underline-offset-2 hover:decoration-warn"
+            >
+              去管理页重跑
+            </Link>
+          )}
+        </Callout>
+      ))}
       {failed.map((m) => (
         <Callout
           key={m.market}
@@ -251,6 +282,12 @@ function TrackingsCard({
                         {t.strategyName}
                       </Link>
                       <Tag>{MARKET_TEXT[t.market]}</Tag>
+                      <TrackingVerdict
+                        verdict={t.verdict}
+                        health={t.health}
+                        lastError={t.lastError}
+                        lastDate={t.lastDate}
+                      />
                     </div>
                     <div className="mt-1 flex items-center gap-1 text-xs text-muted">
                       <span className="truncate">
@@ -661,6 +698,44 @@ function Welcome({ presets }: { presets: PresetView[] }) {
   );
 }
 
+/** 简报的依据（D70）：引擎算好的事实逐条列出，AI 只是把它写成人话 */
+function BriefBasis({ facts }: { facts: BriefFactsView }) {
+  return (
+    <div className="space-y-2">
+      <p>这一期简报基于下面这些事实（{facts.date}），数字以这里为准。</p>
+      {facts.trackings.map((t, i) => (
+        <div key={t.trackingId ?? i} className="border-t border-line pt-1.5">
+          <div className="mb-1 font-medium text-ink">{t.name}</div>
+          <InfoRows
+            rows={[
+              [
+                "判词",
+                t.verdict
+                  ? t.prevVerdict && t.prevVerdict !== t.verdict
+                    ? `${VERDICT_TEXT[t.verdict]}（上次：${VERDICT_TEXT[t.prevVerdict]}）`
+                    : VERDICT_TEXT[t.verdict]
+                  : NA,
+              ],
+              ["最后结算日", t.lastDate ?? NA],
+              ["今天", pct(t.dayReturn, 2)],
+              ["跟踪天数", t.days ? String(t.days) : NA],
+              ["累计超额", pct(t.excessTotal)],
+              ["跑赢回测同期", beatPct(t.deviationPct)],
+              [
+                "明日计划",
+                t.buys.length || t.sells.length
+                  ? `买 ${t.buys.length} 只、卖 ${t.sells.length} 只`
+                  : NA,
+              ],
+              ["新提示", t.warnings.length ? t.warnings.join("、") : NA],
+            ]}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function BriefCard({ d }: { d: Dashboard }) {
   const asOf = asOfText(d.data);
   return (
@@ -674,12 +749,22 @@ function BriefCard({ d }: { d: Dashboard }) {
         </>
       }
       action={
-        asOf && (
-          <span className="inline-flex items-center gap-1 text-xs text-muted">
-            <IconClock size={13} />
-            {asOf}
-          </span>
-        )
+        <span className="inline-flex items-center gap-2 text-xs text-muted">
+          {d.brief?.facts && d.brief.facts.trackings.length > 0 && (
+            <span className="inline-flex items-center">
+              依据
+              <Info label="简报的依据" width={320}>
+                <BriefBasis facts={d.brief.facts} />
+              </Info>
+            </span>
+          )}
+          {asOf && (
+            <span className="inline-flex items-center gap-1">
+              <IconClock size={13} />
+              {asOf}
+            </span>
+          )}
+        </span>
       }
     >
       {d.brief?.content ? (

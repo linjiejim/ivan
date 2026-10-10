@@ -59,7 +59,7 @@ import {
   Button,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { money, NA, num, pct, REASON_TEXT, tone } from "../lib/format.ts";
+import { money, NA, num, pct, REASON_TEXT, REJECT_TEXT, tone } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
 import {
   computePausedNote,
@@ -768,16 +768,6 @@ type DetailTab =
   | "execution"
   | "confidence"
   | "segments";
-
-const REJECT_TEXT: Record<RejectReason, string> = {
-  suspended: "停牌",
-  limit_up: "涨停开盘",
-  limit_down: "跌停开盘",
-  capacity: "超过成交额上限",
-  lot_zero: "不够一手",
-  cash: "现金不足",
-  no_liquidity: "没有成交额数据",
-};
 
 /** 成交与容量（D64）：拒单统计（旧成交假设也有）、买入参与率、容量估计、滑点与费用 */
 function Execution({ run: r }: { run: RunDetail }) {

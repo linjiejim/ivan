@@ -1,0 +1,292 @@
+{
+  "bundleVersion": 1,
+  "generatedAt": "2026-03-24T00:00:00.000Z",
+  "tracking": {
+    "id": "t_own",
+    "strategyName": "价值",
+    "versionId": "v_1",
+    "specHash": "abcd",
+    "spec": {
+      "market": "A"
+    },
+    "startDate": "2026-03-02",
+    "capital": 1000000,
+    "exec": {
+      "v": 1
+    }
+  },
+  "baselineRun": null,
+  "entries": [
+    {
+      "seq": 1,
+      "kind": "tracking_start",
+      "subjectType": "tracking",
+      "subjectId": "t_own",
+      "asOf": "2026-03-02",
+      "payloadTable": "inline",
+      "payloadId": null,
+      "payloadHash": "7b4b331faf10059d098025494b787d65e0b68ada00193bb4e2376139a22898e9",
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "521ec027eb9b6eca5559f3d07e0b28f42d5347b6ba555d25ea0c9fd5b8b65e55",
+      "createdAt": 1791289865610
+    },
+    {
+      "seq": 2,
+      "prevHash": "521ec027eb9b6eca5559f3d07e0b28f42d5347b6ba555d25ea0c9fd5b8b65e55",
+      "hash": "66e16a07ebba2ba36457fa4052c9391d2f097935e00a0c366d5bcb4566fee929",
+      "foreign": true
+    },
+    {
+      "seq": 3,
+      "kind": "plan",
+      "subjectType": "tracking",
+      "subjectId": "t_own",
+      "asOf": "2026-03-19",
+      "payloadTable": "plan_snapshots",
+      "payloadId": "ps_t_own_2026-03-19_1",
+      "payloadHash": "fbbeff9d9fc06d731c4bc2f7608148a34ff3d3a0b06e68bc8d34de77a1b5668c",
+      "prevHash": "66e16a07ebba2ba36457fa4052c9391d2f097935e00a0c366d5bcb4566fee929",
+      "hash": "1bcc8e52f26ec3177b8d439f4c77cac97e317f420b69f04f65526c6e03735c0d",
+      "createdAt": 1791289865612
+    },
+    {
+      "seq": 4,
+      "prevHash": "1bcc8e52f26ec3177b8d439f4c77cac97e317f420b69f04f65526c6e03735c0d",
+      "hash": "18adda4293e10c79c3bb0e71272ab3ef2cb74d57a5a781ab5d5d459482a72522",
+      "foreign": true
+    },
+    {
+      "seq": 5,
+      "kind": "health_transition",
+      "subjectType": "tracking",
+      "subjectId": "t_own",
+      "asOf": "2026-03-19",
+      "payloadTable": "inline",
+      "payloadId": null,
+      "payloadHash": "6d5577164cb50a01e5ac06142050ce0e222e0394f39e3b21e13b17f15e6ed273",
+      "prevHash": "18adda4293e10c79c3bb0e71272ab3ef2cb74d57a5a781ab5d5d459482a72522",
+      "hash": "a9da7855ff4798cad4a818ca5f8650a4dbf3428c2511015f240f7077d2214ccc",
+      "createdAt": 1791289865613
+    },
+    {
+      "seq": 6,
+      "kind": "plan",
+      "subjectType": "tracking",
+      "subjectId": "t_own",
+      "asOf": "2026-03-19",
+      "payloadTable": "plan_snapshots",
+      "payloadId": "ps_t_own_2026-03-19_2",
+      "payloadHash": "e95b175c89ce1c61c7c36d10f8306fd5a21d6995d645bdea082187bba737d9c1",
+      "prevHash": "a9da7855ff4798cad4a818ca5f8650a4dbf3428c2511015f240f7077d2214ccc",
+      "hash": "0024bd163a2c52dab8e74bc334749ee67b8ff83c8d6ed3d09d3369fc8566d923",
+      "createdAt": 1791289865614
+    },
+    {
+      "seq": 7,
+      "kind": "replay_drift",
+      "subjectType": "tracking",
+      "subjectId": "t_own",
+      "asOf": "2026-03-23",
+      "payloadTable": "inline",
+      "payloadId": null,
+      "payloadHash": "4960877cea74047ecc244761a41e65d70a3fc6e82aa6c19c9e00944909fc3112",
+      "prevHash": "0024bd163a2c52dab8e74bc334749ee67b8ff83c8d6ed3d09d3369fc8566d923",
+      "hash": "ef43c20d113d257383916706bf234366d6908bc07c74c5f6cbed22aa1e4e878f",
+      "createdAt": 1791289865614
+    }
+  ],
+  "payloads": {
+    "1": {
+      "trackingId": "t_own",
+      "capital": 1000000,
+      "startDate": "2026-03-02",
+      "exec": {
+        "v": 1
+      }
+    },
+    "3": {
+      "trackingId": "t_own",
+      "decisionDate": "2026-03-19",
+      "planDate": "2026-03-20",
+      "versionId": "v_1",
+      "specHash": "abcd",
+      "regime": null,
+      "exposure": null,
+      "equity": 1000000,
+      "cash": 12345.67,
+      "positions": [
+        {
+          "code": "600001.SH",
+          "weight": 0.5
+        }
+      ],
+      "candidates": [
+        {
+          "code": "600002.SH",
+          "rank": 1,
+          "factors": {
+            "pe_ttm": 5.5
+          }
+        }
+      ],
+      "items": [
+        {
+          "seq": 1,
+          "code": "600002.SH",
+          "name": "股2",
+          "side": "buy",
+          "reason": "rebalance",
+          "reasonDetail": "entry",
+          "rank": 1,
+          "score": 0.9,
+          "estPrice": 11.01,
+          "estShares": 4500,
+          "estWeight": 0.05,
+          "refClose": 11,
+          "curWeight": null,
+          "failedConditions": null,
+          "factors": {
+            "pe_ttm": 5.5,
+            "industry": "银行"
+          },
+          "termPct": {
+            "pe_ttm": 0.95
+          }
+        }
+      ]
+    },
+    "5": {
+      "from": "warming_up",
+      "to": "active",
+      "reason": "first_reading",
+      "inputs": {
+        "days": 20
+      }
+    },
+    "6": {
+      "trackingId": "t_own",
+      "decisionDate": "2026-03-19",
+      "planDate": "2026-03-20",
+      "versionId": "v_1",
+      "specHash": "abcd",
+      "regime": null,
+      "exposure": null,
+      "equity": 1000000,
+      "cash": 12345.67,
+      "positions": [
+        {
+          "code": "600001.SH",
+          "weight": 0.5
+        }
+      ],
+      "candidates": [
+        {
+          "code": "600002.SH",
+          "rank": 1,
+          "factors": {
+            "pe_ttm": 5.5
+          }
+        }
+      ],
+      "items": [
+        {
+          "seq": 1,
+          "code": "600002.SH",
+          "name": "股2",
+          "side": "buy",
+          "reason": "rebalance",
+          "reasonDetail": "entry",
+          "rank": 2,
+          "score": 0.9,
+          "estPrice": 11.01,
+          "estShares": 4500,
+          "estWeight": 0.05,
+          "refClose": 11,
+          "curWeight": null,
+          "failedConditions": null,
+          "factors": {
+            "pe_ttm": 5.5,
+            "industry": "银行"
+          },
+          "termPct": {
+            "pe_ttm": 0.95
+          }
+        }
+      ]
+    },
+    "7": {
+      "firstDrift": "2026-03-18",
+      "navDrift": 3,
+      "benchDrift": 0,
+      "cause": "data",
+      "maxNavDiff": 0.001
+    }
+  },
+  "plans": {
+    "ps_t_own_2026-03-19_1": {
+      "snapshotId": "ps_t_own_2026-03-19_1",
+      "decisionDate": "2026-03-19",
+      "edition": 1,
+      "cause": "initial",
+      "dataVersion": 9,
+      "dataAsOf": "2026-03-19",
+      "engineVersion": "1.2.0",
+      "execHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "inputHash": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+      "hashVersion": 2,
+      "explainHash": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "explainVersion": null,
+      "factorRegistryVersion": null,
+      "band": 15,
+      "benchSym": "csi300_tr",
+      "benchClose": 3500,
+      "contentHash": "fbbeff9d9fc06d731c4bc2f7608148a34ff3d3a0b06e68bc8d34de77a1b5668c"
+    },
+    "ps_t_own_2026-03-19_2": {
+      "snapshotId": "ps_t_own_2026-03-19_2",
+      "decisionDate": "2026-03-19",
+      "edition": 2,
+      "cause": "data_revision",
+      "dataVersion": 9,
+      "dataAsOf": "2026-03-19",
+      "engineVersion": "1.2.0",
+      "execHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "inputHash": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+      "hashVersion": 2,
+      "explainHash": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "explainVersion": null,
+      "factorRegistryVersion": null,
+      "band": 15,
+      "benchSym": "csi300_tr",
+      "benchClose": 3500,
+      "contentHash": "e95b175c89ce1c61c7c36d10f8306fd5a21d6995d645bdea082187bba737d9c1"
+    }
+  },
+  "health": [],
+  "chain": {
+    "ok": true,
+    "checked": 7,
+    "headHash": "ef43c20d113d257383916706bf234366d6908bc07c74c5f6cbed22aa1e4e878f"
+  },
+  "manifest": {
+    "engineVersion": "1.2.0",
+    "factorRegistryVersion": 2,
+    "explainVersion": 1,
+    "groundingVersion": 1,
+    "healthVersion": 1,
+    "validationVersion": 1,
+    "hashVersion": 2
+  },
+  "manifestHash": "02bdd2e21252809f2519540ae45cccf987ee60dcd92341b38904af4507153ac9",
+  "verification": {
+    "canonicalJson": "canonicalJson(v)：对象的键按字符串排序（JavaScript 默认排序），值为 undefined 的键丢掉；数组保持原顺序；\n数字与字符串按 JSON.stringify 输出（NaN、Infinity 输出 null），不做舍入；没有空格。sha256 取 UTF-8 字节的十六进制小写，全长 64 位。\ncanonicalJson(v): object keys sorted (JavaScript default string order), keys whose value is undefined dropped;\narrays keep their order; numbers and strings exactly as JSON.stringify (NaN/Infinity become null), no rounding, no whitespace.\nsha256 is over the UTF-8 bytes, lower-case hex, 64 characters.",
+    "hashes": {
+      "recordHash": "每条本跟踪条目：hash = sha256(canonicalJson({seq, prevHash, kind, subjectType, subjectId, asOf, payloadHash, createdAt}))；\n第 1 条的 prevHash 是 64 个 0，之后每条（包括 foreign 条目）的 prevHash 等于上一条的 hash，seq 从 1 起连续。\nOwn entry: hash = sha256(canonicalJson({seq, prevHash, kind, subjectType, subjectId, asOf, payloadHash, createdAt})).\nThe first prevHash is 64 zeros; every entry's prevHash (foreign ones included) equals the previous entry's hash; seq starts at 1 and is contiguous.",
+      "planPayload": "计划条目（payloadTable = plan_snapshots）：payloadHash = sha256(canonicalJson(payloads[seq]))。payloads[seq] 是快照参与内容指纹的字段：\n{trackingId, decisionDate, planDate, versionId, specHash, regime, exposure: {current, next} | null, equity, cash, positions, candidates,\nitems: [{seq, code, name, side, reason, reasonDetail, rank, score, estPrice, estShares, estWeight, refClose, curWeight, failedConditions, factors, termPct}]}\n（计划项按 seq 排，缺省值都是 null）。plans[payloadId] 里的版次、原因与指纹不参与校验。\nPlan entry: payloadHash = sha256(canonicalJson(payloads[seq])), where the payload is the snapshot's content fields listed above\n(items sorted by seq, missing values null). plans[payloadId] (edition, cause, fingerprints) is informational and not hashed.",
+      "inlinePayload": "其余本跟踪条目（payloadTable = inline：上线、停止、重放差异、状态变化）：payloadHash = sha256(canonicalJson(payloads[seq]))。\nInline entry (tracking_start, tracking_stop, replay_drift, health_transition): payloadHash = sha256(canonicalJson(payloads[seq])).",
+      "foreignEntry": "foreign 条目（别的跟踪、简报）只有 {seq, prevHash, hash}：不能重算，但它们的 hash 被下一条的 prevHash 与记录哈希锁住。\nForeign entries (other trackings, briefs) carry only {seq, prevHash, hash}; they cannot be recomputed but are pinned by the next entry's prevHash.",
+      "headHash": "chain.headHash 等于最后一条的 hash；把它记在别处（比如发给别人），以后就能证明这之前的记录没被改过。\nchain.headHash equals the last entry's hash; keep a copy elsewhere to prove later that nothing before it changed.",
+      "manifestHash": "manifestHash = sha256(canonicalJson(manifest))，manifest 只有各算法的版本号，不含时间戳。\nmanifestHash = sha256(canonicalJson(manifest)); the manifest holds algorithm versions only, no timestamps."
+    }
+  }
+}

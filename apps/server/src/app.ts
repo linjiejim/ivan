@@ -25,6 +25,7 @@ import { AppError, forbidden } from "./lib/errors.ts";
 import { QUOTA_KINDS, type QuotaKind, quotaOf, usageToday } from "./lib/quota.ts";
 import { worker } from "./lib/worker-client.ts";
 import { dashboard, dataStatus } from "./services/dashboard.ts";
+import { exportTracking, listEntries, planOn, verifyUser } from "./services/ledger.ts";
 import { getSnapshot, listSnapshots, planOutcomes } from "./services/plans.ts";
 import { securityEvidence } from "./services/evidence.ts";
 import {
@@ -57,6 +58,7 @@ import {
   proposeTracking,
   stopTracking,
   trackingChart,
+  verdictView,
 } from "./services/trackings.ts";
 
 export interface SessionUser {
@@ -321,7 +323,11 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
     return c.json(proposeTracking(user(c).id, b));
   });
   app.get("/api/trackings", (c) => c.json(listTrackings(user(c).id)));
-  app.get("/api/trackings/:id", (c) => c.json(getTracking(user(c).id, c.req.param("id"))));
+  app.get("/api/trackings/:id", async (c) => {
+    const t = getTracking(user(c).id, c.req.param("id"));
+    // 判词（D70）要看市场今天的状态与最新数据日
+    return c.json({ ...t, ...verdictView(t, await dataStatus()) });
+  });
   app.get("/api/trackings/:id/chart", (c) => c.json(trackingChart(user(c).id, c.req.param("id"))));
   app.post("/api/trackings/:id/stop", async (c) => {
     // 停止原因选填：没有请求体也行（旧前端）
@@ -342,6 +348,26 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   app.get("/api/plans/:id/outcomes", async (c) =>
     c.json(await planOutcomes(user(c).id, c.req.param("id"))),
   );
+  // ── 决策回溯（D71）：时间线、那天看到的计划、链校验、导出（别的跟踪与简报只给哈希） ──
+  app.get("/api/trackings/:id/ledger", (c) => {
+    const limit = Number(c.req.query("limit"));
+    return c.json(
+      listEntries(user(c).id, c.req.param("id"), {
+        from: c.req.query("from") || undefined,
+        to: c.req.query("to") || undefined,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+      }),
+    );
+  });
+  app.get("/api/trackings/:id/plan-on", async (c) =>
+    c.json(await planOn(user(c).id, c.req.param("id"), c.req.query("date") || undefined)),
+  );
+  app.post("/api/ledger/verify", (c) => c.json(verifyUser(user(c).id)));
+  app.get("/api/trackings/:id/export", (c) => {
+    const { filename, bundle } = exportTracking(user(c).id, c.req.param("id"));
+    c.header("Content-Disposition", `attachment; filename="${filename}"`);
+    return c.json(bundle);
+  });
 
   // ── 看板 ──
   app.get("/api/dashboard", async (c) => c.json(await dashboard(user(c).id)));
@@ -431,8 +457,19 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
                 sum(CASE WHEN user_id = 'system' THEN tokens_in + tokens_out ELSE 0 END) AS briefTokens
          FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day DESC`,
       )
-      .all(addDays(todayCN(), -13));
-    return c.json(rows);
+      .all(addDays(todayCN(), -13)) as Array<{ day: string }>;
+    // 数字核对没通过的助手回复（D69），按北京时间分天
+    const flagged = env()
+      .app.sqlite.prepare(
+        `SELECT date(created_at / 1000, 'unixepoch', '+8 hours') AS day, count(*) AS n
+         FROM messages
+         WHERE role = 'assistant' AND created_at >= ?
+           AND json_extract(usage, '$.grounding.unverified') > 0
+         GROUP BY day`,
+      )
+      .all(Date.now() - 15 * 86_400_000) as Array<{ day: string; n: number }>;
+    const byDay = new Map(flagged.map((f) => [f.day, f.n]));
+    return c.json(rows.map((r) => ({ ...r, groundingFlagged: byDay.get(r.day) ?? 0 })));
   });
   /** 逐人额度覆盖：只更新请求体里出现的项（不出现 = 不变，显式 null = 清掉覆盖、回到默认） */
   app.post("/api/admin/users/:id/quota", async (c) => {

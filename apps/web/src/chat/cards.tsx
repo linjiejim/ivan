@@ -28,10 +28,12 @@ import {
   IconChevronDown,
   IconEvidence,
   IconPlan,
+  IconWarn,
 } from "../components/icons.tsx";
 import { EvidenceBody } from "../components/evidence-modal.tsx";
 import { PlanItems, PlanMeta } from "../components/plan-list.tsx";
 import { ScreenTable, ScreenTrace } from "../components/screen-table.tsx";
+import { TrackingVerdict, VerdictBadge } from "../components/verdict.tsx";
 import {
   Badge,
   Button,
@@ -45,9 +47,21 @@ import {
   TextLink,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
-import { deviationText, fmtFactor, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
+import {
+  beatPct,
+  deviationText,
+  fmtFactor,
+  MARKET_TEXT,
+  money,
+  NA,
+  pct,
+  tone,
+} from "../lib/format.ts";
 import type {
+  GroundingResult,
   PlanSnapshot,
+  TrackingHealth,
+  Verdict,
   RunDetail,
   ScreenResult,
   SecurityEvidence,
@@ -842,6 +856,8 @@ interface OverviewOutput {
     days: number;
     excess: number | null;
     deviationPct: number | null;
+    /** 判词（D70）；早于 S10 的消息没有 */
+    verdict?: Verdict;
   }>;
   plans: Array<{
     trackingId: string;
@@ -878,8 +894,11 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
                 className="group/ov flex items-center gap-2 py-2 text-xs"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-ink transition-colors group-hover/ov:text-accent">
-                    {t.strategyName}
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate font-medium text-ink transition-colors group-hover/ov:text-accent">
+                      {t.strategyName}
+                    </span>
+                    {t.verdict && <VerdictBadge verdict={t.verdict} />}
                   </div>
                   <div className="truncate text-muted">
                     {t.days ? `跟踪 ${t.days} 天` : `${t.startDate} 开始`}，
@@ -924,6 +943,60 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
           ))}
         </div>
       )}
+    </Frame>
+  );
+}
+
+// ── 一个跟踪的现状（get_tracking，D70）：判词 + 三个数 + 去详情 ──
+
+export interface TrackingOutput {
+  trackingId: string;
+  strategyName: string;
+  market?: string;
+  startDate: string;
+  days: number;
+  lastDate: string | null;
+  excess: number | null;
+  /** 跑赢回测同期（百分位 0–100）；早于 S10 的消息叫 deviationPct */
+  beatBacktestPct?: number | null;
+  deviationPct?: number | null;
+  verdict?: Verdict;
+  health?: Pick<TrackingHealth, "state" | "signal" | "perMetric"> | null;
+  lastError?: { date: string; message: string } | null;
+}
+
+export function TrackingCard({ output }: { output: TrackingOutput }) {
+  const beat = output.beatBacktestPct ?? output.deviationPct ?? null;
+  return (
+    <Frame
+      title={<>「{output.strategyName}」</>}
+      icon={IconTracking}
+      right={
+        output.verdict && (
+          <TrackingVerdict
+            verdict={output.verdict}
+            health={output.health}
+            lastError={output.lastError}
+            lastDate={output.lastDate}
+          />
+        )
+      }
+    >
+      <MiniStats
+        items={[
+          ["跟踪超额", output.days ? pct(output.excess) : NA, tone(output.excess)],
+          ["跑赢回测同期", beatPct(beat)],
+          ["跟踪天数", output.days ? `${output.days} 天` : NA],
+          ["最后结算", output.lastDate ?? NA],
+        ]}
+      />
+      <div className="mt-2.5 flex items-center justify-between border-t border-line pt-2 text-2xs text-muted">
+        <span>
+          {output.days ? `${output.startDate} 上线` : `${output.startDate} 开始`}
+          {output.market ? `，${MARKET_TEXT[output.market]}` : ""}
+        </span>
+        <TextLink to={`/trackings/${output.trackingId}`}>打开跟踪</TextLink>
+      </div>
     </Frame>
   );
 }
@@ -1024,5 +1097,41 @@ export function CompareCard({ runIds }: { runIds: string[] }) {
     <Frame title="回测对比" icon={IconCompare}>
       <CompareView ids={runIds} />
     </Frame>
+  );
+}
+
+/** 工具数的出处：「get_run.excessCagr」→「get_run · excessCagr」 */
+function evidencePath(path: string): string {
+  const i = path.indexOf(".");
+  return i < 0 ? path : `${path.slice(0, i)} · ${path.slice(i + 1)}`;
+}
+
+/**
+ * 数字核对标注（D69）：助手回复里有工具结果找不到的数字时，挂在气泡下面；全对上时不显示。
+ * 对话是流式的撤不回来，所以只标注、不改写；ⓘ 列出每个数最接近的工具数。
+ */
+export function GroundingNote({ g }: { g: GroundingResult | null | undefined }) {
+  if (!g?.unverified.length) return null;
+  const raws = [...new Set(g.unverified.map((u) => u.raw.trim()))];
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5 text-2xs leading-5 text-warn">
+      <IconWarn size={12} weight="fill" className="mt-[3px] shrink-0" />
+      <span>
+        有 {raws.length} 个数字没在工具结果里找到：{raws.join("、")}，请以卡片为准
+        <Info label="数字核对：说明" width={300}>
+          <p className="mb-1.5">
+            回复里的数字逐个和本轮及最近几次工具结果核对，允许四舍五入，不认推算出来的数。日期、代码、均线天数不核对。
+          </p>
+          <InfoRows
+            rows={g.unverified.map((u) => [
+              u.raw.trim(),
+              u.nearest
+                ? `${u.reason === "sign_mismatch" ? "符号不符，工具数" : "最接近"} ${u.nearest.value}（${evidencePath(u.nearest.path)}）`
+                : "工具结果里没有同类的数",
+            ])}
+          />
+        </Info>
+      </span>
+    </div>
   );
 }

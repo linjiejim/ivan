@@ -622,11 +622,14 @@ export function Badge({
   children,
   tone = "neutral",
   icon: Ico,
+  iconWeight = "bold",
   className,
 }: {
   children: ReactNode;
   tone?: Tone;
   icon?: Icon;
+  /** 警示类状态（如判词「可能失效」）用 fill，和设计系统的「警示用 fill」一致 */
+  iconWeight?: "bold" | "fill";
   className?: string;
 }) {
   return (
@@ -641,7 +644,7 @@ export function Badge({
         className,
       )}
     >
-      {Ico && <Ico size={12} weight="bold" className="shrink-0" />}
+      {Ico && <Ico size={12} weight={iconWeight} className="shrink-0" />}
       {children}
     </span>
   );

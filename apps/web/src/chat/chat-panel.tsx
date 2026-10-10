@@ -28,6 +28,7 @@ import { dateTime } from "../lib/format.ts";
 import {
   CompareCard,
   EvidenceCard,
+  GroundingNote,
   OverviewCard,
   PlanCard,
   QueryCard,
@@ -38,8 +39,10 @@ import {
   StrategyDraftCard,
   SweepCard,
   ToolChip,
+  TrackingCard,
   TrackingDraftCard,
 } from "./cards.tsx";
+import type { GroundingResult } from "../lib/types.ts";
 import { activityOf } from "./activity.ts";
 import { type PageContext, useChatUi } from "./chat-context.tsx";
 
@@ -185,6 +188,12 @@ function renderTool(part: ToolPart, send: (t: string) => void): ReactNode {
       ) : (
         <ToolChip name="get_plan" state={part.state} />
       );
+    case "get_tracking":
+      return out ? (
+        <TrackingCard output={out as never} />
+      ) : (
+        <ToolChip name="get_tracking" state={part.state} />
+      );
     default:
       return <ToolChip name={name} state={part.state} />;
   }
@@ -212,6 +221,12 @@ function ActivityLine({ label }: { label: string | null }) {
   );
 }
 
+/** 回复结束时服务端写的数字核对片段（D69）；流式输出中还没有 */
+function groundingOf(m: UIMessage): GroundingResult | undefined {
+  const p = m.parts.find((x) => x.type === "data-grounding") as { data?: unknown } | undefined;
+  return p?.data as GroundingResult | undefined;
+}
+
 function Message({ m, send }: { m: UIMessage; send: (t: string) => void }) {
   if (m.role === "user") {
     const text = m.parts.map((p) => (p.type === "text" ? p.text : "")).join("");
@@ -233,6 +248,7 @@ function Message({ m, send }: { m: UIMessage; send: (t: string) => void }) {
             return <div key={i}>{renderTool(p as unknown as ToolPart, send)}</div>;
           return null;
         })}
+        <GroundingNote g={groundingOf(m)} />
       </div>
     </div>
   );

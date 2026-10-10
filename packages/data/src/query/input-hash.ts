@@ -14,17 +14,15 @@
 import {
   canonicalJson,
   type DateStr,
+  HASH_VERSION,
   resolveExec,
   type SecurityInfo,
   type SimInput,
 } from "@ivan/core";
 import { sha256Canonical, Sha256Stream } from "@ivan/core/node";
 
-/**
- * 指纹口径版本。1 = R1（S02）；2 = R2（S04）：证券信息加上市日、resolveExec 多了 rules / metrics
- * （S05 的 adv / sigma 在同一批上线，一起算在 2 里）。
- */
-export const HASH_VERSION = 2;
+/** 指纹口径版本：定义在 @ivan/core 的 versions.ts（决策回溯的导出清单也要写出它），这里原样再导出 */
+export { HASH_VERSION };
 
 export type HashRule = "all" | "executed";
 

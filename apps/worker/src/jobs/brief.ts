@@ -1,22 +1,26 @@
 /**
  * 夜间简报（spec §8）：先算确定性的 briefFacts，LLM 只基于它写 ≤150 字摘要；facts 与正文一起存档，永久保留（D70）。
  * 简报不计入用户的对话额度，token 记在系统账上（usage_daily 的 user_id = "system"）。
+ *
+ * 第 2 版（D70）：每个跟踪带判词（与看板同一个 trackingVerdict）与上一期的判词（只存一层），开头先说判词变化；
+ * 休市且没有变化时不调 LLM。每次生成都加一版 brief_editions 并记账本 brief，briefs 是当前版。
  */
 
 /** 系统用量在 usage_daily 里的户头 */
 export const SYSTEM_USAGE_ID = "system";
 import { type BriefFacts, newWarnings, writeBrief } from "@ivan/ai";
 import type { Market } from "@ivan/core";
-import { latestDataVersion } from "@ivan/data";
+import { committedAsOf, latestDataVersion } from "@ivan/data";
 import {
   briefs,
-  newId,
   strategies,
   trackingDays,
   trackingOrders,
   trackings,
   usageDaily,
+  writeBriefEdition,
 } from "@ivan/db";
+import { trackingVerdict } from "@ivan/engine";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { env, todayOf } from "../env.ts";
 import { type MarketDay, marketDayStatus } from "../market-day.ts";
@@ -42,6 +46,11 @@ export async function briefJob(ctx: JobContext): Promise<Record<string, unknown>
   for (const m of new Set(active.map((a) => a.t.market as Market))) {
     marketDay[m] = await marketDayStatus(m, today);
   }
+  // 判词要和最新提交的数据日比（跟踪停在更早的日子 = 数据未更新）
+  const committed: Record<string, string | null> = {
+    A: await committedAsOf(wh, "A"),
+    HK: await committedAsOf(wh, "HK"),
+  };
   const staleMarkets = (["A", "HK"] as const).filter(
     (m) => marketDay[m] === "stale" || marketDay[m] === "pending",
   );
@@ -59,6 +68,7 @@ export async function briefJob(ctx: JobContext): Promise<Record<string, unknown>
       .get()?.facts as BriefFacts | undefined;
     const myMarkets = new Set(mine.map((a) => a.t.market as Market));
     const facts: BriefFacts = {
+      factsVersion: 2,
       date: today,
       dataAsOf,
       marketDay: Object.fromEntries([...myMarkets].map((m) => [m, marketDay[m]])),
@@ -79,8 +89,19 @@ export async function briefJob(ctx: JobContext): Promise<Record<string, unknown>
         .from(trackingOrders)
         .where(eq(trackingOrders.trackingId, t.id))
         .all();
-      const summary = (t.summary ?? {}) as { checks?: Array<{ level: string; title: string }> };
+      const summary = (t.summary ?? {}) as {
+        checks?: Array<{ level: string; title: string }>;
+        lastSnapshotId?: string;
+        health?: BriefFacts["trackings"][number]["health"];
+      };
       const warnings = (summary.checks ?? []).filter((c) => c.level === "warn").map((c) => c.title);
+      const market = t.market as Market;
+      const verdict = trackingVerdict(t.summary, t.lastDate, {
+        marketDay: marketDay[market] ?? null,
+        committedAsOf: committed[market] ?? null,
+      });
+      // 上一期的判词只取一层；上一期没有（旧简报、新跟踪）为 null，按没变处理
+      const prevVerdict = prevBrief?.trackings.find((x) => x.trackingId === t.id)?.verdict ?? null;
       facts.trackings.push({
         trackingId: t.id,
         name,
@@ -95,31 +116,29 @@ export async function briefJob(ctx: JobContext): Promise<Record<string, unknown>
         buys: orders.filter((o) => o.side === "buy").map((o) => o.name ?? o.code),
         sells: orders.filter((o) => o.side === "sell").map((o) => o.name ?? o.code),
         ...newWarnings(prevBrief, t.id, warnings),
+        tradedToday: !!last && last.date === today,
+        verdict,
+        prevVerdict,
+        planSnapshotId: summary.lastSnapshotId ?? null,
+        health: summary.health
+          ? { state: summary.health.state, perMetric: summary.health.perMetric }
+          : null,
       });
     }
-    const { text, model, usage, fallbackReason } = await writeBrief(cfg.llm, facts);
+    const { text, model, usage, fallbackReason, grounding } = await writeBrief(cfg.llm, facts, {
+      model: env().briefModel,
+    });
     if (fallbackReason) ctx.log(`简报用了确定性模板：${fallbackReason}`);
     tokensIn += usage.inputTokens;
     tokensOut += usage.outputTokens;
-    db.insert(briefs)
-      .values({
-        id: newId("b_"),
-        userId,
-        date: today,
-        facts: facts as unknown as Record<string, unknown>,
-        content: text,
-        model,
-      })
-      .onConflictDoUpdate({
-        target: [briefs.userId, briefs.date],
-        set: {
-          facts: facts as unknown as Record<string, unknown>,
-          content: text,
-          model,
-          createdAt: Date.now(),
-        },
-      })
-      .run();
+    // 加一版并记账本（同一个事务里更新当前版）：「当时告诉了我什么」能原样拿出来
+    writeBriefEdition(env().app, userId, {
+      date: today,
+      facts: facts as unknown as Record<string, unknown>,
+      content: text,
+      model,
+      grounding: (grounding ?? null) as Record<string, unknown> | null,
+    });
     written++;
     ctx.progress(written / users.length, `简报 ${written}/${users.length}`);
   }

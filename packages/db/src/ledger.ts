@@ -13,6 +13,7 @@ import { sha256Canonical } from "@ivan/core/node";
 import { asc, eq } from "drizzle-orm";
 import type { AppDbHandle } from "./index.ts";
 import { newId, packJson, unpackJson } from "./util.ts";
+import { briefEditionHashOf } from "./briefs.ts";
 import { planContentHashOf } from "./plans.ts";
 import { ledgerEntries } from "./schema.ts";
 
@@ -183,7 +184,7 @@ export function verifyChain(
   return { ok: true, checked, headHash: prev };
 }
 
-/** 按库里存的内容重算一条的内容指纹：inline 解压后哈希；计划快照按快照与计划项重算内容指纹 */
+/** 按库里存的内容重算一条的内容指纹：inline 解压后哈希；计划快照按快照与计划项、简报按那一版重算内容指纹 */
 export function storedPayloadHash(h: AppDbHandle, r: LedgerRow): string | null {
   if (r.payloadTable === "inline") {
     if (!r.payloadZ) return null;
@@ -194,6 +195,7 @@ export function storedPayloadHash(h: AppDbHandle, r: LedgerRow): string | null {
     }
   }
   if (r.payloadTable === "plan_snapshots" && r.payloadId) return planContentHashOf(h, r.payloadId);
+  if (r.payloadTable === "brief_editions" && r.payloadId) return briefEditionHashOf(h, r.payloadId);
   return null;
 }
 

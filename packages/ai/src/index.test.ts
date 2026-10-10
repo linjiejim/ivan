@@ -1,5 +1,16 @@
+import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import { type BriefFacts, newWarnings, templateBrief, writeBrief } from "./index.ts";
+import {
+  type BriefFacts,
+  checkGrounding,
+  collectEvidence,
+  factsForModel,
+  type LlmConfig,
+  newWarnings,
+  quietDay,
+  templateBrief,
+  writeBrief,
+} from "./index.ts";
 
 const facts: BriefFacts = {
   date: "2026-09-28",
@@ -106,5 +117,174 @@ describe("夜间简报", () => {
     expect(d2.trackings[0]!.warnings).toEqual([]);
     expect(d3.trackings[0]!.warnings).toEqual(["偏离回测"]);
     expect(d4.trackings[0]!.warnings).toEqual([]);
+  });
+
+  describe("第 2 版：判词与休市（D70）", () => {
+    const closed: BriefFacts = {
+      ...facts,
+      factsVersion: 2,
+      date: "2026-10-05",
+      marketDay: { A: "closed" },
+      staleMarkets: [],
+      trackings: [
+        {
+          ...facts.trackings[0]!,
+          trackingId: "t1",
+          lastDate: "2026-09-30",
+          tradedToday: false,
+          dayReturn: null,
+          dayBench: null,
+          buys: [],
+          warnings: [],
+          verdict: "ON_TRACK",
+          prevVerdict: "ON_TRACK",
+        },
+      ],
+    };
+
+    it("全部休市：说休市，没有「今天 ±」", () => {
+      const t = templateBrief(closed);
+      expect(t).toContain("休市");
+      expect(t).not.toMatch(/今天 [+-]/);
+    });
+
+    it("判词变了：开头一句带上次的判词", () => {
+      const t = templateBrief({
+        ...closed,
+        trackings: [{ ...closed.trackings[0]!, verdict: "DRIFTING", prevVerdict: "ON_TRACK" }],
+      });
+      expect(t.startsWith("「低估值」状态：偏离（上次：正常）。")).toBe(true);
+    });
+
+    it("没有上一期判词（第一期第 2 版）：不出变化句", () => {
+      const t = templateBrief({
+        ...closed,
+        trackings: [{ ...closed.trackings[0]!, verdict: "DRIFTING", prevVerdict: null }],
+      });
+      expect(t).not.toContain("状态：");
+      expect(t).not.toContain("上次");
+    });
+
+    it("可能失效：建议复核，不说卖出或停止", () => {
+      const t = templateBrief({
+        ...closed,
+        trackings: [{ ...closed.trackings[0]!, verdict: "DECAYED", prevVerdict: "DRIFTING" }],
+      });
+      expect(t).toContain("「低估值」状态：可能失效（上次：偏离），建议复核规则是否仍然有效");
+      expect(t).not.toMatch(/卖出|停止/);
+    });
+
+    it("休市且没有变化：不调 LLM，直接用模板，不算退化", async () => {
+      expect(quietDay(closed)).toBe(true);
+      const model = new MockLanguageModelV4({ modelId: "mock-brief", doGenerate: [] });
+      const r = await writeBrief(
+        { provider: "anthropic", baseUrl: "", apiKey: "k", model: "m", briefModel: "" },
+        closed,
+        { model },
+      );
+      expect(model.doGenerateCalls).toHaveLength(0);
+      expect(r).toMatchObject({ model: "template", text: templateBrief(closed) });
+      expect(r.fallbackReason).toBeUndefined();
+      // 判词变了、有新提示、有计划、或有市场开了：都要调 LLM
+      const t0 = closed.trackings[0]!;
+      expect(quietDay({ ...closed, trackings: [{ ...t0, prevVerdict: "DRIFTING" }] })).toBe(false);
+      expect(quietDay({ ...closed, trackings: [{ ...t0, warnings: ["交易太少"] }] })).toBe(false);
+      expect(quietDay({ ...closed, trackings: [{ ...t0, sells: ["甲"] }] })).toBe(false);
+      expect(quietDay({ ...closed, marketDay: { A: "traded" } })).toBe(false);
+    });
+
+    it("给模型的事实：判词是中文，没有上一期判词时不给；内部 id 不给", () => {
+      const shown = factsForModel({
+        ...closed,
+        trackings: [
+          {
+            ...closed.trackings[0]!,
+            verdict: "DECAYED",
+            prevVerdict: null,
+            planSnapshotId: "ps_1",
+            health: {
+              state: "decayed",
+              perMetric: { ddRatio: { value: 1.6789, signal: "decayed" } },
+            },
+          },
+        ],
+      });
+      const t = shown.trackings[0]!;
+      expect(t).toMatchObject({
+        verdict: "可能失效",
+        health: { state: "可能失效", ddRatio: 1.68 },
+      });
+      expect(t).not.toHaveProperty("prevVerdict");
+      expect(t).not.toHaveProperty("planSnapshotId");
+    });
+  });
+
+  describe("数字核对闸门（D69）", () => {
+    const cfg: LlmConfig = {
+      provider: "anthropic",
+      baseUrl: "",
+      apiKey: "",
+      model: "",
+      briefModel: "",
+    };
+    const usage = {
+      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 20, text: 20, reasoning: 0 },
+    };
+    const reply = (text: string) => ({
+      content: [{ type: "text" as const, text }],
+      finishReason: { unified: "stop" as const, raw: "stop" },
+      usage,
+      warnings: [],
+    });
+    const mock = (...texts: string[]) =>
+      new MockLanguageModelV4({ modelId: "mock-brief", doGenerate: texts.map(reply) });
+    const good =
+      "「低估值」今天涨了 1.2%，基准 +0.5%；跟踪 12 天累计超额 -2.1%，跑赢回测同期 18%，明天买 1 只。";
+
+    it("模板本身的数字都能在 facts 里找到", () => {
+      const g = checkGrounding(
+        templateBrief(facts),
+        collectEvidence("facts", factsForModel(facts)),
+      );
+      expect(g.checked).toBeGreaterThan(3);
+      expect(g.unverified).toEqual([]);
+    });
+
+    it("两次都有编造的数字：用模板，原因写明数字核对没通过", async () => {
+      const model = mock("「低估值」今天大涨 5.6%，超额 +12.4%。", "「低估值」今天涨 5.6%。");
+      const r = await writeBrief(cfg, facts, { model });
+      expect(r.model).toBe("template");
+      expect(r.text).toBe(templateBrief(facts));
+      expect(r.fallbackReason).toContain("数字核对");
+      expect(r.fallbackReason).toContain("5.6%");
+      expect(r.grounding).toMatchObject({ attempts: 2 });
+      expect(r.grounding!.unverified.length).toBeGreaterThan(0);
+      expect(r.usage).toEqual({ inputTokens: 200, outputTokens: 40 });
+      expect(model.doGenerateCalls).toHaveLength(2);
+      // 重写提示里带着对不上的数
+      const retry = JSON.stringify(model.doGenerateCalls[1]!.prompt);
+      expect(retry).toContain("以下数字在事实里找不到");
+      expect(retry).toContain("+12.4%");
+    });
+
+    it("第一次编造、重写后对上：用重写的正文", async () => {
+      const model = mock("「低估值」今天大涨 5.6%。", good);
+      const r = await writeBrief(cfg, facts, { model });
+      expect(r.text).toBe(good);
+      expect(r.model).toBe("mock-brief");
+      expect(r.fallbackReason).toBeUndefined();
+      expect(r.grounding).toMatchObject({ attempts: 2, unverified: [] });
+    });
+
+    it("第一次就对：只调一次，核对数大于 0", async () => {
+      const model = mock(good);
+      const r = await writeBrief(cfg, facts, { model });
+      expect(r.text).toBe(good);
+      expect(model.doGenerateCalls).toHaveLength(1);
+      expect(r.grounding!.checked).toBeGreaterThan(0);
+      expect(r.grounding!.unverified).toEqual([]);
+      expect(r.grounding!.attempts).toBe(1);
+    });
   });
 });

@@ -667,6 +667,19 @@ payload_z, payload_hash, prev_hash, hash, created_at)`，`UNIQUE(user_id, seq)`�
   ⓘ 列出最接近的工具数。管理页用量表加一列「数字核对未通过」。提示词规则 1 加一句「百分比照抄工具结果（保留 1 位小数），
   不要自己换算、相减或改写舍入」。`GroundingNote` 写进设计系统 §8。
 
+> **实现备注（S09）**
+> - 证据归类多了两条：带 `unit` 的 `{ value, unit }`（`evidenceForModel` 的证据项、计划的关键因子不带因子键，只带单位）按单位归类；
+>   个股卡与证据里的财报字段（`roe`、`revenue_yoy` 是百分数，`revenue`、`np`、`deducted_np`、`ocf` 是元）按 FIN_FIELDS 的单位归类；
+>   容器键是 `*Pct`（如 `termPct: { pe_ttm: 85 }`）时里面的数一律是百分点。单独的键 `value` 不按金额归类（条件、证据项里的 value 先按因子或单位）。
+> - 工具结果里**字符串**写出的数（检查项说明、原因文字、策略描述）也算证据，与页面上下文摘要同一套抽法；对话还把**用户这条消息**里写的数算作证据
+>   （「ROE 大于 15%」复述出来不是编造）。
+> - 「前 N 名 / 只」是规则参数，与「200 日均线」一样不核对；`1.2.0` 这类点分版本号、字母数字混写的标识（MA20、H00905）豁免，但后面紧跟计量单位的不算标识：「ROE15%」「PE12.5倍」照样核对。
+> - 回看窗口的天数不核对（D69）：「近 / 过去 / 最近 / 每 N 天（个交易日）」，以及紧跟指标名的「60 天波动率」「20 个交易日均成交额」；「平均持有 23 天」这类计数照样核对。
+> - 符号：证据为负而文字写了「+」时，前面有「跌、回撤」也算符号不符；提示词词表多了「下降、负」。
+> - 对话流：`execute` 里先逐块转发 `toUIMessageStream({ sendFinish: false })`（不用 `writer.merge`，保证 `data-grounding` 一定在正文之后），
+>   核对后写 `data-grounding` 与 `finish`；每条助手回复都带核对片段（全对上时界面不显示）。简报存的 `grounding` 是最后一次 LLM 正文的核对加 `attempts`；
+>   没调 LLM 的模板简报为空。管理页「数字核对未通过」按 `messages.usage.grounding.unverified > 0` 按北京时间分天计数。
+
 ### 11. 跟踪健康度、判词与简报第 2 版（S10）
 
 **健康状态机**（`packages/engine/src/health.ts`，`HEALTH_VERSION = 1`，D70）：
@@ -704,6 +717,18 @@ payload_z, payload_hash, prev_hash, hash, created_at)`，`UNIQUE(user_id, seq)`�
 简报卡加 ⓘ「依据」把事实逐条列出；数据横幅加结算失败。`get_tracking` 的模型摘要加健康状态与判词，字段改名 `beatBacktestPct`
 （与简报一致），并有了自己的卡片（跟踪卡）。判词 Badge 与跟踪卡写进设计系统 §8。
 
+> **实现备注**（S10）：
+> - 阈值、取值与文字（`HEALTH_THRESHOLDS`、`HEALTH_VERSION`、`VERDICT_TEXT`、状态 / 读数文字、`TrackingHealth`）放在 `@ivan/core` 的 `health.ts`，
+>   引擎的 `health.ts` 再导出并负责计算：网页的 ⓘ 要列阈值，而网页不依赖引擎。读数分级的类型叫 `HealthSignal`（`@ivan/core` 已有信号集的 `Signal`）。
+> - 跟踪最大回撤用 `maxDrawdownOf`（峰值从净值 1 起算），补算与每晚同一个函数，不读 `result.metrics.maxDrawdown`：旧口径指标的峰值从第一天收盘起算，
+>   补算的最后一行与之后每晚的读数会差一点。健康读数的日期是重放序列的最后一天（与 `summary.lastDate` 相同）。
+> - 补算用今晚重放出的逐日序列（就是今晚整体写回 `tracking_days` 的那一份），数据修订后也和存下的一致。
+> - 判词的「结算失败」：结算成功会整份重写 `summary`，所以 `summary.lastError` 存在就是最近这一次；`verdictOf` 不再比日期。
+> - 简报「不调 LLM」的条件按字面：用户涉及的市场全部休市、判词没变、没有新提示、没有计划买卖（长假前留下的下一交易日计划仍会调一次 LLM）。
+> - 看板、跟踪页、对话共用引擎的 `trackingVerdict(summary, lastDate, {marketDay, committedAsOf})`；server 从 `/internal/data-status` 取当日状态与数据日，
+>   worker 简报用 `marketDayStatus` 与 `committedAsOf`。结算的健康度测试在 `apps/worker/src/jobs/settle-health.test.ts`。
+> - 测试注入：`WorkerEnv.briefModel`（简报用的模型），用来断言休市日不调 LLM。
+
 ### 12. 决策回溯页（S11）
 
 跟踪页新分页「回溯」（D71）：
@@ -722,6 +747,20 @@ payload_z, payload_hash, prev_hash, hash, created_at)`，`UNIQUE(user_id, seq)`�
   用文字写清 `canonicalJson` 的规则和每种哈希的输入，任何人都能自己重算。别的跟踪的条目与简报条目只给序号与哈希，不给内容
   （简报事实覆盖用户的全部跟踪）。管理员可以用 `pnpm admin verify-bundle <file>` 离线校验（退出码 0 / 1，参考实现）；
   页面文案「管理员可用 pnpm admin verify-bundle 校验，任何人也可按文件里的说明重算」。CSV 导出与全部决策记录的总页放二期。
+
+> **实现备注**（S11）：
+> - 导出文件里本跟踪的计划条目，内容 = 快照参与内容指纹的那部分（`planContent` 的输出），inline 条目 = 原样的 JSON，两种都是
+>   `payloadHash = sha256Canonical(payloads[seq])`，`payloads` 按条目序号取；版次、原因与各维度指纹另放在 `plans`（按快照 id），不参与校验。
+>   文件层面另校验两项：链尾等于 `chain.headHash`、`manifestHash` 重算一致（断点的 seq 为空）。组装与参考校验在 `@ivan/db` 的 `bundle.ts`
+>   （`buildTraceBundle`、`verifyBundle`），断点文字表 `LEDGER_BREAK_TEXT` 在 `@ivan/core`，网页与命令行共用。
+> - 导出清单要写指纹口径版本与选股解释版本，而 server 不依赖 `@ivan/data`（会带进 DuckDB）：`HASH_VERSION`、`EXPLAIN_VERSION` 挪到
+>   `@ivan/core` 的 `versions.ts`，`@ivan/data` 原样再导出，取值不变（以后加版本改那里）。
+> - 「那天看到的计划」的重放结果按代码与方向对 `tracking_trades` 计划日的行：有成交 = 成交（同时有拒单时注明部分没成交的原因），
+>   只有拒单 = 没买到 / 没卖出（原因），都没有 = 没有执行；计划日晚于跟踪的最后结算日时不给重放结果（界面写「计划日还没结算」），
+>   免得把还没发生的成交说成「没有执行」。「后来怎么样」满 5 个交易日（按休市日表从决策日往后数，对比提交过的数据日）才去 worker 算；
+>   不满 20 天时用 5 天并注明「（5 天）」，卖出写「卖出后」。worker 不在时这一列写「--」，不让整块报错。
+> - 时间线里的简报条目只取跟踪存续期间（上线确认到停止后一天）的；「加载更早的」把 `to` 设成已取到的最早日期再取一次，按序号去重。
+> - `pnpm admin` 的应用库改为按需打开：`verify-bundle` 只读文件、不碰库。
 
 ### 13. 数据源接口与回退链（S12）
 

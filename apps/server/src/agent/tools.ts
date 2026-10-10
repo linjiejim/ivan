@@ -3,7 +3,15 @@
  * 所有写操作只写草稿；回测与扫描直接跑（受额度限制），用异步生成器先吐出 runId 让卡片显示进度。
  */
 import { planForModel, r2, runForModel } from "@ivan/ai";
-import { describeSpec, factorsForMarket, getFactor, type Market, validateSpec } from "@ivan/core";
+import {
+  describeSpec,
+  factorsForMarket,
+  getFactor,
+  HEALTH_STATE_TEXT,
+  type Market,
+  validateSpec,
+  VERDICT_TEXT,
+} from "@ivan/core";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { worker } from "../lib/worker-client.ts";
@@ -23,10 +31,15 @@ import {
   proposeStrategy,
   versionNOf,
 } from "../services/strategies.ts";
-import { overview } from "../services/dashboard.ts";
+import { dataStatus, overview } from "../services/dashboard.ts";
 import { type SecurityEvidence, securityEvidence } from "../services/evidence.ts";
 import { findSnapshot } from "../services/plans.ts";
-import { getTracking, proposeStopTracking, proposeTracking } from "../services/trackings.ts";
+import {
+  getTracking,
+  proposeStopTracking,
+  proposeTracking,
+  verdictView,
+} from "../services/trackings.ts";
 
 export interface PageRef {
   strategyId?: string;
@@ -597,26 +610,35 @@ export function buildTools(ctx: AgentContext): ToolSet {
 
     get_tracking: tool({
       description:
-        "读取一个向前跟踪的现状（默认当前页面的跟踪）：跟踪天数、累计超额、跑赢回测同期的百分比（deviationPct，按超额）、" +
+        "读取一个向前跟踪的现状（默认当前页面的跟踪）：判词（正常 / 偏离 / 可能失效 / 观察期 / 数据未更新 / 结算失败）与各健康指标、" +
+        "跟踪天数、累计超额、跑赢回测同期的百分位（beatBacktestPct，按超额）、" +
         "按绝对净值在回测重抽样区间里的分位（navFanPercentile，不扣基准，市场整体涨跌会影响它）、明日计划。",
       inputSchema: z.object({ trackingId: z.string().optional() }),
       execute: async ({ trackingId }) => {
         const id = trackingId ?? ctx.page.trackingId;
         if (!id) throw new Error("没有指定跟踪");
         const t = getTracking(userId, id);
+        const v = verdictView(t, await dataStatus());
         return {
           trackingId: t.id,
           strategyName: t.strategyName,
+          market: t.market,
           startDate: t.startDate,
           days: t.days.length,
           lastDate: t.lastDate,
           totalReturn: t.nav !== null ? r2(t.nav - 1) : null,
           benchReturn: t.bench !== null ? r2(t.bench - 1) : null,
           excess: r2(t.excess),
-          deviationPct: r2(t.deviationPct, 0),
-          // 按绝对净值（不扣基准）在基准回测重抽样扇形里的分位（D65）；和按超额算的 deviationPct 是两回事
+          beatBacktestPct: r2(t.deviationPct, 0),
+          // 按绝对净值（不扣基准）在基准回测重抽样扇形里的分位（D65）；和按超额算的 beatBacktestPct 是两回事
           navFanPercentile: r2(navFanOf(t.summary).percentile, 0),
           navFanBand: navFanOf(t.summary).band,
+          // 判词与健康度（D70）：确定性算好的，模型原样说
+          verdict: v.verdict,
+          health: v.health
+            ? { state: v.health.state, signal: v.health.signal, perMetric: v.health.perMetric }
+            : null,
+          lastError: v.lastError,
           orders: t.orders.map((o) => ({
             side: o.side,
             code: o.code,
@@ -625,7 +647,23 @@ export function buildTools(ctx: AgentContext): ToolSet {
           })),
         };
       },
-      toModelOutput: ({ output }) => json(output),
+      toModelOutput: ({ output }) =>
+        json({
+          ...output,
+          verdict: VERDICT_TEXT[output.verdict],
+          health: {
+            state: output.health ? HEALTH_STATE_TEXT[output.health.state] : "观察期",
+            verdict: VERDICT_TEXT[output.verdict],
+            perMetric: output.health
+              ? Object.fromEntries(
+                  Object.entries(output.health.perMetric).map(([k, m]) => [
+                    k,
+                    { value: r2(m.value, k === "beatBacktestPct" ? 0 : 2), signal: m.signal },
+                  ]),
+                )
+              : {},
+          },
+        }),
     }),
 
     get_overview: tool({
@@ -647,6 +685,7 @@ export function buildTools(ctx: AgentContext): ToolSet {
             days: t.days,
             excess: r2(t.excess),
             beatBacktestPct: r2(t.deviationPct, 0),
+            verdict: VERDICT_TEXT[t.verdict],
             backtestExcessCagr: r2(t.baseline?.excessCagr),
           })),
           plans: output.plans,

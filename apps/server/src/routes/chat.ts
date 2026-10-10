@@ -7,6 +7,9 @@ import type { Metrics } from "@ivan/core";
 import { messages, newId, threads } from "@ivan/db";
 import {
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  type FinishReason,
   type LanguageModel,
   stepCountIs,
   streamText,
@@ -15,6 +18,7 @@ import {
 import { and, asc, desc, eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { type AppEnv, user } from "../app.ts";
+import { groundTurn } from "../agent/grounding.ts";
 import { buildTools, type PageRef } from "../agent/tools.ts";
 import { systemPrompt } from "../agent/prompt.ts";
 import { env } from "../env.ts";
@@ -28,6 +32,10 @@ import { getTracking } from "../services/trackings.ts";
 let modelOverride: LanguageModel | null = null;
 export function setChatModelForTest(m: LanguageModel | null): void {
   modelOverride = m;
+}
+
+function modelIdOf(m: LanguageModel): string {
+  return typeof m === "string" ? m : m.modelId;
 }
 
 /** 把页面上下文写成几行给模型看（spec §9：system prompt 带上当前上下文摘要） */
@@ -159,10 +167,12 @@ export function registerChat(app: Hono<AppEnv>): void {
     const all = [...history.filter((m) => m.id !== incoming.id), incoming];
     const page = body.context ?? {};
     const tools = buildTools({ userId: u.id, threadId, page });
+    const summary = contextSummary(u.id, page);
+    const model = modelOverride ?? languageModel(cfg.llm, "chat");
 
     const result = streamText({
-      model: modelOverride ?? languageModel(cfg.llm, "chat"),
-      system: systemPrompt(contextSummary(u.id, page)),
+      model,
+      system: systemPrompt(summary),
       messages: await convertToModelMessages(all, { tools, ignoreIncompleteToolCalls: true }),
       tools,
       stopWhen: stepCountIs(8),
@@ -172,22 +182,64 @@ export function registerChat(app: Hono<AppEnv>): void {
     });
 
     const tid = threadId;
-    return result.toUIMessageStreamResponse({
+    const onError = (e: unknown) => (e instanceof Error ? `出错了：${e.message}` : "出错了");
+    // 每条助手消息的用量与数字核对摘要（D69）；模型出错时为空
+    let usage: Record<string, unknown> | null = null;
+    const stream = createUIMessageStream({
       originalMessages: all,
-      generateMessageId: () => newId("m_"),
-      headers: { "x-thread-id": tid },
+      generateId: () => newId("m_"),
+      onError,
+      execute: async ({ writer }) => {
+        // 先原样转发模型流（不发 finish），等所有步骤结束后核对数字、写 data-grounding，再结束
+        for await (const chunk of result.toUIMessageStream({ sendFinish: false, onError })) {
+          writer.write(chunk);
+        }
+        let finishReason: FinishReason | undefined;
+        try {
+          const steps = await result.steps;
+          const total = await result.totalUsage;
+          finishReason = await result.finishReason;
+          const g = await groundTurn({
+            tools,
+            steps,
+            history,
+            userMessage: incoming,
+            contextSummary: summary,
+          });
+          writer.write({ type: "data-grounding", data: g });
+          usage = {
+            inputTokens: total.inputTokens ?? 0,
+            outputTokens: total.outputTokens ?? 0,
+            model: modelIdOf(model),
+            grounding: { version: g.version, checked: g.checked, unverified: g.unverified.length },
+          };
+        } catch {
+          // 模型出错：错误已经在流里，不核对
+        }
+        writer.write({ type: "finish", ...(finishReason ? { finishReason } : {}) });
+      },
       onEnd: ({ messages: finalMessages }) => {
         const known = new Set(all.map((m) => m.id));
         for (const m of finalMessages) {
           if (known.has(m.id)) continue;
+          const extra = m.role === "assistant" && usage ? { usage } : {};
           db.insert(messages)
-            .values({ id: m.id, threadId: tid, role: m.role, parts: m.parts as unknown[] })
-            .onConflictDoUpdate({ target: messages.id, set: { parts: m.parts as unknown[] } })
+            .values({
+              id: m.id,
+              threadId: tid,
+              role: m.role,
+              parts: m.parts as unknown[],
+              ...extra,
+            })
+            .onConflictDoUpdate({
+              target: messages.id,
+              set: { parts: m.parts as unknown[], ...extra },
+            })
             .run();
         }
         db.update(threads).set({ updatedAt: Date.now() }).where(eq(threads.id, tid)).run();
       },
-      onError: (e) => (e instanceof Error ? `出错了：${e.message}` : "出错了"),
     });
+    return createUIMessageStreamResponse({ stream, headers: { "x-thread-id": tid } });
   });
 }

@@ -7,7 +7,7 @@ import { asc, desc, eq, sql } from "drizzle-orm";
 import { env } from "../env.ts";
 import { worker } from "../lib/worker-client.ts";
 import { listRuns } from "./runs.ts";
-import { baselineHeadline, listTrackings, todaySignals } from "./trackings.ts";
+import { baselineHeadline, listTrackings, todaySignals, verdictView } from "./trackings.ts";
 
 export interface DataStatus {
   markets: Array<{
@@ -38,6 +38,8 @@ export interface DataStatus {
   /** 夜间更新写库期间回测暂停（D60）：reason = etl | check */
   computePaused?: { reason: string; since: number } | null;
   workerUp: boolean;
+  /** 这个用户的跟踪最近一次结算失败的（D70；看板才有，按用户算） */
+  settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
 }
 
 export async function dataStatus(): Promise<DataStatus> {
@@ -67,6 +69,7 @@ export async function overview(userId: string) {
   const trackings = listTrackings(userId, { activeOnly: true }).map((t) => ({
     id: t.id,
     strategyName: t.strategyName,
+    ...verdictView(t, data),
     market: t.market,
     startDate: t.startDate,
     days:
@@ -105,6 +108,7 @@ export async function overview(userId: string) {
 
 export async function dashboard(userId: string) {
   const { db } = env().app;
+  const data = await dataStatus();
   const brief = db
     .select()
     .from(briefs)
@@ -120,17 +124,31 @@ export async function dashboard(userId: string) {
       .all();
     return {
       ...t,
+      ...verdictView(t, data),
       days: days.length,
       spark: days.slice(-60).map((d) => d.nav / d.bench),
       baseline: baselineHeadline(t.baselineRunId),
     };
   });
+  // 结算失败不只进日志（D70）：数据横幅按跟踪列出来
+  const settleFailures = trackings.flatMap((t) =>
+    t.lastError
+      ? [
+          {
+            trackingId: t.id,
+            name: t.strategyName,
+            date: t.lastError.date,
+            message: t.lastError.message,
+          },
+        ]
+      : [],
+  );
   return {
     brief: brief ? { date: brief.date, content: brief.content, facts: brief.facts } : null,
     trackings,
     signals: todaySignals(userId),
     recentRuns: listRuns(userId, { limit: 5 }),
-    data: await dataStatus(),
+    data: { ...data, settleFailures },
     presets: PRESETS.map((p) => ({
       id: p.id,
       market: p.market,

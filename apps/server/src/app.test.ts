@@ -15,8 +15,11 @@ import {
   planContentHash,
   planItems,
   planSnapshots,
+  type TraceBundle,
   unpackJson,
+  verifyBundle,
   verifyUserChain,
+  writeBriefEdition,
 } from "@ivan/db";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildTools, evidenceForModel } from "./agent/tools.ts";
@@ -192,7 +195,7 @@ describe("LLM 不能越权（验收 6）", () => {
           .prepare(`SELECT count(*) AS n FROM trackings WHERE status = 'active'`)
           .get() as { n: number }
       ).n;
-    // 账本、计划快照、计划项、跟踪、版本：每个工具调用前后都不变（D68、验收 14）
+    // 账本、计划快照、计划项、健康读数、简报版次、跟踪、版本：每个工具调用前后都不变（D68、D70、验收 14）
     const guarded = () => [
       count("strategies"),
       count("strategy_versions"),
@@ -201,6 +204,8 @@ describe("LLM 不能越权（验收 6）", () => {
       count("ledger_entries"),
       count("plan_snapshots"),
       count("plan_items"),
+      count("tracking_health"),
+      count("brief_editions"),
     ];
     // 不需要 worker 的工具逐个调一遍（需要行情的工具会因 worker 不在而失败，但同样不许写版本）
     for (const [name, t] of Object.entries(tools)) {
@@ -372,6 +377,8 @@ describe("对话链路（模拟模型）", () => {
         (p) => p.type === "tool-propose_strategy" && p.state === "output-available",
       ),
     ).toBe(true);
+    // 每条助手消息都带一份核对结果（这条没有要核对的数）
+    expect(msgs[1]!.parts.some((p) => p.type === "data-grounding")).toBe(true);
 
     // 第二轮：历史里的工具结果要能转回模型消息
     const res2 = await app.request("/api/chat", {
@@ -390,6 +397,156 @@ describe("对话链路（模拟模型）", () => {
     expect((me.json.usage as { chatMessages: number; tokensIn: number }).chatMessages).toBe(2);
     expect((me.json.usage as { tokensIn: number }).tokensIn).toBeGreaterThan(0);
     setChatModelForTest(null);
+  });
+
+  /** 模拟模型：一步只说一段话 */
+  const textStream = (id: string, text: string) =>
+    ({
+      stream: convertArrayToReadableStream([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id },
+        { type: "text-delta", id, delta: text },
+        { type: "text-end", id },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+      ] as never),
+    }) as never;
+  async function chat(text: string) {
+    const res = await app.request("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: cfg.publicUrl, cookie: admin },
+      body: JSON.stringify({
+        message: { id: `m_u_${Math.random()}`, role: "user", parts: [{ type: "text", text }] },
+        context: {},
+      }),
+    });
+    const threadId = res.headers.get("x-thread-id");
+    const stream = await res.text();
+    const row = handle.sqlite
+      .prepare(
+        `SELECT parts, usage FROM messages WHERE thread_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(threadId) as { parts: string; usage: string | null };
+    const parts = JSON.parse(row.parts) as Array<{ type: string; data?: unknown; text?: string }>;
+    const grounding = parts.find((p) => p.type === "data-grounding")?.data as
+      | { version: number; checked: number; unverified: Array<{ raw: string; reason: string }> }
+      | undefined;
+    return {
+      status: res.status,
+      threadId,
+      stream,
+      parts,
+      grounding,
+      usage: row.usage ? (JSON.parse(row.usage) as Record<string, unknown>) : null,
+    };
+  }
+
+  it("数字核对（D69）：没有工具给过的数字被标注并落库；流和 x-thread-id 不受影响；用量记模型与 token", async () => {
+    setChatModelForTest(
+      new MockLanguageModelV4({
+        modelId: "mock-chat",
+        doStream: [textStream("t1", "这个策略超额 +99.9%，很稳。")],
+      }) as never,
+    );
+    const r = await chat("这个策略怎么样？");
+    setChatModelForTest(null);
+    expect(r.status).toBe(200);
+    expect(r.threadId).toBeTruthy();
+    expect(r.stream).toContain("超额 +99.9%");
+    expect(r.stream).toContain("data-grounding");
+    // finish 在核对之后
+    expect(r.stream.indexOf("data-grounding")).toBeLessThan(
+      r.stream.lastIndexOf('"type":"finish"'),
+    );
+    expect(r.parts.find((p) => p.type === "text")?.text).toBe("这个策略超额 +99.9%，很稳。");
+    expect(r.grounding).toMatchObject({ version: 1, checked: 1 });
+    expect(r.grounding!.unverified).toHaveLength(1);
+    expect(r.grounding!.unverified[0]).toMatchObject({ raw: "+99.9%", reason: "no_match" });
+    expect(r.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      model: "mock-chat",
+      grounding: { version: 1, checked: 1, unverified: 1 },
+    });
+    // 管理页按天统计核对没通过的回复
+    const u = await call("/api/admin/usage", { cookie: admin });
+    const today = (u.json as unknown as Array<{ day: string; groundingFlagged: number }>).find(
+      (d) => d.day === todayCN(),
+    );
+    expect(today?.groundingFlagged).toBeGreaterThanOrEqual(1);
+  });
+
+  it("数字核对：用户自己写的数复述出来、日期与代码都不算编造", async () => {
+    setChatModelForTest(
+      new MockLanguageModelV4({
+        doStream: [textStream("t1", "好的，按 ROE 不低于 15% 来筛，600519 在 2024-06-28 也算。")],
+      }) as never,
+    );
+    const r = await chat("ROE 大于 15% 的有哪些？");
+    setChatModelForTest(null);
+    expect(r.grounding).toMatchObject({ checked: 1, unverified: [] });
+    expect(r.usage).toMatchObject({ grounding: { unverified: 0 } });
+  });
+
+  it("数字核对：lookup_security 后照抄股息率（%）、市值（亿）、PE（倍）不误报", async () => {
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      const reply = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
+      if (url.pathname === "/internal/securities/search")
+        return reply([{ code: "600519.SH", name: "贵州茅台", market: "A" }]);
+      if (url.pathname === "/internal/securities/600519.SH")
+        return reply({
+          security: { code: "600519.SH", name: "贵州茅台", market: "A" },
+          factors: {
+            date: "2024-06-28",
+            close: 1460.52,
+            dividend_yield_ttm: 3.456,
+            mcap: 18345.61,
+            pe_ttm: 21.37,
+            roe_ttm: 34.19,
+          },
+          financials: [],
+          actions: [],
+        });
+      return new Response("{}", { status: 404 });
+    });
+    try {
+      setChatModelForTest(
+        new MockLanguageModelV4({
+          doStream: [
+            {
+              stream: convertArrayToReadableStream([
+                { type: "stream-start", warnings: [] },
+                {
+                  type: "tool-call",
+                  toolCallId: "call_ls",
+                  toolName: "lookup_security",
+                  input: JSON.stringify({ query: "600519" }),
+                },
+                {
+                  type: "finish",
+                  finishReason: { unified: "tool-calls", raw: "tool_calls" },
+                  usage,
+                },
+              ] as never),
+            },
+            textStream(
+              "t2",
+              "贵州茅台股息率 3.5%，ROE 34.2%，市值约 18,346 亿，PE 21.4 倍，收盘价 1460.52 元（2024-06-28）。",
+            ),
+          ],
+        }) as never,
+      );
+      const r = await chat("茅台股息率多少");
+      expect(r.stream).toContain("lookup_security");
+      expect(r.grounding!.checked).toBe(5);
+      expect(r.grounding!.unverified).toEqual([]);
+      expect(r.usage).toMatchObject({ inputTokens: 200, outputTokens: 40 });
+    } finally {
+      setChatModelForTest(null);
+      vi.unstubAllGlobals();
+    }
   });
 
   it("没配置 LLM 时返回 503 和中文提示", async () => {
@@ -1557,7 +1714,437 @@ describe("决策账本与计划快照（D68）", () => {
   });
 });
 
+describe("决策回溯（D71）", () => {
+  const opts = { toolCallId: "t", messages: [] } as never;
+  let calls: string[] = [];
+  /** 假 worker：A 股数据截至 2024-04-30；计划结果回看按条目回一个固定值 */
+  function fakeWorker() {
+    calls = [];
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      calls.push(url.pathname);
+      const reply = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
+      if (url.pathname === "/internal/data-status") {
+        return reply({
+          markets: [
+            { market: "A", asOf: "2024-04-30", dataVersion: 9, lastEtl: null, day: "traded" },
+          ],
+          maintenance: null,
+          computePaused: null,
+        });
+      }
+      if (url.pathname === "/internal/plan-outcomes") {
+        const b = JSON.parse(String(init!.body)) as {
+          items: Array<{ code: string; side: string }>;
+        };
+        return reply({
+          asOf: "2024-04-30",
+          outcomes: b.items.map((i) => ({
+            code: i.code,
+            side: i.side,
+            fillDate: "2024-03-04",
+            fillOpen: 10,
+            estPrice: 10.1,
+            slipVsEst: -0.0099,
+            ret5: 0.021,
+            ret20: 0.031,
+            excess5: 0.004,
+            excess20: 0.012,
+          })),
+        });
+      }
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    });
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** 经确认卡上线一个跟踪，再按 worker 的写法补上两版计划、一条拒单、状态变化与重放差异；另有别的跟踪与一版简报 */
+  async function seeded() {
+    const st = await call("/api/strategies/from-preset", {
+      body: { presetId: "a-quality-value" },
+      cookie: admin,
+    });
+    const tools = buildTools({
+      userId: adminId,
+      threadId: "th_test",
+      page: { strategyId: String(st.json.strategyId) },
+    });
+    const proposed = (await tools.propose_tracking!.execute!({}, opts)) as { draftId: string };
+    const ok = await call(`/api/drafts/${proposed.draftId}/confirm`, { body: {}, cookie: admin });
+    const trackingId = String(ok.json.trackingId);
+    handle.sqlite
+      .prepare(`UPDATE trackings SET last_date = '2024-03-29' WHERE id = ?`)
+      .run(trackingId);
+    const other = insertTracking(
+      { strategyId: String(st.json.strategyId), versionId: String(st.json.versionId) },
+      "2024-01-02",
+    );
+    appendLedger(handle, {
+      userId: adminId,
+      kind: "tracking_start",
+      subjectType: "tracking",
+      subjectId: other,
+      asOf: "2024-01-02",
+      payloadTable: "inline",
+      payload: { trackingId: other, note: "别的跟踪的上线内容" },
+    });
+    const id1 = insertSnapshot(trackingId, {
+      decisionDate: "2024-03-01",
+      planDate: "2024-03-04",
+      edition: 1,
+      rank: 3,
+    });
+    writeBriefEdition(handle, adminId, {
+      date: "2024-03-01",
+      facts: { trackings: [{ id: other }] },
+      content: "简报正文：两个跟踪都正常",
+      model: null,
+      grounding: null,
+    });
+    appendLedger(handle, {
+      userId: adminId,
+      kind: "health_transition",
+      subjectType: "tracking",
+      subjectId: trackingId,
+      asOf: "2024-03-01",
+      payloadTable: "inline",
+      payload: {
+        from: "warming_up",
+        to: "monitoring",
+        reason: "第一个够样本的读数不正常",
+        inputs: {},
+      },
+    });
+    const id2 = insertSnapshot(trackingId, {
+      decisionDate: "2024-03-01",
+      planDate: "2024-03-04",
+      edition: 2,
+      cause: "data_revision",
+      rank: 5,
+    });
+    handle.sqlite
+      .prepare(
+        `INSERT INTO tracking_trades (tracking_id, date, seq, code, name, side, kind, amount, reject_reason)
+         VALUES (?, '2024-03-04', 1, '600001.SH', '甲', 'sell', 'reject', 70000, 'limit_down')`,
+      )
+      .run(trackingId);
+    return { trackingId, other, id1, id2 };
+  }
+  const drift = (trackingId: string, firstDrift: string, asOf = "2024-03-29") =>
+    appendLedger(handle, {
+      userId: adminId,
+      kind: "replay_drift",
+      subjectType: "tracking",
+      subjectId: trackingId,
+      asOf,
+      payloadTable: "inline",
+      payload: {
+        firstDrift,
+        navDrift: 2,
+        benchDrift: 0,
+        maxNavDiff: 0.001,
+        cause: "data",
+        dataVersion: 9,
+      },
+    });
+
+  it("时间线：计划、修订、状态变化、简报、重放差异、上线，按日期倒序，带哈希前 8 位", async () => {
+    const { trackingId, id2 } = await seeded();
+    drift(trackingId, "2024-03-12");
+    const r = await call(`/api/trackings/${trackingId}/ledger`, { cookie: admin });
+    expect(r.status).toBe(200);
+    const entries = r.json.entries as Array<{
+      kind: string;
+      asOf: string;
+      summary: string;
+      hash8: string;
+      refId: string | null;
+      edition: number | null;
+    }>;
+    expect(r.json.hasMore).toBe(false);
+    const summaries = entries.map((e) => e.summary);
+    expect(summaries).toEqual(
+      expect.arrayContaining([
+        "计划 第 1 版（当晚的计划）",
+        "计划 第 2 版（数据修订）",
+        "状态 观察期 → 偏离（第一个够样本的读数不正常）",
+        "简报 第 1 版",
+        "重放差异：数据修订，最早影响 2024-03-12",
+        "上线",
+      ]),
+    );
+    // 别的跟踪的条目不在时间线里
+    expect(entries.some((e) => e.summary.includes("别的跟踪"))).toBe(false);
+    expect(entries.find((e) => e.edition === 2)).toMatchObject({ kind: "plan", refId: id2 });
+    expect(entries.every((e) => /^[0-9a-f]{8}$/.test(e.hash8))).toBe(true);
+    const dates = entries.map((e) => e.asOf);
+    expect([...dates].sort().reverse()).toEqual(dates);
+    // 按日期范围取：只到 2024-03-01；limit 1 时 hasMore
+    const range = await call(
+      `/api/trackings/${trackingId}/ledger?from=2024-03-01&to=2024-03-01&limit=1`,
+      {
+        cookie: admin,
+      },
+    );
+    expect((range.json.entries as unknown[]).length).toBe(1);
+    expect(range.json.hasMore).toBe(true);
+  });
+
+  it("那天看到的计划：第 1 版对最新版、版次原因、按现在的数据重放没买到（跌停开盘）、5 / 20 天后怎么样", async () => {
+    fakeWorker();
+    const { trackingId, id1, id2 } = await seeded();
+    const r = await call(`/api/trackings/${trackingId}/plan-on?date=2024-03-04`, { cookie: admin });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({
+      decisionDate: "2024-03-01",
+      planDate: "2024-03-04",
+      edition1: { id: id1, edition: 1 },
+      latest: { id: id2, edition: 2 },
+      cause: "data_revision",
+      causeText: "数据修订",
+      diff: {
+        added: [],
+        removed: [],
+        changed: [{ code: "600001.SH", field: "rank", before: 3, after: 5 }],
+      },
+      replay: [
+        {
+          code: "600001.SH",
+          side: "sell",
+          outcome: "rejected",
+          rejectReason: "limit_down",
+          price: null,
+        },
+      ],
+      revisedAfter: false,
+      outcomes: [{ code: "600001.SH", ret5: 0.021, ret20: 0.031, excess20: 0.012 }],
+    });
+    expect(calls).toContain("/internal/plan-outcomes");
+    // 同一晚的结算先写当晚计划、再记重放差异（asOf = 决策日）：第 1 版本来就是按修订后的数据算的，不算
+    drift(trackingId, "2024-02-28", "2024-03-01");
+    expect(
+      (await call(`/api/trackings/${trackingId}/plan-on?date=2024-03-01`, { cookie: admin })).json
+        .revisedAfter,
+    ).toBe(false);
+    // 之后的重放差异：首个漂移日晚于计划日不算；≤ 计划日才算「这晚之后数据修订过」
+    drift(trackingId, "2024-03-12");
+    expect(
+      (await call(`/api/trackings/${trackingId}/plan-on?date=2024-03-01`, { cookie: admin })).json
+        .revisedAfter,
+    ).toBe(false);
+    drift(trackingId, "2024-02-28");
+    expect(
+      (await call(`/api/trackings/${trackingId}/plan-on?date=2024-03-01`, { cookie: admin })).json
+        .revisedAfter,
+    ).toBe(true);
+    // 计划日还没结算：不给重放结果；决策日之后不满 5 个交易日：不去算结果
+    handle.sqlite
+      .prepare(`UPDATE trackings SET last_date = '2024-03-01' WHERE id = ?`)
+      .run(trackingId);
+    insertSnapshot(trackingId, {
+      decisionDate: "2024-04-26",
+      planDate: "2024-04-29",
+      edition: 1,
+      rank: 1,
+    });
+    calls = [];
+    const fresh = await call(`/api/trackings/${trackingId}/plan-on`, { cookie: admin });
+    expect(fresh.json).toMatchObject({ decisionDate: "2024-04-26", replay: null, outcomes: null });
+    expect(calls).not.toContain("/internal/plan-outcomes");
+    // 没有那么早的计划
+    expect(
+      (await call(`/api/trackings/${trackingId}/plan-on?date=2023-01-01`, { cookie: admin })).json,
+    ).toBeNull();
+  });
+
+  it("导出：离线校验通过；别的跟踪与简报只有哈希；校验接口；别人 404", async () => {
+    const { trackingId, other } = await seeded();
+    const r = await app.request(`/api/trackings/${trackingId}/export`, {
+      headers: { cookie: admin, origin: cfg.publicUrl },
+    });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-disposition")).toMatch(
+      new RegExp(`attachment; filename="ivan-trace-${trackingId}-\\d{4}-\\d{2}-\\d{2}\\.json"`),
+    );
+    const text = await r.text();
+    const bundle = JSON.parse(text) as TraceBundle;
+    expect(verifyBundle(bundle)).toMatchObject({ ok: true, checked: bundle.entries.length });
+    expect(bundle.chain.ok).toBe(true);
+    expect(bundle.tracking).toMatchObject({ id: trackingId, startDate: expect.any(String) });
+    expect(bundle.manifest).toMatchObject({ engineVersion: expect.any(String), hashVersion: 2 });
+    expect(bundle.verification.canonicalJson).toMatch(/canonicalJson/);
+    expect(text).not.toContain(other);
+    expect(text).not.toContain("别的跟踪的上线内容");
+    expect(text).not.toContain("简报正文");
+    const brief = bundle.entries.filter((e) => "foreign" in e);
+    expect(brief.length).toBeGreaterThan(0);
+    // 篡改一个值：报出那一条
+    const plan = bundle.entries.find((e) => "kind" in e && e.kind === "plan")!;
+    (bundle.payloads[String(plan.seq)] as { cash: number }).cash = 1;
+    expect(verifyBundle(bundle).firstBreak).toEqual({
+      seq: plan.seq,
+      reason: "payload_hash_mismatch",
+    });
+
+    const v = await call("/api/ledger/verify", { body: {}, cookie: admin });
+    expect(v.json).toMatchObject({ ok: true, firstBreak: null });
+    expect(v.json.checked).toBe(bundle.entries.length);
+
+    const stranger = await signUp(
+      "trace-other@test.local",
+      String((await call("/api/admin/invites", { body: {}, cookie: admin })).json.code),
+    );
+    for (const path of ["export", "ledger", "plan-on"]) {
+      expect(
+        (await call(`/api/trackings/${trackingId}/${path}`, { cookie: stranger.cookie })).status,
+      ).toBe(404);
+    }
+    // 陌生人自己的链是空的，也是通过的
+    expect((await call("/api/ledger/verify", { body: {}, cookie: stranger.cookie })).json).toEqual({
+      ok: true,
+      checked: 0,
+      firstBreak: null,
+    });
+    // 改了库里的一条（绕过只追加的触发器）：校验指出第一处断点
+    const strangerId = String((stranger.json.user as { id: string }).id);
+    for (let i = 0; i < 3; i++) {
+      appendLedger(handle, {
+        userId: strangerId,
+        kind: "tracking_start",
+        subjectType: "user",
+        subjectId: strangerId,
+        asOf: "2024-01-02",
+        payloadTable: "inline",
+        payload: { i },
+      });
+    }
+    const trigger = handle.sqlite
+      .prepare(
+        `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'ledger_entries_no_update'`,
+      )
+      .get() as { sql: string };
+    handle.sqlite.exec(`DROP TRIGGER ledger_entries_no_update`);
+    try {
+      handle.sqlite
+        .prepare(`UPDATE ledger_entries SET payload_z = ? WHERE user_id = ? AND seq = 2`)
+        .run(packJson({ i: 99 }), strangerId);
+    } finally {
+      handle.sqlite.exec(trigger.sql);
+    }
+    expect((await call("/api/ledger/verify", { body: {}, cookie: stranger.cookie })).json).toEqual({
+      ok: false,
+      checked: 1,
+      firstBreak: { seq: 2, reason: "payload_hash_mismatch" },
+    });
+  });
+});
+
 /** 直接写一个运行中的跟踪（绕过确认卡，测试用） */
+describe("跟踪判词（D70）", () => {
+  const opts = { toolCallId: "t", messages: [] } as never;
+  /** 假 worker：只回 /internal/data-status，A 股今天的状态与最新数据日可调 */
+  function fakeDataStatus(a: { day: string; asOf: string }) {
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      if (url.host !== `127.0.0.1:${cfg.workerPort}`) return real(input, init);
+      if (url.pathname === "/internal/data-status") {
+        return new Response(
+          JSON.stringify({
+            markets: [{ market: "A", asOf: a.asOf, dataVersion: 3, lastEtl: null, day: a.day }],
+            maintenance: null,
+            computePaused: null,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    });
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function trackingWith(summary: Record<string, unknown>) {
+    const st = await call("/api/strategies/from-preset", {
+      body: { presetId: "a-quality-value" },
+      cookie: admin,
+    });
+    const id = insertTracking(
+      { strategyId: String(st.json.strategyId), versionId: String(st.json.versionId) },
+      "2026-08-03",
+    );
+    handle.sqlite
+      .prepare(
+        `UPDATE trackings SET summary = ?, last_date = '2026-09-30', last_nav = 1.01, last_bench = 1.03, deviation_pct = 2 WHERE id = ?`,
+      )
+      .run(JSON.stringify(summary), id);
+    return id;
+  }
+  const health = {
+    state: "monitoring",
+    signal: "warning",
+    perMetric: {
+      beatBacktestPct: { value: 2.4, signal: "warning" },
+      ddRatio: { value: 1.1234, signal: "healthy" },
+    },
+    version: 1,
+  };
+
+  it("看板与跟踪页：偏离、结算失败（横幅列出）、数据未更新（市场 stale）", async () => {
+    fakeDataStatus({ day: "traded", asOf: "2026-09-30" });
+    const drifting = await trackingWith({ lastDate: "2026-09-30", health });
+    const failed = await trackingWith({
+      lastDate: "2026-09-29",
+      health,
+      lastError: { date: "2026-09-30", message: "跟踪的策略版本不合法" },
+    });
+    const d = await call("/api/dashboard", { cookie: admin });
+    const rows = d.json.trackings as Array<{ id: string; verdict: string; health: unknown }>;
+    expect(rows.find((r) => r.id === drifting)).toMatchObject({ verdict: "DRIFTING", health });
+    expect(rows.find((r) => r.id === failed)!.verdict).toBe("SETTLE_FAILED");
+    expect((d.json.data as { settleFailures: unknown[] }).settleFailures).toContainEqual({
+      trackingId: failed,
+      name: expect.any(String),
+      date: "2026-09-30",
+      message: "跟踪的策略版本不合法",
+    });
+    const page = await call(`/api/trackings/${drifting}`, { cookie: admin });
+    expect(page.json).toMatchObject({ verdict: "DRIFTING", lastError: null });
+
+    vi.unstubAllGlobals();
+    fakeDataStatus({ day: "stale", asOf: "2026-09-30" });
+    const stale = await call(`/api/trackings/${drifting}`, { cookie: admin });
+    expect(stale.json.verdict).toBe("STALE_DATA");
+  });
+
+  it("get_tracking：带判词与健康度，字段叫 beatBacktestPct；给模型的判词是中文", async () => {
+    fakeDataStatus({ day: "closed", asOf: "2026-09-30" });
+    const trackingId = await trackingWith({ lastDate: "2026-09-30", health });
+    const tools = buildTools({ userId: adminId, threadId: "th_test", page: { trackingId } });
+    const out = (await tools.get_tracking!.execute!({}, opts)) as Record<string, unknown>;
+    expect(out).toMatchObject({ trackingId, beatBacktestPct: 2, verdict: "DRIFTING" });
+    expect(out).not.toHaveProperty("deviationPct");
+    const m = (await tools.get_tracking!.toModelOutput!({
+      toolCallId: "t",
+      input: {},
+      output: out as never,
+    })) as unknown as { value: Record<string, unknown> };
+    expect(m.value).toMatchObject({
+      verdict: "偏离",
+      beatBacktestPct: 2,
+      health: {
+        state: "偏离",
+        verdict: "偏离",
+        perMetric: {
+          beatBacktestPct: { value: 2, signal: "warning" },
+          ddRatio: { value: 1.12, signal: "healthy" },
+        },
+      },
+    });
+  });
+});
+
 function insertTracking(v: { strategyId: string; versionId: string }, startDate: string): string {
   const id = `t_${Math.random().toString(36).slice(2, 10)}`;
   handle.sqlite

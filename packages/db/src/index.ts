@@ -16,6 +16,8 @@ export { schema };
 export { newId, packJson, unpackJson } from "./util.ts";
 export * from "./ledger.ts";
 export * from "./plans.ts";
+export * from "./briefs.ts";
+export * from "./bundle.ts";
 
 const MIGRATIONS = resolve(fileURLToPath(new URL("..", import.meta.url)), "migrations");
 

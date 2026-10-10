@@ -15,6 +15,7 @@ export {
   BriefcaseIcon as IconPositions, // 持仓
   ListChecksIcon as IconRules, // 规则
   ClockCounterClockwiseIcon as IconHistory, // 版本、历史对话
+  ListDashesIcon as IconTrace, // 决策回溯（时间线）
   ListMagnifyingGlassIcon as IconScreen, // 按策略选股（今日选股）
   FileMagnifyingGlassIcon as IconEvidence, // 个股证据（某个决策日为什么选它）
   EyeIcon as IconOverview, // 概览
@@ -42,6 +43,7 @@ export {
   UploadSimpleIcon as IconImport,
   CopyIcon as IconCopy,
   SealCheckIcon as IconVerify, // 复核数据（只比输入指纹）
+  FingerprintSimpleIcon as IconChain, // 账本链校验（每条带上一条的指纹）
   ArrowCounterClockwiseIcon as IconReproduce, // 完整重跑
   DownloadSimpleIcon as IconDownload,
   LinkSimpleIcon as IconLink,

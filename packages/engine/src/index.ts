@@ -51,3 +51,26 @@ export {
   type OutcomeBench,
   type PlanOutcome,
 } from "./plan-outcome.ts";
+export {
+  backfillHealth,
+  classify,
+  type ClassifyInput,
+  HEALTH_THRESHOLDS,
+  HEALTH_VERSION,
+  type HealthInputs,
+  healthInputsAt,
+  type HealthRow,
+  maxDrawdownOf,
+  trackingVerdict,
+  transition,
+  verdictOf,
+  type VerdictInput,
+} from "./health.ts";
+export {
+  diffPlans,
+  type PlanDiff,
+  type PlanDiffChange,
+  type PlanDiffField,
+  type PlanItemLite,
+  WEIGHT_EPS,
+} from "./plan-diff.ts";

@@ -6,11 +6,18 @@
  *   当天没数据都给出原因；通过的给出全体合格股里的名次。
  * - 今日选股（screenOn）也取这里的候选名单，只剩一条路径。
  */
-import { type DateStr, FACTOR_MAP, type RankTerm, type StrategySpec } from "@ivan/core";
+import {
+  type DateStr,
+  EXPLAIN_VERSION,
+  FACTOR_MAP,
+  type RankTerm,
+  type StrategySpec,
+} from "@ivan/core";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import { col, selectionSql, specForRegime, weakRegimeDates, whereParts } from "./selection.ts";
 
-export const EXPLAIN_VERSION = 1;
+/** 选股解释的版本：定义在 @ivan/core 的 versions.ts，这里原样再导出 */
+export { EXPLAIN_VERSION };
 
 export type FactorValue = number | string | boolean | null;
 

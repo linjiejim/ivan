@@ -17,6 +17,8 @@ import type {
   SimDiagnostics,
   StrategySpec,
   Trade,
+  TrackingHealth,
+  Verdict,
 } from "@ivan/core";
 
 export type {
@@ -34,6 +36,8 @@ export type {
   SimDiagnostics,
   StrategySpec,
   Trade,
+  TrackingHealth,
+  Verdict,
 };
 
 export interface Me {
@@ -200,6 +204,14 @@ export interface TrackingView {
   createdAt: number;
 }
 
+/** 判词与依据（D70）：看板、跟踪页才有（要看市场今天的状态） */
+export interface TrackingVerdictView {
+  verdict: Verdict;
+  health: TrackingHealth | null;
+  /** 最近一次结算失败；成功后清掉 */
+  lastError: { date: string; message: string } | null;
+}
+
 /** 结算写的跟踪摘要（只列界面用到的字段） */
 export type TrackingSummary = Record<string, unknown> & {
   /** 按绝对净值（不扣基准）在基准回测重抽样扇形里的分位（D65）；基准没有扇形或跟踪超过一年时为 null */
@@ -252,6 +264,8 @@ export interface DataStatus {
   /** 夜间更新写库期间回测暂停（D60）：reason = etl | check */
   computePaused?: { reason: string; since: number } | null;
   workerUp: boolean;
+  /** 这个用户的跟踪最近一次结算失败的（D70，只有看板给） */
+  settleFailures?: Array<{ trackingId: string; name: string; date: string; message: string }>;
 }
 
 /** 点时数据的采集情况（D61）：属性快照与财报首见留底 */
@@ -266,14 +280,37 @@ export interface DataCapture {
   financialsSeen: { rows: number; new7d: number };
 }
 
+/** 简报存下的事实（简报卡 ⓘ「依据」逐条列出；旧简报没有判词等第 2 版字段） */
+export interface BriefFactsView {
+  factsVersion?: number;
+  date: string;
+  trackings: Array<{
+    trackingId?: string;
+    name: string;
+    market: string;
+    days: number;
+    lastDate: string | null;
+    dayReturn: number | null;
+    dayBench: number | null;
+    excessTotal: number | null;
+    deviationPct: number | null;
+    buys: string[];
+    sells: string[];
+    warnings: string[];
+    verdict?: Verdict;
+    prevVerdict?: Verdict | null;
+  }>;
+}
+
 export interface Dashboard {
-  brief: { date: string; content: string | null; facts: unknown } | null;
+  brief: { date: string; content: string | null; facts: BriefFactsView | null } | null;
   trackings: Array<
-    TrackingView & {
-      days: number;
-      spark: number[];
-      baseline: { cagr: number; excessCagr: number; maxDrawdown: number; sharpe: number } | null;
-    }
+    TrackingView &
+      TrackingVerdictView & {
+        days: number;
+        spark: number[];
+        baseline: { cagr: number; excessCagr: number; maxDrawdown: number; sharpe: number } | null;
+      }
   >;
   signals: Array<{
     trackingId: string;
@@ -469,4 +506,104 @@ export interface PlanRecord {
   failedConditions: string[] | null;
   factors: Record<string, number | string | boolean | null> | null;
   estWeight: number | null;
+}
+
+// ── 决策回溯（D71） ──
+
+export type LedgerKind =
+  "plan" | "replay_drift" | "tracking_start" | "tracking_stop" | "health_transition" | "brief";
+
+export interface LedgerEntry {
+  seq: number;
+  kind: LedgerKind;
+  asOf: string | null;
+  hash8: string;
+  summary: string;
+  refId: string | null;
+  edition: number | null;
+}
+
+export interface LedgerPage {
+  entries: LedgerEntry[];
+  hasMore: boolean;
+}
+
+export interface LedgerVerify {
+  ok: boolean;
+  checked: number;
+  firstBreak: { seq: number; reason: string } | null;
+}
+
+export interface PlanItemLite {
+  code: string;
+  name: string | null;
+  side: string;
+  rank: number | null;
+  estWeight: number | null;
+  reasonDetail: string | null;
+}
+
+export interface PlanDiff {
+  added: PlanItemLite[];
+  removed: PlanItemLite[];
+  changed: Array<{
+    code: string;
+    name: string | null;
+    field: "side" | "rank" | "estWeight" | "reasonDetail";
+    before: string | number | null;
+    after: string | number | null;
+  }>;
+}
+
+/** 第 1 版的一项按现在的数据重放执行得怎样（tracking_trades 在计划日的成交或拒单） */
+export interface ReplayView {
+  code: string;
+  side: string;
+  outcome: "filled" | "rejected" | "not_executed";
+  price: number | null;
+  rejectReason: string | null;
+}
+
+/** 计划结果回看（D79）：与 @ivan/engine 的 PlanOutcome 同形 */
+export interface PlanOutcome {
+  code: string;
+  side: string;
+  fillDate: string | null;
+  fillOpen: number | null;
+  estPrice: number | null;
+  slipVsEst: number | null;
+  ret5: number | null;
+  ret20: number | null;
+  excess5: number | null;
+  excess20: number | null;
+}
+
+/** GET /api/trackings/:id/plan-on：那天看到的计划；没有那么早的计划时接口返回 null */
+export interface PlanOn {
+  decisionDate: string;
+  planDate: string;
+  edition1: PlanSnapshot;
+  latest: PlanSnapshot;
+  diff: PlanDiff;
+  cause: string;
+  causeText: string;
+  /** 计划日还没结算时为空 */
+  replay: ReplayView[] | null;
+  revisedAfter: boolean;
+  /** 决策日之后不满 5 个交易日、或 worker 不在时为空；与 edition1.items 按顺序对应 */
+  outcomes: PlanOutcome[] | null;
+}
+
+/** 对话回复的数字核对结果（D69，`data-grounding` 片段；与 @ivan/ai 的 GroundingResult 同形） */
+export interface GroundingResult {
+  version: number;
+  checked: number;
+  exempt: number;
+  unverified: Array<{
+    raw: string;
+    value: number;
+    kind: "percent" | "points" | "money" | "ratio" | "count" | "plain";
+    reason: "no_match" | "sign_mismatch";
+    nearest?: { path: string; value: number };
+  }>;
 }

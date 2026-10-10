@@ -386,6 +386,29 @@ export const planItems = sqliteTable(
   (t) => [primaryKey({ columns: [t.snapshotId, t.seq] })],
 );
 
+/**
+ * 跟踪健康度读数（D70）：每个跟踪每个结算日一行，只追加（触发器见 0008）。同一晚重跑沿用已有的那一行，
+ * 不重复计入历史；改阈值加 version，不改写历史读数。上线第一晚按已存的逐日净值补算的行 inputs.backfilled = true。
+ */
+export const trackingHealth = sqliteTable(
+  "tracking_health",
+  {
+    trackingId: text("tracking_id").notNull(),
+    date: text("date").notNull(),
+    /** healthy | warning | decayed | critical | insufficient_data */
+    signal: text("signal").notNull(),
+    /** warming_up | active | monitoring | decayed */
+    state: text("state").notNull(),
+    /** 各指标的值与分级：{ beatBacktestPct?: {value, signal}, ddRatio?: {value, signal} } */
+    perMetric: json<Record<string, unknown>>("per_metric").notNull(),
+    /** 读数的输入：{ days, beatBacktestPct, trackingMaxDD, baselineMaxDD, backfilled? } */
+    inputs: json<Record<string, unknown>>("inputs").notNull(),
+    version: integer("version").notNull(),
+    createdAt: integer("created_at").notNull().default(now),
+  },
+  (t) => [primaryKey({ columns: [t.trackingId, t.date] })],
+);
+
 export const threads = sqliteTable(
   "threads",
   {
@@ -407,6 +430,7 @@ export const messages = sqliteTable(
     role: text("role").notNull(),
     /** AI SDK UI message parts */
     parts: json<unknown[]>("parts").notNull(),
+    /** 助手消息：{ inputTokens, outputTokens, model, grounding: { version, checked, unverified } }（D69）；用户消息为空 */
     usage: json<Record<string, unknown>>("usage"),
     createdAt: integer("created_at").notNull().default(now),
   },
@@ -422,9 +446,31 @@ export const briefs = sqliteTable(
     facts: json<Record<string, unknown>>("facts").notNull(),
     content: text("content"),
     model: text("model"),
+    /** 数字核对结果（D69，GROUNDING_VERSION 版）；没调 LLM 的简报为空 */
+    grounding: json<Record<string, unknown>>("grounding"),
     createdAt: integer("created_at").notNull().default(now),
   },
   (t) => [uniqueIndex("briefs_user_date").on(t.userId, t.date)],
+);
+
+/**
+ * 简报版次（D70）：每次生成都加一版，只追加（触发器见 0008），并记一条账本 brief 指向它；
+ * briefs 仍是看板读的「当前版」。「当时告诉了我什么」从这里原样拿出来。
+ */
+export const briefEditions = sqliteTable(
+  "brief_editions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    date: text("date").notNull(),
+    edition: integer("edition").notNull(),
+    facts: json<Record<string, unknown>>("facts").notNull(),
+    content: text("content"),
+    model: text("model"),
+    grounding: json<Record<string, unknown>>("grounding"),
+    createdAt: integer("created_at").notNull().default(now),
+  },
+  (t) => [uniqueIndex("brief_editions_edition").on(t.userId, t.date, t.edition)],
 );
 
 /** 后台任务（worker 执行，server 读进度推给前端） */

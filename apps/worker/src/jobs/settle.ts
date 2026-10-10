@@ -8,11 +8,19 @@
  * 决策账本（D68）：明日计划连同依据存成只追加的计划快照（plan-snapshot.ts）并记账本；重放的成交与拒单整体重写进
  * tracking_trades；有重放漂移时另记一条 replay_drift。整段写入在 IMMEDIATE 事务里（先拿写锁再读账本链尾），
  * 账本追加在里面是保存点，server 同时追加也不会分叉。
+ *
+ * 健康度（D70）：每晚一个读数写进只追加的 tracking_health，状态变化记账本 health_transition；还没有任何读数的跟踪
+ * 先按已存的逐日净值补算（「按历史补算」），同一晚重跑沿用已有的那一行。某个跟踪结算失败时把错误写进 summary.lastError
+ * （成功时整份 summary 重写，自然清掉），看板据此给出「结算失败」。
  */
 import {
   type Fan,
+  HEALTH_THRESHOLDS,
+  type HealthState,
   type Market,
+  type Metrics,
   nextTradingDay,
+  type TrackingHealth,
   resolveExec,
   type SeriesPoint,
   type StrategySpec,
@@ -32,23 +40,31 @@ import {
 import {
   attributeDrift,
   BACKTEST_ONLY_CHECKS,
+  backfillHealth,
+  classify,
   compareReplay,
   deviationPercentile,
   ENGINE_VERSION,
   fanPercentile,
+  HEALTH_VERSION,
+  type HealthInputs,
+  type HealthRow,
+  maxDrawdownOf,
   rebalanceDays,
+  transition,
 } from "@ivan/engine";
 import {
   appendLedger,
   runs,
   strategyVersions,
   trackingDays,
+  trackingHealth,
   trackingOrders,
   trackings,
   trackingTrades,
   unpackJson,
 } from "@ivan/db";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { env } from "../env.ts";
 import type { JobContext } from "../runner.ts";
 import { runSimulation } from "../sim-pool.ts";
@@ -116,19 +132,25 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
   // 与回测对照的偏离百分位（按超额）；基准回测有扇形时，再算按绝对净值落在扇形的哪一档（D65，不扣基准，两者不并排放）
   let deviationPct: number | null = null;
   let navFan: ReturnType<typeof fanPercentile> = null;
+  let baseline: SeriesPoint[] = [];
+  let baselineMaxDD: number | null = null;
   if (t.baselineRunId) {
     const baseRun = db
-      .select({ seriesZ: runs.seriesZ, validationZ: runs.validationZ })
+      .select({ seriesZ: runs.seriesZ, validationZ: runs.validationZ, metrics: runs.metrics })
       .from(runs)
       .where(eq(runs.id, t.baselineRunId))
       .get();
-    const baseline = unpackJson<SeriesPoint[]>(baseRun?.seriesZ) ?? [];
+    baseline = unpackJson<SeriesPoint[]>(baseRun?.seriesZ) ?? [];
+    baselineMaxDD = (baseRun?.metrics as Metrics | null | undefined)?.maxDrawdown ?? null;
     const k = series.length - 1;
     deviationPct = deviationPercentile(baseline, last.nav / last.bench - 1, k);
     // 扇形的第 d 天是从净值 1（投入资金那一刻）起的第 d 个日收益；跟踪的净值 = 资产 ÷ 资金，第 series.length 天
     const fan = unpackJson<Fan>(baseRun?.validationZ);
     if (fan) navFan = fanPercentile(fan, series.length, last.nav);
   }
+
+  // 健康读数按重放序列的最后一天记（补算的行也是序列里的日子，同一晚重跑才能认出已有的那一行）
+  const health = planHealth(t.id, series, baseline, baselineMaxDD, deviationPct, last.date);
 
   const stored = db
     .select({ date: trackingDays.date, nav: trackingDays.nav, bench: trackingDays.bench })
@@ -266,6 +288,7 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
           },
         });
       }
+      writeHealth(t, health, last.date);
       db.delete(trackingTrades).where(eq(trackingTrades.trackingId, t.id)).run();
       replayTrades.forEach((x, i) =>
         db
@@ -332,12 +355,121 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
             lastDate: settleDate,
             replay: { ...replay, at: latest, cause: drift.cause, causeText: drift.text },
             lastSnapshotId: snap.snapshotId,
+            health: health.summary,
+            // 持仓股在今晚缺失名单里的代码（S13 起填）
+            staleCodes: [],
           },
         })
         .where(eq(trackings.id, t.id))
         .run();
     })
     .immediate();
+}
+
+interface HealthPlan {
+  /** 要追加的读数（同一晚重跑时为空） */
+  rows: Array<Pick<HealthRow, "date" | "signal" | "state" | "perMetric" | "inputs">>;
+  /** 状态变了时记账本 */
+  change: { from: HealthState; to: HealthState; reason: string; inputs: HealthInputs } | null;
+  summary: TrackingHealth;
+}
+
+/**
+ * 今晚的健康度（D70），在事务外算好：
+ * - 还没有任何读数且够 20 天：按已存的逐日净值补算到今晚，补算后不是观察期就记一条「按历史补算」；
+ * - 今晚这一天已经有读数（管理员重跑、自动重跑）：沿用那一行与它的状态，不加行、不判变化、不记账本；
+ * - 否则：最近 10 个读数 + 今晚的读数走状态机。
+ */
+function planHealth(
+  trackingId: string,
+  series: readonly SeriesPoint[],
+  baseline: readonly SeriesPoint[],
+  baselineMaxDD: number | null,
+  beatBacktestPct: number | null,
+  date: string,
+): HealthPlan {
+  const { db } = env().app;
+  const recent = db
+    .select()
+    .from(trackingHealth)
+    .where(eq(trackingHealth.trackingId, trackingId))
+    .orderBy(desc(trackingHealth.date))
+    .limit(10)
+    .all();
+  if (!recent.length && series.length - 1 >= HEALTH_THRESHOLDS.minDays) {
+    const rows = backfillHealth(series, baseline, baselineMaxDD);
+    const last = rows.at(-1)!;
+    return {
+      rows,
+      change:
+        last.state === "warming_up"
+          ? null
+          : { from: "warming_up", to: last.state, reason: "按历史补算", inputs: last.inputs },
+      summary: {
+        state: last.state,
+        signal: last.signal,
+        perMetric: last.perMetric,
+        version: HEALTH_VERSION,
+      },
+    };
+  }
+  const same = recent.find((r) => r.date === date);
+  if (same) {
+    return {
+      rows: [],
+      change: null,
+      summary: {
+        state: same.state as HealthState,
+        signal: same.signal as TrackingHealth["signal"],
+        perMetric: same.perMetric as TrackingHealth["perMetric"],
+        version: same.version,
+      },
+    };
+  }
+  const inputs: HealthInputs = {
+    days: series.length - 1,
+    beatBacktestPct,
+    trackingMaxDD: maxDrawdownOf(series),
+    baselineMaxDD,
+  };
+  const { signal, perMetric } = classify(inputs);
+  const prevState = (recent[0]?.state ?? "warming_up") as HealthState;
+  const history = [...recent.map((r) => r.signal as TrackingHealth["signal"]).reverse(), signal];
+  const { next, reason } = transition(prevState, history);
+  return {
+    rows: [{ date, signal, state: next, perMetric, inputs }],
+    change: next === prevState ? null : { from: prevState, to: next, reason, inputs },
+    summary: { state: next, signal, perMetric, version: HEALTH_VERSION },
+  };
+}
+
+/** 在结算的 IMMEDIATE 事务里写读数与状态变化的账本 */
+function writeHealth(t: TrackingRow, h: HealthPlan, date: string): void {
+  const { db } = env().app;
+  for (const r of h.rows) {
+    db.insert(trackingHealth)
+      .values({
+        trackingId: t.id,
+        date: r.date,
+        signal: r.signal,
+        state: r.state,
+        perMetric: r.perMetric as Record<string, unknown>,
+        inputs: r.inputs as unknown as Record<string, unknown>,
+        version: HEALTH_VERSION,
+      })
+      .run();
+  }
+  if (h.change) {
+    appendLedger(env().app, {
+      userId: t.userId,
+      kind: "health_transition",
+      subjectType: "tracking",
+      subjectId: t.id,
+      asOf: date,
+      payloadTable: "inline",
+      payload: h.change,
+    });
+  }
 }
 
 function specHashOfVersion(versionId: string): string {
@@ -433,6 +565,7 @@ async function settleWaiting(
             planFor: t.startDate,
             dataAsOf: dv.asOf,
             lastSnapshotId: snap.snapshotId,
+            staleCodes: [],
           },
         })
         .where(eq(trackings.id, t.id))
@@ -464,7 +597,14 @@ export async function settleMarket(
       settled++;
     } catch (e) {
       failed++;
-      ctx.log(`跟踪 ${t.id} 结算失败：${e instanceof Error ? e.message : e}`);
+      const message = e instanceof Error ? e.message : String(e);
+      ctx.log(`跟踪 ${t.id} 结算失败：${message}`);
+      // 失败不只进日志：写进 summary.lastError（只合并这一个键，其余照旧），看板的判词与数据横幅据此显示
+      env()
+        .app.sqlite.prepare(
+          `UPDATE trackings SET summary = json_set(coalesce(summary, '{}'), '$.lastError', json(?)) WHERE id = ?`,
+        )
+        .run(JSON.stringify({ date: latest, message }), t.id);
     }
   }
   return { settled, failed };
