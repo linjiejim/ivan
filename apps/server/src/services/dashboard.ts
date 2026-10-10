@@ -2,7 +2,7 @@
  * 首页看板（spec §11）：全部从库里确定性渲染，LLM 只写简报那一段。
  */
 import { describeSpec, PRESETS, validateSpec } from "@ivan/core";
-import { briefs, trackingDays } from "@ivan/db";
+import { briefs, COMPUTE_PAUSED_TEXT, trackingDays } from "@ivan/db";
 import { asc, desc, eq, sql } from "drizzle-orm";
 import { env } from "../env.ts";
 import { worker } from "../lib/worker-client.ts";
@@ -15,7 +15,28 @@ export interface DataStatus {
     asOf: string | null;
     dataVersion: number | null;
     lastEtl: { status: string; finishedAt: number | null; error: string | null } | null;
+    /** 今天的状态（D78）：已更新 / 休市 / 没更新 / 进行中 */
+    day?: "traded" | "closed" | "stale" | "pending";
+    /** 正在写的数据版本（D60）；startedAt 是毫秒时间戳 */
+    openVersion?: { id: number; startedAt: number | null } | null;
+    /** 上一个结束的版本：ok | incomplete | failed | skipped */
+    lastVersionStatus?: string | null;
+    /** 点时数据的采集情况（D61） */
+    capture?: {
+      attrs: Array<{
+        attr: string;
+        firstDate: string | null;
+        openRows: number;
+        changes7d: number;
+        lastSkipped: { date: string; pct: number } | null;
+      }>;
+      financialsSeen: { rows: number; new7d: number };
+    };
   }>;
+  /** 行情仓维护中（还没升级，D76）：非空时 worker 不排任务、不认领 */
+  maintenance?: string | null;
+  /** 夜间更新写库期间回测暂停（D60）：reason = etl | check */
+  computePaused?: { reason: string; since: number } | null;
   workerUp: boolean;
 }
 
@@ -73,6 +94,9 @@ export async function overview(userId: string) {
     >,
     failedMarkets: data.markets.filter((m) => m.lastEtl?.status === "failed").map((m) => m.market),
     workerUp: data.workerUp,
+    // 行情仓维护中（D76）、夜间更新写库期间回测暂停（D60）：模型据此解释为什么回测还在排队
+    maintenance: data.maintenance ?? null,
+    computePaused: data.computePaused ? COMPUTE_PAUSED_TEXT : null,
     brief: brief ?? null,
     trackings,
     plans,

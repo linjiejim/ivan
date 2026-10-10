@@ -5,11 +5,40 @@
  *   北交所 v1 不纳入。
  * - 港股：东财证券资料（在市普通股：非H股 / H股 / 红筹股）+ 公司资料（行业）。消失的代码按最后一根 K 线标记退市。
  */
-import { addDays, boardOf, isAShareSymbol, normalizeDate } from "@ivan/core";
+import { addDays, boardOf, isAShareSymbol, type Market, normalizeDate } from "@ivan/core";
 import { emQuery, num, str } from "../sources/eastmoney.ts";
 import { sqlCodeList } from "../warehouse/db.ts";
 import { type DelistedRow, sseDelisted, szseDelisted } from "../sources/exchanges.ts";
 import type { EtlContext, SecurityRow } from "./context.ts";
+import { ATTR_LABEL, upsertSnapshot } from "./snapshots.ts";
+
+/**
+ * 点时属性快照（D61）：证券表刷新时顺手记下当前值（零额外请求）。每个属性单独 try/catch：
+ * 采集失败只记日志，不影响证券表刷新本身。
+ */
+async function captureAttrs(
+  ctx: EtlContext,
+  market: Market,
+  attrs: Record<string, Map<string, string | null>>,
+): Promise<void> {
+  for (const [attr, current] of Object.entries(attrs)) {
+    try {
+      const r = await upsertSnapshot(ctx.wh, attr, current, ctx.today, "em", ctx.ver ?? null, {
+        market,
+      });
+      const label = ATTR_LABEL[attr] ?? attr;
+      if (r.skipped) {
+        ctx.log(
+          `「${label}」一天变了 ${(r.changedPct * 100).toFixed(0)}%，可能是数据源改了名，先不记录，请管理员核对`,
+        );
+      } else if (r.opened || r.closed) {
+        ctx.log(`「${label}」快照：新开 ${r.opened} 段，关闭 ${r.closed} 段`);
+      }
+    } catch (e) {
+      ctx.log(`「${ATTR_LABEL[attr] ?? attr}」快照失败，先跳过：${e instanceof Error ? e.message : e}`);
+    }
+  }
+}
 
 const SEC_COLUMNS = [
   "code",
@@ -136,6 +165,12 @@ export async function refreshSecuritiesA(ctx: EtlContext): Promise<{ total: numb
        WHERE s.code = b.code AND s.market = 'A' AND s.list_date IS NULL`,
     );
   });
+  // 在市股票的行业快照（退市的不在当前名单里，区间自然关上）
+  const listedRows = [...rows.values()].filter((r) => !r.delist_date && listed.names.has(r.code));
+  await captureAttrs(ctx, "A", {
+    industry_l1: new Map(listedRows.map((r) => [r.code, r.industry_l1])),
+    industry: new Map(listedRows.map((r) => [r.code, r.industry])),
+  });
   const n = [...rows.values()].filter((r) => r.delist_date).length;
   ctx.log(`A 股证券表：${rows.size} 只，其中已退市 ${n} 只（在市名单日期 ${listed.date}）`);
   return { total: rows.size, delisted: n };
@@ -165,6 +200,10 @@ async function purgeHkRmbCounters(ctx: EtlContext): Promise<number> {
       "corp_actions",
       "share_changes",
       "financials",
+      "bar_status",
+      "data_issues",
+      "attr_history",
+      "financials_seen",
       "securities",
     ]) {
       await ctx.wh.run(`DELETE FROM ${t} WHERE code IN (${list})`);
@@ -179,7 +218,9 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
     emQuery(ctx.http, {
       report: "RPT_HKF10_INFO_SECURITYINFO",
       host: "sec",
-      columns: "SECUCODE,SECURITY_NAME_ABBR,SECURITY_TYPE,BOARD,TRADE_UNIT,LISTING_DATE",
+      // GANGGUTONGBIAODISHEN = 港股通（深）标的：只是深港通名单，不能当成「港股通」整体（D61）
+      columns:
+        "SECUCODE,SECURITY_NAME_ABBR,SECURITY_TYPE,BOARD,TRADE_UNIT,LISTING_DATE,GANGGUTONGBIAODISHEN",
       pageSize: 5000,
     }),
     emQuery(ctx.http, {
@@ -191,6 +232,8 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
   ]);
   const industry = new Map(profile.map((r) => [String(r.SECUCODE), str(r.BELONG_INDUSTRY)]));
   const rows: SecurityRow[] = [];
+  const connectSz = new Map<string, string | null>();
+  let connectSeen = false;
   for (const r of info) {
     const code = String(r.SECUCODE);
     if (!/^\d{5}\.HK$/.test(code) || !HK_TYPES.has(String(r.SECURITY_TYPE))) continue;
@@ -210,6 +253,9 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
       industry: ind,
       sec_type: str(r.SECURITY_TYPE),
     });
+    const flag = str(r.GANGGUTONGBIAODISHEN);
+    if (flag !== null) connectSeen = true;
+    connectSz.set(code, flag === "是" ? "Y" : "N");
   }
   await purgeHkRmbCounters(ctx);
   const current = new Set(rows.map((r) => r.code));
@@ -233,6 +279,14 @@ export async function refreshSecuritiesHK(ctx: EtlContext): Promise<{ total: num
     }
     await ctx.wh.append("securities", rows.map(toRow));
   });
+  const capture: Record<string, Map<string, string | null>> = {
+    industry_l1: new Map(rows.map((r) => [r.code, r.industry_l1])),
+    lot_size: new Map(rows.map((r) => [r.code, r.lot_size === null ? null : String(r.lot_size)])),
+  };
+  // 整批都拿不到这一列（接口改了）时不记，免得把整个名单记成「不是」
+  if (connectSeen) capture.hk_connect_sz = connectSz;
+  else ctx.log("证券资料里没有深港通标记（GANGGUTONGBIAODISHEN），这次不记深港通名单");
+  await captureAttrs(ctx, "HK", capture);
   ctx.log(`港股证券表：${rows.length} 只在市普通股`);
   return { total: rows.length };
 }

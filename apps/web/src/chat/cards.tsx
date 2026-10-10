@@ -43,6 +43,7 @@ import {
 import { api } from "../lib/api.ts";
 import { deviationText, fmtFactor, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
 import type { RunDetail, ScreenResult, SpecChange } from "../lib/types.ts";
+import { computePausedNote } from "../lib/verify.ts";
 import { TOOL_ACTIVITY } from "./activity.ts";
 
 function Frame({
@@ -248,6 +249,9 @@ export function TrackingDraftCard({
     startDate: string;
     capital: number;
     hasBaseline: boolean;
+    /** 锁定的成交假设（旧草稿没有） */
+    execText?: string;
+    legacyBaseline?: boolean;
   };
   send: (text: string) => void;
 }) {
@@ -262,7 +266,18 @@ export function TrackingDraftCard({
         <dd className="font-mono text-ink">{output.startDate}</dd>
         <dt className="text-muted">模拟资金</dt>
         <dd className="tabular text-ink">{output.capital.toLocaleString()} 元</dd>
+        {output.execText && (
+          <>
+            <dt className="text-muted">成交假设</dt>
+            <dd className="text-ink">{output.execText}</dd>
+          </>
+        )}
       </dl>
+      {output.legacyBaseline && (
+        <p className="mt-2 text-xs text-warn">
+          基准回测用的是旧口径，上线后也会沿用；建议先按新口径重新回测。
+        </p>
+      )}
       {!output.hasBaseline && (
         <p className="mt-2 text-xs text-warn">这个版本还没有跑完的回测，上线后没法和回测比。</p>
       )}
@@ -308,7 +323,11 @@ export function RunCard({ runId }: { runId: string }) {
           <ErrorNote error={new Error(r.error ?? "失败")} className="mt-0" />
         ) : (
           <Progress
-            note={r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}
+            note={
+              r.status === "queued"
+                ? (computePausedNote(r) ?? "排队中…")
+                : (r.job?.note ?? "回测中…")
+            }
             progress={r.job?.progress ?? 0}
           />
         )}

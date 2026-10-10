@@ -3,6 +3,7 @@
  * 所有写操作只写草稿；回测与扫描直接跑（受额度限制），用异步生成器先吐出 runId 让卡片显示进度。
  */
 import {
+  describeExec,
   describeSpec,
   factorsForMarket,
   getFactor,
@@ -10,6 +11,7 @@ import {
   type Metrics,
   validateSpec,
 } from "@ivan/core";
+import { COMPUTE_PAUSED_TEXT } from "@ivan/db";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { worker } from "../lib/worker-client.ts";
@@ -77,7 +79,15 @@ async function waitRun(userId: string, runId: string, timeoutMs: number) {
 /** 给模型看的回测摘要（数字全部来自存档结果） */
 export function runForModel(r: ReturnType<typeof getRun>) {
   const m = r.metrics as Metrics | null;
-  if (r.status !== "done" || !m) return { runId: r.id, status: r.status, error: r.error };
+  if (r.status !== "done" || !m) {
+    return {
+      runId: r.id,
+      status: r.status,
+      error: r.error,
+      // 夜间更新写库期间回测暂停（D60）：告诉模型在等什么，别让它说「卡住了」
+      ...(r.status === "queued" && r.computePaused ? { note: COMPUTE_PAUSED_TEXT } : {}),
+    };
+  }
   return {
     runId: r.id,
     status: r.status,
@@ -113,6 +123,13 @@ export function runForModel(r: ReturnType<typeof getRun>) {
         }
       : null,
     checks: r.checks.map((c) => ({ level: c.level, title: c.title, detail: c.detail })),
+    // 复现信息（D57）：口径不同的回测先说口径
+    card: {
+      hash: r.cardHash ? r.cardHash.slice(0, 8) : null,
+      engine: r.engineVersion,
+      dataAsOf: r.dataAsOf,
+      exec: r.exec ? describeExec(r.exec) : null,
+    },
     note: "百分比字段都是小数（0.123 = 12.3%）。卡片已展示完整报告。",
   };
 }
@@ -462,8 +479,9 @@ export function buildTools(ctx: AgentContext): ToolSet {
       toModelOutput: ({ output }) =>
         json({
           draftId: output.draftId,
-          summary: `「${output.strategyName}」v${output.versionN}，${output.startDate} 起，模拟资金 ${output.capital}`,
+          summary: `「${output.strategyName}」v${output.versionN}，${output.startDate} 起，模拟资金 ${output.capital}，成交假设：${output.execText}`,
           hasBaseline: output.hasBaseline,
+          legacyBaseline: output.legacyBaseline,
           note: "等待用户在卡片上确认后才上线。",
         }),
     }),

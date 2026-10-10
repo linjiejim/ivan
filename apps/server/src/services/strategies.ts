@@ -2,16 +2,19 @@
  * 策略、版本与草稿（D4，验收 6）。
  * LLM 与表单都只能「提议」：propose* 只写 drafts；只有用户点确认（confirmDraft）才生成版本或跟踪。
  */
-import { createHash } from "node:crypto";
 import {
-  canonicalJson,
+  defaultExec,
   describeSpec,
+  type ExecConfig,
+  ExecConfigError,
   type Market,
   PRESETS,
+  resolveExec,
   type StrategySpec,
   validateSpec,
 } from "@ivan/core";
-import { drafts, newId, strategies, strategyVersions, trackings } from "@ivan/db";
+import { specHashOf } from "@ivan/core/node";
+import { drafts, newId, runs, strategies, strategyVersions, trackings } from "@ivan/db";
 import { and, desc, eq, inArray, max } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
@@ -36,10 +39,6 @@ export interface StrategyView {
   createdAt: number;
   updatedAt: number;
   current: VersionView | null;
-}
-
-function specHash(spec: StrategySpec): string {
-  return createHash("sha256").update(canonicalJson(spec)).digest("hex").slice(0, 16);
 }
 
 function toVersion(v: typeof strategyVersions.$inferSelect): VersionView {
@@ -160,7 +159,7 @@ export function createStrategyWithVersion(
         strategyId,
         n: 1,
         spec: spec as unknown as Record<string, unknown>,
-        specHash: specHash(spec),
+        specHash: specHashOf(spec),
         note: note ?? null,
         source,
       })
@@ -184,7 +183,7 @@ function addVersion(
     .get();
   if (!s) throw notFound("策略");
   if (spec.market !== s.market) throw new AppError(400, "不能改策略的市场，请新建一个策略");
-  const hash = specHash(spec);
+  const hash = specHashOf(spec);
   const cur = s.currentVersionId
     ? db.select().from(strategyVersions).where(eq(strategyVersions.id, s.currentVersionId)).get()
     : undefined;
@@ -349,6 +348,34 @@ export function getDraft(userId: string, draftId: string) {
   return d;
 }
 
+/**
+ * 跟踪锁定的成交假设（D55）：抄基准回测的 exec（旧运行没有这个字段 = 旧口径）；没有基准回测就用当前默认。
+ * 之后改口径要显式升级（二期）。
+ */
+export function trackingExec(
+  userId: string,
+  baselineRunId: string | null,
+  market: Market,
+): ExecConfig {
+  if (baselineRunId) {
+    const r = env()
+      .app.db.select({ params: runs.params })
+      .from(runs)
+      .where(and(eq(runs.id, baselineRunId), eq(runs.userId, userId)))
+      .get();
+    if (r) {
+      try {
+        return resolveExec(r.params.exec);
+      } catch (e) {
+        if (e instanceof ExecConfigError)
+          throw new AppError(409, "基准回测的成交假设读不懂，请先重新回测");
+        throw e;
+      }
+    }
+  }
+  return defaultExec(market);
+}
+
 export type ConfirmResult =
   | { kind: "strategy"; strategyId: string; versionId: string }
   | { kind: "tracking"; trackingId: string };
@@ -396,6 +423,7 @@ export function confirmDraft(userId: string, draftId: string): ConfirmResult {
       baselineRunId?: string | null;
     };
     const { strategy, version } = getVersion(userId, p.versionId);
+    const execConfig = trackingExec(userId, p.baselineRunId ?? null, version.spec.market);
     const trackingId = newId("t_");
     db.insert(trackings)
       .values({
@@ -407,6 +435,7 @@ export function confirmDraft(userId: string, draftId: string): ConfirmResult {
         startDate: p.startDate,
         capital: p.capital,
         baselineRunId: p.baselineRunId ?? null,
+        execConfig: execConfig as unknown as Record<string, unknown>,
       })
       .run();
     result = { kind: "tracking", trackingId };

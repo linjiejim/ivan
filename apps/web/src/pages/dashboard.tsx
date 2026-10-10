@@ -58,13 +58,22 @@ import type { StrategyLine } from "../lib/multi-series.ts";
 import { usePageTitle } from "../lib/title.ts";
 import type { Dashboard, DataStatus, PresetView, RunSummary, TrackingChart } from "../lib/types.ts";
 
-/** 只在出问题时出现：worker 没跑、某个市场最近一次更新失败 */
+/** 只在出问题时出现：worker 没跑、行情仓维护中、某个市场最近一次更新失败 */
 export function DataBanner({ data }: { data: DataStatus }) {
   const isAdmin = useMe().data?.user.role === "admin";
   if (!data.workerUp) {
     return (
       <Callout tone="warn" icon={IconOffline} title="行情服务（worker）没有运行">
         回测、选股、跟踪结算都会暂停。
+      </Callout>
+    );
+  }
+  // 行情仓还没升级到新版（D76）：worker 活着但不排任务、不认领
+  if (data.maintenance) {
+    return (
+      <Callout tone="warn" icon={IconWarn} title="行情仓维护中">
+        {isAdmin ? `${data.maintenance}。` : "管理员正在升级行情仓。"}
+        升级完成前回测、选股、跟踪结算都会暂停。
       </Callout>
     );
   }

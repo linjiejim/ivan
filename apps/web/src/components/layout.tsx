@@ -148,6 +148,7 @@ function AccountMenu({ me }: { me: Me | undefined }) {
                 <div className="text-2xs text-muted">今日用量</div>
                 <Quota label="对话" used={me.usage.chatMessages} total={me.quota.chatMessages} />
                 <Quota label="回测" used={me.usage.backtests} total={me.quota.backtests} />
+                <Quota label="数据查询" used={me.usage.analyses ?? 0} total={me.quota.analyses} />
               </div>
             </div>
           )}

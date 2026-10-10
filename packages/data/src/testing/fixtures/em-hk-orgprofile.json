@@ -1,0 +1,16 @@
+{
+  "version": "fixture",
+  "result": {
+    "pages": 1,
+    "data": [
+      { "SECUCODE": "00700.HK", "BELONG_INDUSTRY": "软件服务" },
+      { "SECUCODE": "00939.HK", "BELONG_INDUSTRY": "银行" },
+      { "SECUCODE": "00005.HK", "BELONG_INDUSTRY": "银行" },
+      { "SECUCODE": "08083.HK", "BELONG_INDUSTRY": "软件服务" }
+    ],
+    "count": 4
+  },
+  "success": true,
+  "message": "ok",
+  "code": 0
+}

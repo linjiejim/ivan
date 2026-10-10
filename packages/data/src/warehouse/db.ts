@@ -11,7 +11,15 @@ export interface WarehouseOptions {
   memoryLimit?: string;
   threads?: number;
   readOnly?: boolean;
+  /**
+   * 升级方式（D76）：auto（默认）照常升级；light（worker 启动时用）遇到要改大表的升级不做，
+   * 进入维护状态（wh.maintenance），等 scripts/migrate.sh 停掉 worker 后用 auto 升级。
+   */
+  migrate?: "auto" | "light";
 }
+
+/** 维护状态的说明（数据横幅、/internal/health 显示） */
+export const MAINTENANCE_V3 = "行情仓需要升级到第 3 版，请运行 scripts/migrate.sh";
 
 type Params = DuckDBValue[] | Record<string, DuckDBValue>;
 export type Row = Record<string, unknown>;
@@ -26,6 +34,8 @@ function normalize(v: unknown): unknown {
 export class Warehouse {
   private writeChain: Promise<unknown> = Promise.resolve();
   private columnTypes = new Map<string, Array<{ name: string; type: string }>>();
+  /** 非空 = 维护状态：行情仓还没升级，worker 不排任务、不认领、读行情仓的接口返回 503 */
+  maintenance: string | null = null;
 
   private constructor(
     readonly path: string,
@@ -44,12 +54,27 @@ export class Warehouse {
     const instance = await DuckDBInstance.create(path, options);
     const conn = await instance.connect();
     const wh = new Warehouse(path, instance, conn);
-    if (!opts.readOnly) await wh.migrate();
+    if (!opts.readOnly) await wh.migrate(opts.migrate ?? "auto");
     return wh;
   }
 
-  private async migrate(): Promise<void> {
+  /**
+   * 需要改大表的升级还没做：bars_daily 已存在、却没有第 3 版的 src 列。看的是列在不在、不是 meta 里的版本号——
+   * 回滚到旧代码会把版本号写回 2，但列还在，再部署新代码时不该再进维护状态。
+   */
+  async pendingHeavyMigration(): Promise<boolean> {
+    const cols = await this.all<{ name: string }>(
+      `SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'bars_daily'`,
+    );
+    return cols.length > 0 && !cols.some((c) => c.name === "src");
+  }
+
+  private async migrate(mode: "auto" | "light"): Promise<void> {
     await this.conn.run(`CREATE TABLE IF NOT EXISTS meta (key VARCHAR PRIMARY KEY, value VARCHAR)`);
+    if (mode === "light" && (await this.pendingHeavyMigration())) {
+      this.maintenance = MAINTENANCE_V3;
+      return;
+    }
     const cur = await this.meta("schema_version");
     if (cur !== String(SCHEMA_VERSION)) {
       for (const stmt of SCHEMA_SQL) await this.conn.run(stmt);

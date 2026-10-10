@@ -22,7 +22,7 @@ import { streamSSE } from "hono/streaming";
 import type { Auth } from "./auth.ts";
 import { env } from "./env.ts";
 import { AppError, forbidden } from "./lib/errors.ts";
-import { quotaOf, usageToday } from "./lib/quota.ts";
+import { QUOTA_KINDS, type QuotaKind, quotaOf, usageToday } from "./lib/quota.ts";
 import { worker } from "./lib/worker-client.ts";
 import { dashboard, dataStatus } from "./services/dashboard.ts";
 import {
@@ -33,7 +33,10 @@ import {
   getTrades,
   listRuns,
   queryRun,
+  reproduceRun,
+  runCard,
   type RunQuery,
+  verifyRun,
 } from "./services/runs.ts";
 import {
   confirmDraft,
@@ -179,6 +182,7 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       end?: string;
       capital?: number;
       oosMonths?: number;
+      exec?: unknown;
     }>(c);
     return c.json(enqueueBacktest(user(c).id, b.versionId, b));
   });
@@ -190,6 +194,7 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       label?: string;
       start?: string;
       end?: string;
+      exec?: unknown;
     }>(c);
     return c.json(enqueueSweep(user(c).id, b.versionId, b, b));
   });
@@ -206,6 +211,17 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
     ),
   );
   app.get("/api/runs/:id", (c) => c.json(getRun(user(c).id, c.req.param("id"))));
+  /** 运行卡下载（D57） */
+  app.get("/api/runs/:id/card", (c) => {
+    const id = c.req.param("id");
+    const card = runCard(user(c).id, id);
+    c.header("Content-Disposition", `attachment; filename="ivan-run-${id}.json"`);
+    return c.json(card);
+  });
+  /** 复核数据：排一个 compute 任务，立即返回「排队中」 */
+  app.post("/api/runs/:id/verify", (c) => c.json(verifyRun(user(c).id, c.req.param("id")), 202));
+  /** 完整重跑：新建一次 kind = reproduce 的运行 */
+  app.post("/api/runs/:id/reproduce", (c) => c.json(reproduceRun(user(c).id, c.req.param("id"))));
   app.get("/api/runs/:id/trades", (c) =>
     c.json(
       getTrades(user(c).id, c.req.param("id"), {
@@ -237,7 +253,9 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
         const j = db
           .select({ status: jobs.status, progress: jobs.progress, note: jobs.note })
           .from(jobs)
-          .where(sql`${jobs.payload} LIKE ${`%${runId}%`}`)
+          .where(
+            sql`${jobs.kind} IN ('backtest', 'sweep') AND ${jobs.payload} LIKE ${`%${runId}%`}`,
+          )
           .orderBy(desc(jobs.createdAt))
           .get();
         await stream.writeSSE({
@@ -376,6 +394,7 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
         `SELECT day,
                 sum(CASE WHEN user_id = 'system' THEN 0 ELSE chat_messages END) AS chatMessages,
                 sum(CASE WHEN user_id = 'system' THEN 0 ELSE backtests END) AS backtests,
+                sum(CASE WHEN user_id = 'system' THEN 0 ELSE analyses END) AS analyses,
                 sum(CASE WHEN user_id = 'system' THEN 0 ELSE tokens_in + tokens_out END) AS chatTokens,
                 sum(CASE WHEN user_id = 'system' THEN tokens_in + tokens_out ELSE 0 END) AS briefTokens
          FROM usage_daily WHERE day >= ? GROUP BY day ORDER BY day DESC`,
@@ -383,21 +402,23 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
       .all(addDays(todayCN(), -13));
     return c.json(rows);
   });
+  /** 逐人额度覆盖：只更新请求体里出现的项（不出现 = 不变，显式 null = 清掉覆盖、回到默认） */
   app.post("/api/admin/users/:id/quota", async (c) => {
     admin(c);
-    const b = await body<{ chatMessages?: number | null; backtests?: number | null }>(c);
-    env()
+    const b = await body<Record<string, unknown>>(c);
+    const set: Partial<Record<QuotaKind, number | null>> = {};
+    for (const k of QUOTA_KINDS) {
+      if (!(k in b)) continue;
+      const v = b[k];
+      if (v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 0))
+        throw new AppError(400, "额度要是不小于 0 的整数");
+      set[k] = v as number | null;
+    }
+    const q = env()
       .app.db.insert(userQuotas)
-      .values({
-        userId: c.req.param("id"),
-        chatMessages: b.chatMessages ?? null,
-        backtests: b.backtests ?? null,
-      })
-      .onConflictDoUpdate({
-        target: userQuotas.userId,
-        set: { chatMessages: b.chatMessages ?? null, backtests: b.backtests ?? null },
-      })
-      .run();
+      .values({ userId: c.req.param("id"), ...set });
+    if (Object.keys(set).length) q.onConflictDoUpdate({ target: userQuotas.userId, set }).run();
+    else q.onConflictDoNothing().run();
     return c.json({ ok: true });
   });
   app.post("/api/admin/users/:id/password", async (c) => {

@@ -2,8 +2,9 @@
  * 策略详情：概览（描述 + 最近回测）· 编辑（表单 → 草稿 → 确认）· 版本 · 回测记录（可勾选对比）· 今日选股 · 跟踪。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { defaultExec, describeExec, type ExecConfig, type Market } from "@ivan/core";
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import { CompareView } from "../components/compare-view.tsx";
 import { DiffView } from "../components/diff-view.tsx";
@@ -50,31 +51,52 @@ import {
 import { api } from "../lib/api.ts";
 import { dateTime, MARKET_TEXT, money, NA, pct, tone } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { RunSummary, ScreenResult, StrategyDetail } from "../lib/types.ts";
+import type { RunDetail, RunSummary, ScreenResult, StrategyDetail } from "../lib/types.ts";
 
 type Tab = "overview" | "edit" | "versions" | "runs" | "screen" | "trackings";
 
 const SOURCE_TEXT: Record<string, string> = { chat: "对话", preset: "模板", form: "表单" };
 
+/** 回测对话框的预填（「按新口径重新回测」：照抄原回测的区间与资金，成交假设换成当前默认） */
+export interface BacktestPreset {
+  start: string;
+  end: string;
+  capital: number;
+  oosMonths: number;
+  exec?: ExecConfig;
+}
+
 export function BacktestDialog({
   versionId,
+  market,
   open,
   onClose,
+  preset,
 }: {
   versionId: string;
+  market: Market;
   open: boolean;
   onClose: () => void;
+  preset?: BacktestPreset;
 }) {
   const today = new Date().toISOString().slice(0, 10);
-  const [start, setStart] = useState("2018-01-01");
-  const [end, setEnd] = useState(today);
-  const [capital, setCapital] = useState(1_000_000);
-  const [oos, setOos] = useState(12);
+  const [start, setStart] = useState(preset?.start ?? "2018-01-01");
+  const [end, setEnd] = useState(preset?.end ?? today);
+  const [capital, setCapital] = useState(preset?.capital ?? 1_000_000);
+  const [oos, setOos] = useState(preset?.oosMonths ?? 12);
+  const exec = preset?.exec ?? defaultExec(market);
   const navigate = useNavigate();
   const qc = useQueryClient();
   const run = useMutation({
     mutationFn: () =>
-      api.post<{ runId: string }>("/api/runs", { versionId, start, end, capital, oosMonths: oos }),
+      api.post<{ runId: string }>("/api/runs", {
+        versionId,
+        start,
+        end,
+        capital,
+        oosMonths: oos,
+        exec,
+      }),
     onSuccess: (r) => {
       void qc.invalidateQueries({ queryKey: ["me"] });
       onClose();
@@ -134,6 +156,7 @@ export function BacktestDialog({
       </div>
       <Callout tone="neutral" className="mt-5 text-xs leading-5">
         收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
+        <div className="mt-1">成交假设：{describeExec(exec)}</div>
       </Callout>
       <ErrorNote error={run.error} />
     </Modal>
@@ -161,6 +184,8 @@ export function TrackDialog({
         startDate: string;
         capital: number;
         hasBaseline: boolean;
+        execText: string;
+        legacyBaseline: boolean;
       }>("/api/trackings/propose", { versionId, capital }),
   });
   const confirm = useMutation({
@@ -227,7 +252,14 @@ export function TrackDialog({
             <dd className="font-mono text-ink">{p.startDate}</dd>
             <dt className="text-muted">模拟资金</dt>
             <dd className="tabular text-ink">{p.capital.toLocaleString()} 元</dd>
+            <dt className="text-muted">成交假设</dt>
+            <dd className="text-ink">{p.execText}</dd>
           </dl>
+          {p.legacyBaseline && (
+            <Callout tone="warn">
+              基准回测用的是旧口径，上线后也会沿用；建议先按新口径重新回测。
+            </Callout>
+          )}
           {!p.hasBaseline && (
             <Callout tone="warn">
               这个版本还没有跑完的回测，上线后没法和回测比（看板上「跑赢回测同期」会是空的）。建议先回测一次。
@@ -450,6 +482,14 @@ export function StrategyPage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [backtest, setBacktest] = useState(false);
   const [track, setTrack] = useState(false);
+  // 回测页「按新口径重新回测」带过来的 ?backtest=<runId>&exec=default：按那次回测预填对话框
+  const [search, setSearch] = useSearchParams();
+  const fromRunId = search.get("backtest");
+  const fromRun = useQuery({
+    queryKey: ["run", fromRunId],
+    queryFn: () => api.get<RunDetail>(`/api/runs/${fromRunId}`),
+    enabled: !!fromRunId,
+  });
   const chat = useChatUi();
   const s = q.data;
   const version = s?.current;
@@ -470,6 +510,17 @@ export function StrategyPage() {
   if (q.isLoading) return <PageSkeleton stats={0} />;
   if (!s || !version) return <ErrorNote error={q.error ?? new Error("策略不存在")} />;
   const lastDone = s.runs.find((r) => r.kind === "backtest" && r.status === "done");
+  const from = fromRun.data?.strategyId === s.id ? fromRun.data : undefined;
+  const closePrefilled = () =>
+    setSearch(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("backtest");
+        next.delete("exec");
+        return next;
+      },
+      { replace: true },
+    );
   const activeTrackings = s.trackings.filter((t) => t.status === "active").length;
 
   return (
@@ -635,7 +686,29 @@ export function StrategyPage() {
           </Card>
         )}
       </div>
-      <BacktestDialog versionId={version.id} open={backtest} onClose={() => setBacktest(false)} />
+      <BacktestDialog
+        versionId={version.id}
+        market={s.market}
+        open={backtest}
+        onClose={() => setBacktest(false)}
+      />
+      {from && (
+        <BacktestDialog
+          key={from.id}
+          versionId={from.versionId}
+          market={s.market}
+          open
+          onClose={closePrefilled}
+          preset={{
+            start: from.params.start,
+            end: from.params.end,
+            capital: from.params.capital,
+            oosMonths: from.params.oosMonths,
+            exec:
+              search.get("exec") === "default" ? defaultExec(s.market) : (from.exec ?? undefined),
+          }}
+        />
+      )}
       <TrackDialog versionId={version.id} open={track} onClose={() => setTrack(false)} />
     </div>
   );

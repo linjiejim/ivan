@@ -4,4 +4,6 @@ export * from "./factors.ts";
 export * from "./strategy.ts";
 export * from "./rules.ts";
 export * from "./backtest.ts";
+export * from "./exec.ts";
+export * from "./runcard.ts";
 export * from "./presets.ts";

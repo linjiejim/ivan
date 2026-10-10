@@ -37,6 +37,8 @@ export const userQuotas = sqliteTable("user_quotas", {
   userId: text("user_id").primaryKey(),
   chatMessages: integer("chat_messages"),
   backtests: integer("backtests"),
+  /** 数据查询：复核、个股证据这类要 worker 组装数据的读请求（D59） */
+  analyses: integer("analyses"),
 });
 
 export const usageDaily = sqliteTable(
@@ -46,6 +48,7 @@ export const usageDaily = sqliteTable(
     day: text("day").notNull(),
     chatMessages: integer("chat_messages").notNull().default(0),
     backtests: integer("backtests").notNull().default(0),
+    analyses: integer("analyses").notNull().default(0),
     tokensIn: integer("tokens_in").notNull().default(0),
     tokensOut: integer("tokens_out").notNull().default(0),
   },
@@ -123,7 +126,7 @@ export const runs = sqliteTable(
     userId: text("user_id").notNull(),
     strategyId: text("strategy_id").notNull(),
     versionId: text("version_id").notNull(),
-    /** backtest | sweep（参数扫描的子回测） */
+    /** backtest | sweep（参数扫描）| sweep_child（扫描的子回测）| reproduce（完整重跑，params.reproOf 指向原运行） */
     kind: text("kind").notNull().default("backtest"),
     parentId: text("parent_id"),
     label: text("label"),
@@ -142,11 +145,21 @@ export const runs = sqliteTable(
     /** 净值序列与持仓快照（deflate 压缩的 JSON） */
     seriesZ: blob("series_z", { mode: "buffer" }),
     holdingsZ: blob("holdings_z", { mode: "buffer" }),
+    /** 运行卡（D57，@ivan/core RunCard）：策略、区间、成交假设、引擎、数据与输入指纹、结果指纹 */
+    card: json<Record<string, unknown>>("card"),
+    cardHash: text("card_hash"),
+    inputHash: text("input_hash"),
+    /** 最近一次复核（复核数据 / 完整重跑）的结果，写在原运行上 */
+    verify: json<Record<string, unknown>>("verify"),
     createdAt: integer("created_at").notNull().default(now),
     startedAt: integer("started_at"),
     finishedAt: integer("finished_at"),
   },
-  (t) => [index("runs_user").on(t.userId), index("runs_strategy").on(t.strategyId)],
+  (t) => [
+    index("runs_user").on(t.userId),
+    index("runs_strategy").on(t.strategyId),
+    index("runs_card_hash").on(t.cardHash),
+  ],
 );
 
 export const runTrades = sqliteTable(
@@ -188,6 +201,8 @@ export const trackings = sqliteTable(
     /** 跟踪期超额在回测同长度窗口里的百分位 */
     deviationPct: real("deviation_pct"),
     summary: json<Record<string, unknown>>("summary"),
+    /** 锁定的成交假设（D55）：上线时抄基准回测的 exec；迁移默认旧口径，现有跟踪全部是旧口径 */
+    execConfig: json<Record<string, unknown>>("exec_config").notNull().default({ v: 1 }),
     createdAt: integer("created_at").notNull().default(now),
     stoppedAt: integer("stopped_at"),
   },
@@ -267,7 +282,7 @@ export const jobs = sqliteTable(
   "jobs",
   {
     id: text("id").primaryKey(),
-    /** backtest | sweep | etl | settle | brief | backfill */
+    /** backtest | sweep | verify | etl | settle | brief | check | backfill */
     kind: text("kind").notNull(),
     userId: text("user_id"),
     payload: json<Record<string, unknown>>("payload").notNull(),

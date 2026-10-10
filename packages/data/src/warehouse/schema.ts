@@ -5,7 +5,7 @@
 import { FACTORS } from "@ivan/core";
 import { FIX_A_VOLUME_SQL } from "../compute/volume-unit.ts";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** factors_daily 的列：键列 + 注册表里的全部因子（分类因子 VARCHAR，布尔 BOOLEAN，其余 DOUBLE）。 */
 export const FACTOR_COLUMNS = FACTORS.map((f) => f.key);
@@ -17,6 +17,24 @@ function factorType(kind: string): string {
 function factorColumnDdl(): string {
   return FACTORS.map((f) => `${f.key} ${factorType(f.kind)}`).join(",\n  ");
 }
+
+/** 表尾带 src、ver 两列的表（第 3 版起）。 */
+export const PROVENANCE_TABLES = [
+  "bars_daily",
+  "corp_actions",
+  "index_bars",
+  "financials",
+  "share_changes",
+] as const;
+
+/** 数据来源的中文名（界面与日志用；空 = 来源未记录）。 */
+export const SOURCE_LABEL: Record<string, string> = {
+  em: "东财",
+  tx: "腾讯日 K",
+  txq: "腾讯实时报价",
+  csi: "中证官网",
+  prov: "临时补齐的全收益",
+};
 
 export const SCHEMA_SQL: string[] = [
   `CREATE TABLE IF NOT EXISTS securities (
@@ -137,6 +155,65 @@ export const SCHEMA_SQL: string[] = [
 )`,
   // 第 2 版（注册表第 2 版新增因子）：已有的行情仓在表尾补列，顺序与注册表一致；新建的库这些语句是空操作
   ...FACTORS.map((f) => `ALTER TABLE factors_daily ADD COLUMN IF NOT EXISTS ${f.key} ${factorType(f.kind)}`),
+  // 第 3 版（D60、D61）：行级来源与版本号加在表尾（Warehouse.append 按列序写，写入方在行元组末尾补这两个值）。
+  // src：em 东财 / tx 腾讯日 K / txq 腾讯实时报价 / csi 中证官网 / prov 临时补齐的全收益；已有的行为空 = 来源未记录。
+  // 在约 2500 万行的 bars_daily 上补列是重迁移，worker 启动时不做（见 Warehouse.open 的 migrate: "light" 与 scripts/migrate.sh）
+  ...PROVENANCE_TABLES.flatMap((t) => [
+    `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS src VARCHAR`,
+    `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ver INTEGER`,
+  ]),
+  // 交易日历也盖版本号（夜间增量先开版本再更新指数与日历）
+  `ALTER TABLE trade_calendar ADD COLUMN IF NOT EXISTS ver INTEGER`,
+  // 停牌 / 没成交 / 缺失（S13 起写）
+  `CREATE TABLE IF NOT EXISTS bar_status (
+  code VARCHAR NOT NULL,
+  date DATE NOT NULL,
+  status VARCHAR NOT NULL,
+  reason VARCHAR,
+  src VARCHAR,
+  ver INTEGER
+)`,
+  `CREATE SEQUENCE IF NOT EXISTS data_issue_seq START 1`,
+  // 数据问题：severity = reject（拒收不入库）| flag（入库但标记）；resolved_by = refetch | check | admin（S13 起写）
+  `CREATE TABLE IF NOT EXISTS data_issues (
+  id BIGINT DEFAULT nextval('data_issue_seq'),
+  ver INTEGER,
+  dataset VARCHAR,
+  code VARCHAR,
+  date DATE,
+  rule VARCHAR,
+  severity VARCHAR,
+  detail VARCHAR,
+  src VARCHAR,
+  created_at TIMESTAMP DEFAULT current_timestamp,
+  resolved_ver INTEGER,
+  resolved_by VARCHAR
+)`,
+  // 点时属性快照（D61）：[valid_from, valid_to) 区间，valid_to 为空 = 当前值；首次快照从当天起算，绝不回填
+  `CREATE TABLE IF NOT EXISTS attr_history (
+  code VARCHAR NOT NULL,
+  attr VARCHAR NOT NULL,
+  value VARCHAR,
+  valid_from DATE NOT NULL,
+  valid_to DATE,
+  src VARCHAR,
+  ver INTEGER
+)`,
+  // 财报首见留底（D61）：（代码, 报告期, 数值指纹）第一次见到的日子与按列名的原始行
+  `CREATE TABLE IF NOT EXISTS financials_seen (
+  code VARCHAR NOT NULL,
+  report_date DATE NOT NULL,
+  row_hash VARCHAR NOT NULL,
+  first_seen DATE NOT NULL,
+  ver INTEGER,
+  row_json VARCHAR
+)`,
+  // 数据版本先开后提交（D60）：status = open | ok | incomplete | failed | skipped，旧行为空 = ok
+  `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS status VARCHAR`,
+  `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS started_at TIMESTAMP`,
+  `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS completeness VARCHAR`,
+  `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS sources VARCHAR`,
+  `ALTER TABLE data_versions ADD COLUMN IF NOT EXISTS registry_version INTEGER`,
 ];
 
 /**

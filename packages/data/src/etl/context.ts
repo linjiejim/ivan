@@ -1,16 +1,18 @@
 import type { DateStr, Market } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 import type { Warehouse } from "../warehouse/db.ts";
 
 export type LogFn = (msg: string) => void;
 
 export interface EtlContext {
   wh: Warehouse;
-  http: Http;
+  http: HttpLike;
   today: DateStr;
   log: LogFn;
   /** 进度回调（0–1），任务页面展示用 */
   progress?: (fraction: number, note?: string) => void;
+  /** 当前打开的数据版本号（D60）：写入方给每行盖章（表尾的 ver 列）；不在版本里写（调试命令）时为空 */
+  ver?: number;
 }
 
 export interface SecurityRow {

@@ -1,24 +1,55 @@
 /**
- * 回测与参数扫描任务：组装输入（DuckDB）→ 线程里模拟 → 结果写应用库。
+ * 回测与参数扫描任务：组装输入（DuckDB）→ 算输入指纹 → 线程里模拟 → 结果与运行卡写应用库（D57）。
+ * 完整重跑（kind = reproduce）也走这里，跑完和原运行比结果指纹，写回原运行的 verify。
  */
 import {
   type BacktestParams,
+  buildRunCard,
   type Check,
+  canonicalJson,
+  FACTOR_REGISTRY_VERSION,
+  type RunCard,
+  type RunCardKind,
+  resolveExec,
+  resultHashes,
   type Signal,
   type SimResult,
   type StrategySpec,
   validateSpec,
 } from "@ivan/core";
-import { buildSimInput } from "@ivan/data";
-import { newId, packJson, runs, runTrades, signalDatasets, strategyVersions } from "@ivan/db";
-import { and, eq } from "drizzle-orm";
+import { sha256Canonical, specHashOf } from "@ivan/core/node";
+import {
+  type BuiltInput,
+  buildSimInput,
+  HASH_VERSION,
+  hashSimInput,
+  SCHEMA_VERSION,
+} from "@ivan/data";
+import { changeCause } from "@ivan/engine";
+import {
+  newId,
+  packJson,
+  runs,
+  runTrades,
+  signalDatasets,
+  strategyVersions,
+  unpackJson,
+} from "@ivan/db";
+import { and, asc, eq } from "drizzle-orm";
 import { env } from "../env.ts";
 import type { JobContext } from "../runner.ts";
 import { runSimulation } from "../sim-pool.ts";
 
 type RunRow = typeof runs.$inferSelect;
 
-function loadSpec(run: RunRow): StrategySpec {
+/** runs.params 里存的东西：回测参数 + 试错次数 + 扫描子回测的策略内容 + 重跑指向的原运行 */
+export type StoredRunParams = BacktestParams & {
+  priorVersions?: number;
+  specOverride?: unknown;
+  reproOf?: string;
+};
+
+export function loadSpec(run: RunRow): StrategySpec {
   const { db } = env().app;
   const p = run.params as { specOverride?: unknown };
   const raw =
@@ -30,7 +61,7 @@ function loadSpec(run: RunRow): StrategySpec {
   return v.spec;
 }
 
-function loadSignals(userId: string, spec: StrategySpec): Signal[] | undefined {
+export function loadSignals(userId: string, spec: StrategySpec): Signal[] | undefined {
   if (spec.mode !== "signals" || !spec.signals) return undefined;
   const { db } = env().app;
   const ds = db
@@ -43,31 +74,142 @@ function loadSignals(userId: string, spec: StrategySpec): Signal[] | undefined {
   return ds.rows;
 }
 
-/** 跑一个 run 并写回结果（回测与扫描子回测共用） */
+/**
+ * 按存下的参数重新组装输入（回测、复核、重跑共用）：区间、资金、样本外、成交假设、信号、扫描的策略内容、试错次数。
+ * 复核传入运行卡记下的终点（截到数据截至日后的），之后新增的交易日不进窗口。
+ * 成交假设一定显式传给引擎（缺省字段按旧口径补齐），不能让引擎悄悄按默认跑。
+ */
+export async function rebuildInput(
+  run: RunRow,
+  spec = loadSpec(run),
+  end?: string,
+): Promise<BuiltInput> {
+  const p = run.params as unknown as StoredRunParams;
+  return buildSimInput(
+    env().wh,
+    spec,
+    {
+      start: p.start,
+      end: end ?? p.end,
+      capital: p.capital,
+      oosMonths: p.oosMonths,
+      exec: resolveExec(p.exec),
+    },
+    { signals: loadSignals(run.userId, spec), priorVersionsOnPeriod: p.priorVersions ?? 0 },
+  );
+}
+
+/** 策略内容指纹：扫描子回测（及它的重跑）按自己的策略内容算，其余取版本上存的 spec_hash */
+function specHashFor(run: RunRow): string {
+  const p = run.params as unknown as StoredRunParams;
+  if (p.specOverride) return specHashOf(p.specOverride);
+  const v = env()
+    .app.db.select({ specHash: strategyVersions.specHash })
+    .from(strategyVersions)
+    .where(eq(strategyVersions.id, run.versionId))
+    .get();
+  if (!v) throw new Error("找不到策略版本");
+  return v.specHash;
+}
+
+/**
+ * 从存档里算结果指纹（原运行早于运行卡时，完整重跑用它比）：两边都经过同一套存储再算，口径一致。
+ */
+export function storedResultHashes(runId: string): { coreHash: string; reportHash: string } {
+  const { db } = env().app;
+  const r = db.select().from(runs).where(eq(runs.id, runId)).get();
+  if (!r) throw new Error(`回测 ${runId} 不存在`);
+  const trades = db
+    .select()
+    .from(runTrades)
+    .where(eq(runTrades.runId, runId))
+    .orderBy(asc(runTrades.seq))
+    .all()
+    .map((t) => ({
+      date: t.date,
+      code: t.code,
+      side: t.side,
+      price: t.price,
+      shares: t.shares,
+      amount: t.amount,
+      fee: t.fee,
+      reason: t.reason,
+      pnl: t.pnl ?? undefined,
+      holdDays: t.holdDays ?? undefined,
+    }));
+  return {
+    coreHash: sha256Canonical({
+      series: unpackJson(r.seriesZ),
+      trades,
+      holdings: unpackJson(r.holdingsZ),
+      metrics: r.metrics,
+      segments: r.segments,
+      attribution: r.attribution,
+      final: r.final,
+    }),
+    reportHash: sha256Canonical(r.checks ?? []),
+  };
+}
+
+/** 跑一个 run 并写回结果与运行卡（回测、扫描子回测、完整重跑共用） */
 async function execute(
   run: RunRow,
   spec: StrategySpec,
   ctx: JobContext,
   weight = 1,
   base = 0,
-): Promise<SimResult> {
-  const { wh, app } = env();
-  const p = run.params as unknown as BacktestParams & { priorVersions?: number };
+): Promise<{ result: SimResult; card: RunCard; built: BuiltInput }> {
+  const { app } = env();
+  const p = run.params as unknown as StoredRunParams;
   app.db
     .update(runs)
     .set({ status: "running", startedAt: Date.now() })
     .where(eq(runs.id, run.id))
     .run();
   ctx.progress(base + 0.1 * weight, "读取行情与选股");
-  const built = await buildSimInput(
-    wh,
-    spec,
-    { start: p.start, end: p.end, capital: p.capital, oosMonths: p.oosMonths },
-    { signals: loadSignals(run.userId, spec), priorVersionsOnPeriod: p.priorVersions ?? 0 },
-  );
+  const exec = resolveExec(p.exec);
+  const specHash = specHashFor(run);
+  const built = await rebuildInput(run, spec);
+  // 指纹必须在转交线程之前算（转交后 TypedArray 失效）
+  const hashes = hashSimInput(built.input);
+  const caveatsHash = sha256Canonical(built.input.dataCaveats ?? []);
   ctx.progress(base + 0.5 * weight, `模拟 ${built.stats.codes} 只股票`);
   const result = await runSimulation(built.input);
+  if (canonicalJson(result.exec) !== canonicalJson(exec)) throw new Error("成交假设没有传到引擎");
   ctx.progress(base + 0.9 * weight, "写入结果");
+  const card = buildRunCard(
+    {
+      schema: 1,
+      kind: (run.kind === "sweep_child" || run.kind === "reproduce"
+        ? run.kind
+        : "backtest") as RunCardKind,
+      spec: { versionId: run.versionId, specHash },
+      params: {
+        start: p.start,
+        end: built.params.end,
+        capital: p.capital,
+        oosMonths: p.oosMonths,
+      },
+      exec: result.exec,
+      engine: { version: result.engineVersion, rulesVersion: 1, metricsVersion: 1 },
+      data: {
+        market: spec.market,
+        versionId: built.dataVersion.id,
+        asOf: built.dataVersion.asOf,
+        factorRegistry: FACTOR_REGISTRY_VERSION,
+        warehouseSchema: SCHEMA_VERSION,
+        hashVersion: hashes.hashVersion,
+        inputHash: hashes.inputHash,
+        selectionHash: hashes.selectionHash,
+        priceHash: hashes.priceHash,
+        benchHash: hashes.benchHash,
+        caveatsHash,
+      },
+      seeds: { validation: null },
+      outputs: resultHashes(result, sha256Canonical),
+    },
+    sha256Canonical,
+  );
   const insert = app.sqlite.prepare(
     `INSERT INTO run_trades (run_id, seq, date, code, side, price, shares, amount, fee, reason, pnl, hold_days)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -106,12 +248,78 @@ async function execute(
         final: result.final as unknown as Record<string, unknown>,
         seriesZ: packJson(result.series),
         holdingsZ: packJson(result.holdings),
+        card: card as unknown as Record<string, unknown>,
+        cardHash: card.cardHash,
+        inputHash: card.data.inputHash,
         finishedAt: Date.now(),
       })
       .where(eq(runs.id, run.id))
       .run();
   })();
-  return result;
+  return { result, card, built };
+}
+
+/**
+ * 完整重跑跑完：和原运行比。逐笔一致只看 coreHash（D57）；原运行早于运行卡时从存档两边同口径地算。
+ * 结果不同的原因用和跟踪漂移同一个 changeCause 判断。结果写回原运行的 verify。
+ */
+function recordReproduction(repro: RunRow, card: RunCard, built: BuiltInput): void {
+  const { db } = env().app;
+  const origId = (repro.params as unknown as StoredRunParams).reproOf;
+  const orig = origId ? db.select().from(runs).where(eq(runs.id, origId)).get() : undefined;
+  if (!orig) {
+    // 比不了也要给重跑页一个终态，不然页面会一直显示「正在和原回测比对」
+    setFullVerifyFailed([repro.id], "原回测不存在，没法比对");
+    return;
+  }
+  const origCard = orig.card as unknown as RunCard | null;
+  const [then, now] = origCard
+    ? [origCard.outputs, card.outputs]
+    : [storedResultHashes(orig.id), storedResultHashes(repro.id)];
+  const sameResult = then.coreHash === now.coreHash;
+  const sameInput = origCard ? origCard.data.inputHash === card.data.inputHash : null;
+  const cause = sameResult
+    ? "none"
+    : changeCause(
+        {
+          engineVersion: orig.engineVersion,
+          hashVersion: origCard?.data.hashVersion ?? null,
+          execHash: origCard ? sha256Canonical(origCard.exec) : null,
+          data: origCard ? [origCard.data.inputHash] : null,
+        },
+        {
+          engineVersion: card.engine.version,
+          hashVersion: card.data.hashVersion,
+          execHash: sha256Canonical(card.exec),
+          data: [card.data.inputHash],
+        },
+      );
+  const verify = {
+    status: "done",
+    kind: "full",
+    at: Date.now(),
+    reproRunId: repro.id,
+    sameInput,
+    sameResult,
+    reportSame: then.reportHash === now.reportHash,
+    engineSame: orig.engineVersion === card.engine.version,
+    hashVersionSame: origCard ? origCard.data.hashVersion === HASH_VERSION : false,
+    // 结果不同、指纹各项却都相同：原因不明（属于程序问题）
+    cause: sameResult ? "none" : cause === "none" ? "unexplained" : cause,
+    dataVersionThen: orig.dataVersion,
+    dataVersionNow: built.dataVersion.id,
+  };
+  // 原运行与重跑各记一份：原运行的 verify 之后可能被新的复核覆盖，重跑页仍要能说清这次比的结果
+  for (const id of [orig.id, repro.id]) {
+    db.update(runs).set({ verify }).where(eq(runs.id, id)).run();
+  }
+}
+
+/** 完整重跑的比对出错：记成比对失败（重跑本身已经跑完存好，不能因此判成失败） */
+function setFullVerifyFailed(ids: string[], error: string): void {
+  const { db } = env().app;
+  const verify = { status: "failed", kind: "full", at: Date.now(), error };
+  for (const id of ids) db.update(runs).set({ verify }).where(eq(runs.id, id)).run();
 }
 
 function failRun(runId: string, e: unknown): void {
@@ -131,8 +339,18 @@ export async function backtestJob(ctx: JobContext): Promise<Record<string, unkno
   const run = env().app.db.select().from(runs).where(eq(runs.id, runId)).get();
   if (!run) throw new Error(`回测 ${runId} 不存在`);
   try {
-    const r = await execute(run, loadSpec(run), ctx);
-    return { runId, excessCagr: r.metrics.excessCagr };
+    const { result, card, built } = await execute(run, loadSpec(run), ctx);
+    if (run.kind === "reproduce") {
+      try {
+        recordReproduction(run, card, built);
+      } catch (e) {
+        const origId = (run.params as unknown as StoredRunParams).reproOf;
+        const error = `比对失败：${e instanceof Error ? e.message : String(e)}`;
+        setFullVerifyFailed(origId ? [origId, run.id] : [run.id], error);
+        ctx.log(`重跑 ${runId} ${error}`);
+      }
+    }
+    return { runId, excessCagr: result.metrics.excessCagr };
   } catch (e) {
     failRun(runId, e);
     throw e;
@@ -176,7 +394,13 @@ export async function sweepJob(ctx: JobContext): Promise<Record<string, unknown>
         .run();
       const child = db.select().from(runs).where(eq(runs.id, childId)).get()!;
       try {
-        const r = await execute(child, v.spec, ctx, 1 / variants.length, i / variants.length);
+        const { result: r } = await execute(
+          child,
+          v.spec,
+          ctx,
+          1 / variants.length,
+          i / variants.length,
+        );
         results.push({ label: v.label, runId: childId, excessCagr: r.metrics.excessCagr });
       } catch (e) {
         failRun(childId, e);

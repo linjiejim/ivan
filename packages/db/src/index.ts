@@ -12,6 +12,7 @@ import { deflateSync, inflateSync } from "node:zlib";
 import * as schema from "./schema.ts";
 
 export * from "./schema.ts";
+export { COMPUTE_PAUSED_TEXT, computeBlocked, WAREHOUSE_WRITERS } from "./jobs-gate.ts";
 export { schema };
 
 const MIGRATIONS = resolve(fileURLToPath(new URL("..", import.meta.url)), "migrations");

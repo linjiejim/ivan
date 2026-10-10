@@ -266,6 +266,9 @@ export class Http {
   }
 }
 
+/** 数据源与 ETL 只用到的那部分 Http：测试里换成 `@ivan/data/testing` 的 FakeHttp。 */
+export type HttpLike = Pick<Http, "text" | "json" | "isBlocked" | "earliestUnblock">;
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

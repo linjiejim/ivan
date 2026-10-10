@@ -1,0 +1,18 @@
+{
+  "version": "fixture",
+  "result": {
+    "pages": 1,
+    "data": [
+      { "SECUCODE": "00700.HK", "SECURITY_NAME_ABBR": "腾讯控股", "SECURITY_TYPE": "非H股", "BOARD": "主板", "TRADE_UNIT": 100, "LISTING_DATE": "2004-06-16 00:00:00", "GANGGUTONGBIAODISHEN": "是" },
+      { "SECUCODE": "00939.HK", "SECURITY_NAME_ABBR": "建设银行", "SECURITY_TYPE": "H股", "BOARD": "主板", "TRADE_UNIT": 1000, "LISTING_DATE": "2005-10-27 00:00:00", "GANGGUTONGBIAODISHEN": "是" },
+      { "SECUCODE": "00005.HK", "SECURITY_NAME_ABBR": "汇丰控股", "SECURITY_TYPE": "非H股", "BOARD": "主板", "TRADE_UNIT": 400, "LISTING_DATE": "1991-01-01 00:00:00", "GANGGUTONGBIAODISHEN": "否" },
+      { "SECUCODE": "08083.HK", "SECURITY_NAME_ABBR": "中国有赞", "SECURITY_TYPE": "非H股", "BOARD": "创业板", "TRADE_UNIT": 4000, "LISTING_DATE": "2000-11-10 00:00:00", "GANGGUTONGBIAODISHEN": null },
+      { "SECUCODE": "80700.HK", "SECURITY_NAME_ABBR": "腾讯控股-R", "SECURITY_TYPE": "非H股", "BOARD": "主板", "TRADE_UNIT": 100, "LISTING_DATE": "2023-06-19 00:00:00", "GANGGUTONGBIAODISHEN": "否" },
+      { "SECUCODE": "02800.HK", "SECURITY_NAME_ABBR": "盈富基金", "SECURITY_TYPE": "基金", "BOARD": "主板", "TRADE_UNIT": 500, "LISTING_DATE": "1999-11-12 00:00:00", "GANGGUTONGBIAODISHEN": "是" }
+    ],
+    "count": 6
+  },
+  "success": true,
+  "message": "ok",
+  "code": 0
+}

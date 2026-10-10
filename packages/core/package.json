@@ -6,7 +6,8 @@
   "description": "领域类型、策略 DSL、因子注册表、市场规则（纯 TS，无 IO）",
   "exports": {
     ".": "./src/index.ts",
-    "./config": "./src/config.ts"
+    "./config": "./src/config.ts",
+    "./node": "./src/node/hash.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

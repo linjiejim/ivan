@@ -8,6 +8,10 @@ import {
   type Check,
   DEFAULT_PARAMS,
   diffDays,
+  ExecConfigError,
+  type Market,
+  parseExecOverrides,
+  resolveExec,
   isDateStr,
   type HoldingSnapshot,
   type Metrics,
@@ -18,7 +22,16 @@ import {
   validateSpec,
 } from "@ivan/core";
 import { periodMetrics } from "@ivan/engine";
-import { jobs, newId, runs, runTrades, strategies, strategyVersions, unpackJson } from "@ivan/db";
+import {
+  computeBlocked,
+  jobs,
+  newId,
+  runs,
+  runTrades,
+  strategies,
+  strategyVersions,
+  unpackJson,
+} from "@ivan/db";
 import { and, asc, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
@@ -34,9 +47,15 @@ export interface RunParamsInput {
   end?: string;
   capital?: number;
   oosMonths?: number;
+  /** 成交假设的覆盖项（D55），合并到 defaultExec(market)；不认识的键报错 */
+  exec?: unknown;
 }
 
-export function normalizeParams(p: RunParamsInput = {}): BacktestParams {
+/** 存进 runs.params 的回测参数：exec 永远是完整对象 */
+export function normalizeParams(
+  p: RunParamsInput = {},
+  market: Market = "A",
+): BacktestParams & { exec: NonNullable<BacktestParams["exec"]> } {
   const start = p.start ?? DEFAULT_PARAMS.start;
   const end = p.end ?? todayCN();
   if (!isDateStr(start) || !isDateStr(end)) throw new AppError(400, "日期格式要是 YYYY-MM-DD");
@@ -48,16 +67,30 @@ export function normalizeParams(p: RunParamsInput = {}): BacktestParams {
     throw new AppError(400, "初始资金要在 1 万到 100 亿之间");
   const oosMonths = p.oosMonths ?? DEFAULT_PARAMS.oosMonths;
   if (!(oosMonths >= 0 && oosMonths <= 60)) throw new AppError(400, "样本外月数要在 0–60 之间");
-  return { start, end, capital, oosMonths };
+  let exec;
+  try {
+    exec = parseExecOverrides(market, p.exec);
+  } catch (e) {
+    if (e instanceof ExecConfigError) throw new AppError(400, e.message);
+    throw e;
+  }
+  return { start, end, capital, oosMonths, exec };
 }
 
-function activeJobs(userId: string): number {
+/** 排队中 / 运行中的任务数（复核不算：它另有「一人同时一个」的限制） */
+function activeJobs(userId: string, kind?: string): number {
   const { db } = env().app;
   return (
     db
       .select({ n: sql<number>`count(*)` })
       .from(jobs)
-      .where(and(eq(jobs.userId, userId), inArray(jobs.status, ["queued", "running"])))
+      .where(
+        and(
+          eq(jobs.userId, userId),
+          inArray(jobs.status, ["queued", "running"]),
+          kind ? eq(jobs.kind, kind) : sql`${jobs.kind} != 'verify'`,
+        ),
+      )
       .get()?.n ?? 0
   );
 }
@@ -89,8 +122,8 @@ export function enqueueBacktest(
   input: RunParamsInput = {},
 ): { runId: string; jobId: string } {
   const { db } = env().app;
-  const { strategy } = getVersion(userId, versionId);
-  const params = normalizeParams(input);
+  const { strategy, version } = getVersion(userId, versionId);
+  const params = normalizeParams(input, version.spec.market);
   if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
     throw new AppError(429, `同时排队的任务最多 ${MAX_ACTIVE_JOBS} 个，等前面的跑完再来`);
   }
@@ -130,7 +163,7 @@ export function enqueueSweep(
     throw new AppError(400, "参数路径要是 JSON Pointer，如 /exits/stopLoss");
   if (sweep.values.length < 2 || sweep.values.length > 8)
     throw new AppError(400, "扫描取值要 2–8 个");
-  const params = normalizeParams(input);
+  const params = normalizeParams(input, version.spec.market);
   const variants: Array<{ label: string; spec: StrategySpec }> = [];
   for (const value of sweep.values) {
     let candidate: unknown;
@@ -280,10 +313,25 @@ export function getRun(userId: string, runId: string) {
           .all()
           .map(runSummary)
       : [];
+  const market =
+    db
+      .select({ market: strategies.market })
+      .from(strategies)
+      .where(eq(strategies.id, r.strategyId))
+      .get()?.market ?? null;
+  // 夜间更新写库期间回测与复核暂停（D60）：排队中的要告诉用户在等什么
+  const waiting = r.status === "queued" || r.verify?.status === "queued";
+  const blocked = waiting ? computeBlocked(env().app.sqlite) : null;
   return {
     ...withNames([runSummary(r)])[0]!,
+    market: market as Market | null,
     engineVersion: r.engineVersion,
     dataVersion: r.dataVersion,
+    card: r.card,
+    cardHash: r.cardHash,
+    inputHash: r.inputHash,
+    verify: r.verify,
+    exec: safeExec(r.params.exec),
     metrics: r.metrics as Metrics | null,
     segments: r.segments as { inSample: PeriodMetrics; outOfSample: PeriodMetrics | null } | null,
     attribution: r.attribution,
@@ -291,7 +339,123 @@ export function getRun(userId: string, runId: string) {
     series: unpackJson<SeriesPoint[]>(r.seriesZ) ?? [],
     job: job ?? null,
     children,
+    computePaused: blocked ? { reason: blocked.kind, since: blocked.since } : null,
   };
+}
+
+/** 存下的成交假设（旧运行没有这个字段，按旧口径解析）；读不懂时给 null，不让整页报错 */
+function safeExec(stored: unknown) {
+  try {
+    return resolveExec(stored);
+  } catch {
+    return null;
+  }
+}
+
+/** 下载运行卡（早于运行卡记录的回测没有） */
+export function runCard(userId: string, runId: string): Record<string, unknown> {
+  const r = ownRun(userId, runId);
+  if (!r.card) throw new AppError(404, "这次回测没有运行卡（早于运行卡记录）");
+  return r.card;
+}
+
+/**
+ * 复核数据（D57）：计入 analyses 额度，在 compute 道排一个 verify 任务，立即返回「排队中」。
+ * 同一用户同时只能有一个复核；复核不占 MAX_ACTIVE_JOBS。
+ */
+export function verifyRun(userId: string, runId: string): { status: "queued"; jobId: string } {
+  const r = ownRun(userId, runId);
+  if (r.kind === "sweep") throw new AppError(400, "参数扫描请到各个子回测上复核");
+  // 重跑页上的 verify 是「和原回测比」的结果，复核会把它盖掉
+  if (r.kind === "reproduce") throw new AppError(400, "重跑的结果请到原回测上复核");
+  if (r.status !== "done") throw new AppError(409, "这次回测还没跑完");
+  if (activeJobs(userId, "verify") > 0) throw new AppError(409, "上一次复核还没结束");
+  // 复核与完整重跑都写这次回测的 verify：重跑还没比完时复核会把结果盖掉
+  if (reproInFlight(runId)) throw new AppError(409, "这次回测的完整重跑还没结束，等它比完再复核");
+  consume(userId, "analyses");
+  const { db } = env().app;
+  const jobId = newId("j_");
+  db.transaction((tx) => {
+    tx.insert(jobs).values({ id: jobId, kind: "verify", userId, payload: { runId } }).run();
+    tx.update(runs)
+      .set({ verify: { status: "queued", kind: "input", requestedAt: Date.now() } })
+      .where(eq(runs.id, runId))
+      .run();
+  });
+  void worker.kick();
+  return { status: "queued", jobId };
+}
+
+/** 这次回测有没有还没跑完的完整重跑 */
+function reproInFlight(runId: string): boolean {
+  return !!env()
+    .app.db.select({ id: runs.id })
+    .from(runs)
+    .where(
+      and(
+        eq(runs.kind, "reproduce"),
+        inArray(runs.status, ["queued", "running"]),
+        sql`json_extract(${runs.params}, '$.reproOf') = ${runId}`,
+      ),
+    )
+    .get();
+}
+
+/** 原运行实际用到的终点：运行卡记下的（截到数据截至日后的）终点；早于运行卡的取存下的参数 */
+function origEffectiveEnd(orig: RunRow): string {
+  const card = orig.card as { params?: { end?: string } } | null;
+  return card?.params?.end ?? (orig.params as { end: string }).end;
+}
+
+/**
+ * 完整重跑（D57）：参数完全照抄（含试错次数，让检查项也可比；终点取原运行截到的那天），新建一次 kind = reproduce 的运行，计入回测额度。
+ * 跑完由 worker 比结果指纹并写回原运行的 verify；重跑不计入试错次数（priorVersionsOnPeriod 只数 backtest）。
+ */
+export function reproduceRun(userId: string, runId: string): { runId: string; jobId: string } {
+  const orig = ownRun(userId, runId);
+  if (orig.kind !== "backtest" && orig.kind !== "sweep_child")
+    throw new AppError(400, "只能重跑一次回测或扫描里的子回测");
+  if (orig.status !== "done") throw new AppError(409, "这次回测还没跑完");
+  // 看任务表而不是 verify 列：任务异常结束时 verify 可能停在「复核中」，不能因此永远不让重跑
+  const verifying = env()
+    .app.db.select({ id: jobs.id })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.kind, "verify"),
+        inArray(jobs.status, ["queued", "running"]),
+        sql`json_extract(${jobs.payload}, '$.runId') = ${orig.id}`,
+      ),
+    )
+    .get();
+  if (verifying) throw new AppError(409, "这次回测的复核还没结束，等它跑完再重跑");
+  if (reproInFlight(orig.id)) throw new AppError(409, "这次回测已经在完整重跑了");
+  if (activeJobs(userId) >= MAX_ACTIVE_JOBS) {
+    throw new AppError(429, `同时排队的任务最多 ${MAX_ACTIVE_JOBS} 个，等前面的跑完再来`);
+  }
+  consume(userId, "backtests");
+  const { db } = env().app;
+  const newRunId = newId("r_");
+  const jobId = newId("j_");
+  db.transaction((tx) => {
+    tx.insert(runs)
+      .values({
+        id: newRunId,
+        userId,
+        strategyId: orig.strategyId,
+        versionId: orig.versionId,
+        kind: "reproduce",
+        label: orig.label,
+        // 终点钉在原运行实际用到的那天（截到数据截至日之后的），之后多出来的交易日不进重跑
+        params: { ...orig.params, end: origEffectiveEnd(orig), reproOf: orig.id },
+      })
+      .run();
+    tx.insert(jobs)
+      .values({ id: jobId, kind: "backtest", userId, payload: { runId: newRunId } })
+      .run();
+  });
+  void worker.kick();
+  return { runId: newRunId, jobId };
 }
 
 export function listRuns(userId: string, opts: { strategyId?: string; limit?: number } = {}) {

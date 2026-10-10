@@ -3,7 +3,7 @@
  * 把财报金额换成港币算 PE 时用这里的汇率。
  */
 import { type DateStr, addDays } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 
 export interface FxRow {
   date: DateStr;
@@ -18,7 +18,7 @@ interface CcprResp {
 
 /** 单次查询区间不宜过长，这里按 180 天分段、每段翻页取完。 */
 export async function centralParity(
-  http: Http,
+  http: HttpLike,
   pairs: string[],
   from: DateStr,
   to: DateStr,

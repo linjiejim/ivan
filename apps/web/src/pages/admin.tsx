@@ -2,10 +2,12 @@
  * 管理页（spec §10、§11）：用户与额度、邀请码、数据状态与手动触发任务、今日用量、近 14 天 LLM 用量。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { todayCN } from "@ivan/core";
 import { useState } from "react";
 import {
   IconBrief,
   IconCheck,
+  IconClock,
   IconData,
   IconInvite,
   IconKey,
@@ -13,6 +15,7 @@ import {
   IconRefresh,
   IconUsage,
   IconUsers,
+  IconWarn,
 } from "../components/icons.tsx";
 import { useMe } from "../components/layout.tsx";
 import {
@@ -34,9 +37,11 @@ import {
   Th,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
+import { captureLines, openVersionText, versionStatusBadge } from "../lib/data-status.ts";
 import { dateTime, MARKET_TEXT, NA } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
 import type { DataStatus } from "../lib/types.ts";
+import { quotaPatch } from "../lib/verify.ts";
 
 interface AdminUser {
   id: string;
@@ -44,10 +49,11 @@ interface AdminUser {
   email: string;
   role: string;
   createdAt: number;
-  quota: { chatMessages: number; backtests: number };
+  quota: { chatMessages: number; backtests: number; analyses: number };
   usageToday: {
     chatMessages: number;
     backtests: number;
+    analyses?: number;
     tokensIn: number;
     tokensOut: number;
   } | null;
@@ -56,6 +62,7 @@ interface UsageDay {
   day: string;
   chatMessages: number;
   backtests: number;
+  analyses: number | null;
   chatTokens: number;
   briefTokens: number;
 }
@@ -89,6 +96,7 @@ const JOB_TEXT: Record<string, string> = {
   backtest: "回测",
   sweep: "参数扫描",
   sweep_child: "扫描子任务",
+  verify: "复核数据",
 };
 const STATUS: Record<string, { text: string; tone: "neutral" | "accent" | "warn" }> = {
   queued: { text: "排队中", tone: "neutral" },
@@ -97,37 +105,43 @@ const STATUS: Record<string, { text: string; tone: "neutral" | "accent" | "warn"
   failed: { text: "失败", tone: "warn" },
 };
 
+const QUOTA_FIELDS = [
+  { key: "chatMessages", label: "对话", aria: "每日对话额度" },
+  { key: "backtests", label: "回测", aria: "每日回测额度" },
+  { key: "analyses", label: "数据查询", aria: "数据查询（次/天）" },
+] as const;
+type QuotaKey = (typeof QUOTA_FIELDS)[number]["key"];
+
+/** 逐人额度：只提交改过的那几项，没动的不会被钉成当前默认值 */
 function QuotaEditor({ u }: { u: AdminUser }) {
   const qc = useQueryClient();
-  const [chat, setChat] = useState(String(u.quota.chatMessages));
-  const [bt, setBt] = useState(String(u.quota.backtests));
-  const dirty = chat !== String(u.quota.chatMessages) || bt !== String(u.quota.backtests);
+  const initial: Record<QuotaKey, string> = {
+    chatMessages: String(u.quota.chatMessages),
+    backtests: String(u.quota.backtests),
+    analyses: String(u.quota.analyses),
+  };
+  const [values, setValues] = useState<Record<QuotaKey, string>>(initial);
+  const patch = quotaPatch(initial, values);
+  const dirty = Object.keys(patch).length > 0;
   const save = useMutation({
-    mutationFn: () =>
-      api.post(`/api/admin/users/${u.id}/quota`, {
-        chatMessages: Number(chat),
-        backtests: Number(bt),
-      }),
+    mutationFn: () => api.post(`/api/admin/users/${u.id}/quota`, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-users"] }),
   });
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-muted">
-      对话
-      <Input
-        aria-label="每日对话额度"
-        className="tabular h-7 w-16 px-2 text-xs"
-        inputMode="numeric"
-        value={chat}
-        onChange={(e) => setChat(e.target.value)}
-      />
-      回测
-      <Input
-        aria-label="每日回测额度"
-        className="tabular h-7 w-16 px-2 text-xs"
-        inputMode="numeric"
-        value={bt}
-        onChange={(e) => setBt(e.target.value)}
-      />
+    <span className="inline-flex flex-wrap items-center gap-1.5 text-xs text-muted">
+      {QUOTA_FIELDS.map((f) => (
+        <span key={f.key} className="inline-flex items-center gap-1.5">
+          {f.label}
+          <Input
+            aria-label={f.aria}
+            title={f.aria}
+            className="tabular h-7 w-16 px-2 text-xs"
+            inputMode="numeric"
+            value={values[f.key]}
+            onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+          />
+        </span>
+      ))}
       <Button
         size="sm"
         variant={dirty ? "primary" : "ghost"}
@@ -295,24 +309,60 @@ export function AdminPage() {
             手动任务会排队，等 worker 起来后才执行。
           </Callout>
         )}
+        {status?.maintenance && (
+          <Callout tone="warn" icon={IconWarn} title="行情仓维护中" className="mb-4">
+            {status.maintenance}。升级完成前不跑夜间更新、回测与结算。
+          </Callout>
+        )}
+        {status?.computePaused && (
+          <Callout tone="neutral" icon={IconClock} className="mb-4">
+            行情正在更新，回测会在更新完成后开始（{dateTime(status.computePaused.since)} 起）
+          </Callout>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
-          {status?.markets.map((m) => (
-            <div key={m.market} className="rounded-lg bg-surface-2/70 px-4 py-3">
-              <div className="flex items-center gap-2 text-xs text-muted">
-                {MARKET_TEXT[m.market]}
-                {m.lastEtl?.status === "failed" ? (
-                  <Badge tone="warn">最近一次更新失败</Badge>
-                ) : status.workerUp ? (
-                  <span className="inline-flex items-center gap-1 text-down">
+          {status?.markets.map((m) => {
+            const last = versionStatusBadge(m.lastVersionStatus);
+            return (
+              <div key={m.market} className="rounded-lg bg-surface-2/70 px-4 py-3">
+                <div className="flex items-center gap-2 text-xs text-muted">
+                  {MARKET_TEXT[m.market]}
+                  {m.lastEtl?.status === "failed" ? (
+                    <Badge tone="warn">最近一次更新失败</Badge>
+                  ) : status.workerUp ? (
+                    <span className="inline-flex items-center gap-1 text-down">
+                      <LiveDot />
+                      正常
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-1 font-mono text-lg font-semibold text-ink">{m.asOf ?? NA}</div>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-muted">
+                  <span>数据版本 {m.dataVersion ?? NA}</span>
+                  {last && (
+                    <span className="inline-flex items-center gap-1">
+                      上一个版本
+                      <Badge tone={last.tone}>{last.text}</Badge>
+                    </span>
+                  )}
+                </div>
+                {m.openVersion && (
+                  <div className="mt-1 inline-flex items-center gap-1 text-2xs text-accent">
                     <LiveDot />
-                    正常
-                  </span>
-                ) : null}
+                    {openVersionText(m.openVersion)}
+                  </div>
+                )}
+                {m.capture && (
+                  <ul className="mt-2 space-y-0.5 border-t border-line pt-2 text-2xs">
+                    {captureLines(m.capture, todayCN()).map((l) => (
+                      <li key={l.text} className={l.tone === "warn" ? "text-warn" : "text-ink-2"}>
+                        {l.text}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              <div className="mt-1 font-mono text-lg font-semibold text-ink">{m.asOf ?? NA}</div>
-              <div className="text-2xs text-muted">数据版本 {m.dataVersion ?? NA}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <ErrorNote error={trigger.error} />
         {data.data?.jobs.length ? (
@@ -422,12 +472,13 @@ export function AdminPage() {
         icon={IconUsers}
         subtitle="额度按人按天；今日用量从北京时间 0 点起算"
       >
-        <DataTable minWidth={760}>
+        <DataTable minWidth={900}>
           <thead>
             <tr>
               <Th>用户</Th>
               <Th align="right">今日对话</Th>
               <Th align="right">今日回测</Th>
+              <Th align="right">今日数据查询</Th>
               <Th align="right">今日 token</Th>
               <Th>每日额度</Th>
               <Th />
@@ -448,6 +499,9 @@ export function AdminPage() {
                 </Td>
                 <Td align="right" className="text-ink-2">
                   {u.usageToday?.backtests ?? 0}
+                </Td>
+                <Td align="right" className="text-ink-2">
+                  {u.usageToday?.analyses ?? 0}
                 </Td>
                 <Td align="right" className="text-ink-2">
                   {(
@@ -480,6 +534,7 @@ export function AdminPage() {
                 <Th>日期</Th>
                 <Th align="right">对话条数</Th>
                 <Th align="right">回测次数</Th>
+                <Th align="right">数据查询</Th>
                 <Th align="right">对话 token</Th>
                 <Th align="right">简报 token</Th>
               </tr>
@@ -490,6 +545,7 @@ export function AdminPage() {
                   <Td className="font-mono text-[12px] text-ink-2">{d.day}</Td>
                   <Td align="right">{d.chatMessages}</Td>
                   <Td align="right">{d.backtests}</Td>
+                  <Td align="right">{d.analyses ?? 0}</Td>
                   <Td align="right">{d.chatTokens.toLocaleString()}</Td>
                   <Td align="right" className="text-ink-2">
                     {d.briefTokens.toLocaleString()}

@@ -31,16 +31,24 @@ export function languageModel(cfg: LlmConfig, kind: "chat" | "brief" = "chat"): 
   return p.chatModel(id);
 }
 
+/** 市场当日状态（D78，与 worker 的 market-day.ts 同一组取值；这里重复定义，免得 ai 依赖 worker） */
+export type BriefMarketDay = "traded" | "closed" | "stale" | "pending";
+
 export interface BriefFacts {
   date: string;
   dataAsOf: Record<string, string | null>;
-  /** 今天最近一次更新失败的市场：简报要先说明数据没更新，下面仍是旧结果 */
+  /** 今天各市场的状态（只含用户跟踪涉及的市场）；旧简报没有这个字段 */
+  marketDay?: Partial<Record<"A" | "HK", BriefMarketDay>>;
+  /** 今天数据没更新（失败或还没跑完）的市场：简报要先说明，下面仍是旧结果；休市不算 */
   staleMarkets?: string[];
   trackings: Array<{
     trackingId?: string;
     name: string;
     market: string;
     days: number;
+    /** 最近一个结算日；只有它是今天，dayReturn / dayBench 才有值 */
+    lastDate: string | null;
+    /** 今天的涨跌；今天没有新行情（休市或还没结算）时为 null */
     dayReturn: number | null;
     dayBench: number | null;
     excessTotal: number | null;
@@ -60,15 +68,41 @@ const pct = (x: number | null, d = 1) =>
 /** LLM 不可用时的确定性简报（也是给 LLM 的事实摘要） */
 export function templateBrief(f: BriefFacts): string {
   if (!f.trackings.length) return "目前没有运行中的跟踪。";
-  const stale = (f.staleMarkets ?? []).map(
-    (m) =>
-      `${m === "HK" ? "港股" : "A 股"}今天的数据没更新成功，下面还是 ${f.dataAsOf[m] ?? "上次"} 的结果`,
-  );
+  const head: string[] = [];
+  // 只有用户涉及的市场全部休市才说休市；没更新、进行中的市场永远不说休市（D78）
+  const markets = [...new Set(f.trackings.map((t) => t.market))];
+  if (f.marketDay && markets.every((m) => f.marketDay?.[m as "A" | "HK"] === "closed")) {
+    head.push("今天休市，没有新的行情");
+  }
+  for (const m of f.staleMarkets ?? []) {
+    const label = m === "HK" ? "港股" : "A 股";
+    const asOf = f.dataAsOf[m] ?? "上次";
+    head.push(
+      f.marketDay?.[m as "A" | "HK"] === "pending"
+        ? `${label}今天的数据还没更新完，下面还是 ${asOf} 的结果`
+        : `${label}今天的数据没更新成功，下面还是 ${asOf} 的结果`,
+    );
+  }
+  // 没有今天涨跌时括号里怎么说：只有休市（或旧简报没有当日状态）才能把 lastDate 叫「最近交易日」；
+  // 市场今天开了而这个跟踪没结算到今天（如数据入库后结算失败），说「今天还没结算」，不能把今天说成非交易日
+  const stoppedAt = (t: BriefFacts["trackings"][number]) => {
+    const day = f.marketDay?.[t.market as "A" | "HK"];
+    if (day === "traded") return `今天还没结算，停在 ${t.lastDate}`;
+    if (day === "stale" || day === "pending") return `数据停在 ${t.lastDate}`;
+    return `最近交易日 ${t.lastDate}`;
+  };
   const lines = f.trackings.map((t) => {
-    const parts = [
-      `「${t.name}」今天 ${pct(t.dayReturn, 2)}（基准 ${pct(t.dayBench, 2)}）`,
-      `跟踪 ${t.days} 天累计超额 ${pct(t.excessTotal)}`,
-    ];
+    const parts =
+      t.dayReturn === null
+        ? [
+            t.lastDate
+              ? `「${t.name}」跟踪 ${t.days} 天累计超额 ${pct(t.excessTotal)}（${stoppedAt(t)}）`
+              : `「${t.name}」还没有结算过`,
+          ]
+        : [
+            `「${t.name}」今天 ${pct(t.dayReturn, 2)}（基准 ${pct(t.dayBench, 2)}）`,
+            `跟踪 ${t.days} 天累计超额 ${pct(t.excessTotal)}`,
+          ];
     if (t.deviationPct !== null) parts.push(`跑赢回测同期 ${t.deviationPct.toFixed(0)}%`);
     if (t.buys.length || t.sells.length) {
       parts.push(`明日计划买 ${t.buys.length} 只、卖 ${t.sells.length} 只`);
@@ -76,7 +110,7 @@ export function templateBrief(f: BriefFacts): string {
     if (t.warnings.length) parts.push(`注意：${t.warnings.join("、")}`);
     return parts.join("，");
   });
-  return [...stale, ...lines].join("。\n") + "。";
+  return [...head, ...lines].join("。\n") + "。";
 }
 
 /**
@@ -130,7 +164,9 @@ export async function writeBrief(
         "先说整体表现，再点出最值得注意的一两件事（和回测比、明日调仓、检查项）；" +
         "beatBacktestPct = 跟踪以来的超额收益在回测所有同样长度的时段里跑赢了百分之几，说成「跑赢回测同期 X%」，" +
         "50 左右算正常，越高说明比回测时还好，低于 10 要提醒可能在失效；" +
-        "staleMarkets 里的市场今天数据没更新成功，要先说明这一点。",
+        "staleMarkets 里的市场今天数据没更新（失败或还没跑完），要先说明这一点，不要说成休市；" +
+        "dayReturn 为 null 表示这个跟踪今天没有新行情（休市或还没结算），不要说今天涨跌；" +
+        "marketDay 里是 closed 的市场今天休市。",
       prompt: `今天的事实（JSON）：\n${JSON.stringify(factsForModel(facts))}\n\n参考写法（可改写）：\n${fallback}`,
       // 推理模型的「思考」也算输出 token：额度给足、思考调低，否则正文可能是空的
       maxOutputTokens: 2000,

@@ -27,9 +27,14 @@ export interface Config {
     model: string;
     briefModel: string;
   };
-  quota: { chatMessages: number; backtests: number };
+  /** 每人每日额度；analyses = 复核、个股证据这类要 worker 组装数据的读请求（D59） */
+  quota: { chatMessages: number; backtests: number; analyses: number };
   duckdb: { memoryLimit: string; threads: number };
   backtestPoolSize: number;
+  /** 单次回测在线程里最多跑多久（毫秒），超时终止并重建线程 */
+  backtestTimeoutMs: number;
+  /** 回测线程的堆上限（MB，resourceLimits.maxOldGenerationSizeMb）；转交的价格面板不算在里面 */
+  backtestThreadMemoryMb: number;
   fetch: { concurrency: number; minIntervalMs: number };
   schedulerEnabled: boolean;
 }
@@ -65,9 +70,12 @@ export function loadConfig(): Config {
     quota: {
       chatMessages: int("QUOTA_CHAT_MESSAGES", 100),
       backtests: int("QUOTA_BACKTESTS", 50),
+      analyses: int("QUOTA_ANALYSES", 100),
     },
     duckdb: { memoryLimit: e.DUCKDB_MEMORY_LIMIT ?? "512MB", threads: int("DUCKDB_THREADS", 2) },
     backtestPoolSize: int("BACKTEST_POOL_SIZE", 1),
+    backtestTimeoutMs: int("BACKTEST_TIMEOUT_MS", 120_000),
+    backtestThreadMemoryMb: int("BACKTEST_THREAD_MEMORY_MB", 256),
     fetch: {
       concurrency: int("FETCH_CONCURRENCY", 4),
       minIntervalMs: int("FETCH_MIN_INTERVAL_MS", 50),

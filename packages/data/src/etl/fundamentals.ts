@@ -6,6 +6,7 @@
  * - 增量：按公告日查全市场近几天的新记录，只重取这些股票的全部历史（简单且不会漏改）。
  */
 import { addDays, addYears, type DateStr, type Market, marketOf, normalizeDate } from "@ivan/core";
+import { sha256Canonical } from "@ivan/core/node";
 import { hkEffectiveDate, type Period } from "../compute/financials.ts";
 import { mapLimit } from "../http.ts";
 import { emQuery, num, str, type EmRow } from "../sources/eastmoney.ts";
@@ -31,7 +32,8 @@ const HK_FIN_COLUMNS =
 const HK_PERIOD: Record<string, Period> = { "001": "FY", "002": "H1", "003": "Q1", "004": "Q3" };
 const A_PERIOD: Record<string, Period> = { "03": "Q1", "06": "H1", "09": "Q3", "12": "FY" };
 
-type FinTuple = unknown[];
+/** financials 的一行（按列序，不含表尾的 src、ver） */
+export type FinTuple = unknown[];
 
 function aFinRow(code: string, r: EmRow): FinTuple | null {
   const report = normalizeDate(str(r.REPORT_DATE));
@@ -207,20 +209,114 @@ export async function fetchShareChanges(ctx: EtlContext, code: string): Promise<
   return out;
 }
 
-async function writeFundamentals(
+/** financials 的列（键 code 之后，按表的列序；表尾的 src、ver 由写入时补） */
+const FIN_FIELDS = [
+  "report_date",
+  "period",
+  "fy_start",
+  "notice_date",
+  "eff_date",
+  "currency",
+  "revenue",
+  "np",
+  "deducted_np",
+  "revenue_yoy",
+  "np_yoy",
+  "deducted_np_yoy",
+  "roe",
+  "gross_margin",
+  "debt_ratio",
+  "ocf",
+  "equity",
+  "shares",
+] as const;
+
+/** 参与数值指纹的列：报告期、口径与数值；公告日、生效日这类推算出来的日期不算（D61） */
+const FIN_HASHED = [
+  "report_date",
+  "period",
+  "currency",
+  "revenue",
+  "np",
+  "deducted_np",
+  "revenue_yoy",
+  "np_yoy",
+  "deducted_np_yoy",
+  "roe",
+  "gross_margin",
+  "debt_ratio",
+  "ocf",
+  "equity",
+  "shares",
+] as const;
+
+function finObject(t: FinTuple): Record<(typeof FIN_FIELDS)[number], unknown> {
+  return Object.fromEntries(FIN_FIELDS.map((k, i) => [k, t[i + 1] ?? null])) as Record<
+    (typeof FIN_FIELDS)[number],
+    unknown
+  >;
+}
+
+/** 一行财报的数值指纹（全长 sha256） */
+export function finRowHash(t: FinTuple): string {
+  const o = finObject(t);
+  return sha256Canonical(FIN_HASHED.map((k) => o[k]));
+}
+
+/**
+ * 财报首见留底（D61）：没见过的（代码, 报告期, 数值指纹）追加进 financials_seen，记下今天、版本号与原始行。
+ * 要在删除重写 financials 之前、同一个 exclusive 里调用。
+ */
+async function recordFinancialsSeen(ctx: EtlContext, code: string, fin: FinTuple[]): Promise<number> {
+  if (!fin.length) return 0;
+  const seen = new Set(
+    (
+      await ctx.wh.all<{ k: string }>(
+        `SELECT report_date::VARCHAR || '|' || row_hash AS k FROM financials_seen WHERE code = $c`,
+        { c: code },
+      )
+    ).map((r) => r.k),
+  );
+  const rows: unknown[][] = [];
+  for (const t of fin) {
+    const o = finObject(t);
+    const hash = finRowHash(t);
+    const key = `${o.report_date}|${hash}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push([code, o.report_date, hash, ctx.today, ctx.ver ?? null, JSON.stringify(o)]);
+  }
+  await ctx.wh.append("financials_seen", rows);
+  return rows.length;
+}
+
+/** 写一只股票的财报与股本（整只先删后写），表尾盖上来源与版本号；导出给测试 */
+export async function writeFundamentals(
   ctx: EtlContext,
   code: string,
-  fin: unknown[][] | null,
+  fin: FinTuple[] | null,
   shares: unknown[][] | null,
 ): Promise<void> {
+  const ver = ctx.ver ?? null;
   await ctx.wh.exclusive(async () => {
     if (fin) {
+      await recordFinancialsSeen(ctx, code, fin);
       await ctx.wh.run(`DELETE FROM financials WHERE code = $c`, { c: code });
-      await ctx.wh.append("financials", fin);
+      await ctx.wh.append(
+        "financials",
+        fin.map((t) => {
+          // 按列序追加：元组长度不对，src、ver 就会落进别的列
+          if (t.length !== FIN_FIELDS.length + 1) throw new Error(`财报行有 ${t.length} 列，应为 ${FIN_FIELDS.length + 1}`);
+          return [...t, "em", ver];
+        }),
+      );
     }
     if (shares) {
       await ctx.wh.run(`DELETE FROM share_changes WHERE code = $c`, { c: code });
-      await ctx.wh.append("share_changes", shares);
+      await ctx.wh.append(
+        "share_changes",
+        shares.map((t) => [...t, "em", ver]),
+      );
     }
   });
 }

@@ -9,7 +9,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { crossSectionSelect } from "../etl/factors.ts";
 import { compileSelection } from "../query/selection.ts";
 import { Warehouse } from "../warehouse/db.ts";
-import { FACTOR_COLUMNS } from "../warehouse/schema.ts";
+import { FACTOR_COLUMNS, SCHEMA_VERSION } from "../warehouse/schema.ts";
+import { downgradeWarehouseToV2 } from "../testing/warehouse.ts";
 import { deriveFinancials, type FinRow } from "./financials.ts";
 import { computeStockFactors, KEY_COLUMNS } from "./stock-factors.ts";
 
@@ -182,6 +183,43 @@ describe("选股 SQL：行业内比较、同一行业最多 N 只、全市场市
     expect(cols.map((c) => c.name)).toEqual([...KEY_COLUMNS, ...FACTOR_COLUMNS]);
     wh.close();
   });
+
+  it("第 2 版行情仓升级到第 3 版：src、ver 补在表尾，11 列的日线行按列序落对位置", async () => {
+    const path = join(dir, "v2.duckdb");
+    let wh = await Warehouse.open(path);
+    await downgradeWarehouseToV2(wh);
+    // 旧代码按 9 列追加的日线
+    await wh.append("bars_daily", [["600000.SH", "2026-09-28", 10, 11, 9, 10.5, 1e6, 1.05e7, 1]]);
+    await wh.checkpoint();
+    wh.close();
+    wh = await Warehouse.open(path);
+    expect(await wh.meta("schema_version")).toBe(String(SCHEMA_VERSION));
+    const colsOf = async (t: string) =>
+      (
+        await wh.all<{ name: string }>(
+          `SELECT column_name AS name FROM information_schema.columns WHERE table_name = $t ORDER BY ordinal_position`,
+          { t },
+        )
+      ).map((c) => c.name);
+    expect(await colsOf("bars_daily")).toEqual([
+      "code", "date", "open", "high", "low", "close", "volume", "amount", "adj", "src", "ver",
+    ]);
+    for (const t of ["corp_actions", "index_bars", "financials", "share_changes"]) {
+      expect((await colsOf(t)).slice(-2), t).toEqual(["src", "ver"]);
+    }
+    expect((await colsOf("trade_calendar")).at(-1)).toBe("ver");
+    await wh.append("bars_daily", [
+      ["600000.SH", "2026-09-29", 10.5, 11.5, 10, 11, 2e6, 2.2e7, 1.02, "em", 7],
+    ]);
+    const rows = await wh.all(
+      `SELECT date::VARCHAR AS date, close, amount, adj, src, ver FROM bars_daily ORDER BY date`,
+    );
+    expect(rows).toEqual([
+      { date: "2026-09-28", close: 10.5, amount: 1.05e7, adj: 1, src: null, ver: null },
+      { date: "2026-09-29", close: 11, amount: 2.2e7, adj: 1.02, src: "em", ver: 7 },
+    ]);
+    wh.close();
+  });
 });
 
 describe("A 股成交量单位（D51）", () => {
@@ -208,12 +246,12 @@ describe("A 股成交量单位（D51）", () => {
     // 模拟旧库：删掉修正标记，写入旧代码产生的数据
     await wh.run(`DELETE FROM meta WHERE key LIKE 'fix:%'`);
     // 科创板腾讯日 K（没有成交额）：被放大 100 倍
-    await wh.run(`INSERT INTO bars_daily VALUES ('688981.SH', DATE '${D}', 116.56, 116.56, 116.56, 116.56, 2693540900, NULL, 1)`);
+    await wh.run(`INSERT INTO bars_daily (code, date, open, high, low, close, volume, amount, adj) VALUES ('688981.SH', DATE '${D}', 116.56, 116.56, 116.56, 116.56, 2693540900, NULL, 1)`);
     // 科创板实时报价（有成交额）：同样被放大
-    await wh.run(`INSERT INTO bars_daily VALUES ('688002.SH', DATE '${D}', 175, 175, 175, 175, 8e8, 1.4e9, 1)`);
+    await wh.run(`INSERT INTO bars_daily (code, date, open, high, low, close, volume, amount, adj) VALUES ('688002.SH', DATE '${D}', 175, 175, 175, 175, 8e8, 1.4e9, 1)`);
     // 主板（有、没有成交额）：本来就对，不该动
-    await wh.run(`INSERT INTO bars_daily VALUES ('600519.SH', DATE '${D}', 1238, 1238, 1238, 1238, 1919800, 2.373e9, 1)`);
-    await wh.run(`INSERT INTO bars_daily VALUES ('600000.SH', DATE '${D}', 10, 10, 10, 10, 5e7, NULL, 1)`);
+    await wh.run(`INSERT INTO bars_daily (code, date, open, high, low, close, volume, amount, adj) VALUES ('600519.SH', DATE '${D}', 1238, 1238, 1238, 1238, 1919800, 2.373e9, 1)`);
+    await wh.run(`INSERT INTO bars_daily (code, date, open, high, low, close, volume, amount, adj) VALUES ('600000.SH', DATE '${D}', 10, 10, 10, 10, 5e7, NULL, 1)`);
     await wh.checkpoint();
     wh.close();
     const vols = async (w: Warehouse) =>
@@ -224,7 +262,7 @@ describe("A 股成交量单位（D51）", () => {
     const once = await vols(wh);
     expect(once).toEqual({ "600000.SH": 5e7, "600519.SH": 1919800, "688002.SH": 8e6, "688981.SH": 26935409 });
     // 修正之后按新口径写入的科创板数据
-    await wh.run(`INSERT INTO bars_daily VALUES ('688981.SH', DATE '2026-09-29', 117, 117, 117, 117, 12244298, NULL, 1)`);
+    await wh.run(`INSERT INTO bars_daily (code, date, open, high, low, close, volume, amount, adj) VALUES ('688981.SH', DATE '2026-09-29', 117, 117, 117, 117, 12244298, NULL, 1)`);
     await wh.checkpoint();
     wh.close();
     wh = await Warehouse.open(path);
@@ -248,7 +286,7 @@ describe("按大盘状态切换排序（D53）", () => {
       if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) days.push(d.toISOString().slice(0, 10));
     }
     const closes = days.map((_, i) => (i < 20 ? 100 : i === 20 ? 80 : 130));
-    for (let i = 0; i < days.length; i++) await wh.run(`INSERT INTO index_bars VALUES ('csi300', DATE '${days[i]}', ${closes[i]}, false)`);
+    for (let i = 0; i < days.length; i++) await wh.run(`INSERT INTO index_bars (sym, date, close, provisional) VALUES ('csi300', DATE '${days[i]}', ${closes[i]}, false)`);
     const [d19, d20, d21] = [days[19]!, days[20]!, days[21]!];
     const after = "2026-06-30"; // 指数没数据的日子：用之前最近一个交易日（d21，强势）
     const weak = await weakRegimeDates(wh, "A", [d19, d20, d21, after], 20);

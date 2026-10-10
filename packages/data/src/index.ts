@@ -6,20 +6,45 @@ export * as emkline from "./sources/emkline.ts";
 export * as exchanges from "./sources/exchanges.ts";
 export * as csindex from "./sources/csindex.ts";
 export * as chinamoney from "./sources/chinamoney.ts";
-export { Warehouse, sqlCodeList, sqlDateList, type WarehouseOptions } from "./warehouse/db.ts";
-export { FACTOR_COLUMNS, SCHEMA_VERSION } from "./warehouse/schema.ts";
+export {
+  MAINTENANCE_V3,
+  Warehouse,
+  sqlCodeList,
+  sqlDateList,
+  type WarehouseOptions,
+} from "./warehouse/db.ts";
+export {
+  FACTOR_COLUMNS,
+  PROVENANCE_TABLES,
+  SCHEMA_VERSION,
+  SOURCE_LABEL,
+} from "./warehouse/schema.ts";
 export type { EtlContext, LogFn, SecurityRow } from "./etl/context.ts";
 export { loadSecurities } from "./etl/context.ts";
 export {
   backfill,
   BACKFILL_STEPS,
   type BackfillStep,
+  beginDataVersion,
+  commitDataVersion,
   daily,
   type DailyResult,
+  type DataVersionKind,
+  type DataVersionStatus,
   DEFAULT_SINCE,
-  recordDataVersion,
   weeklyCheck,
 } from "./etl/pipeline.ts";
+export {
+  ATTR_LABEL,
+  type AttrCapture,
+  attrAsOf,
+  attrFirstDate,
+  CAPTURE_ATTRS,
+  type CaptureStatus,
+  captureStatus,
+  type SnapshotResult,
+  upsertSnapshot,
+} from "./etl/snapshots.ts";
 export { computeFactors } from "./etl/factors.ts";
 export { INDEXES, latestTradeDates } from "./etl/reference.ts";
 export * from "./compute/adjust.ts";
@@ -43,6 +68,14 @@ export {
   type BuildOptions,
   type BuiltInput,
   buildSimInput,
+  committedAsOf,
   type DataVersionInfo,
+  dataVersionState,
   latestDataVersion,
 } from "./query/backtest.ts";
+export {
+  HASH_VERSION,
+  type HashRule,
+  hashSimInput,
+  type InputHashes,
+} from "./query/input-hash.ts";

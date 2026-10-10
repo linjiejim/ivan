@@ -450,24 +450,39 @@ export function CopyButton({
 }
 
 /** 文字链接（花青）：「完整报告 ›」这类去别处看的入口 */
-export function TextLink({
-  to,
-  children,
-  className,
-}: {
-  to: string;
-  children: ReactNode;
-  className?: string;
-}) {
+const TEXT_LINK =
+  "group/link inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-medium text-accent transition-colors hover:text-accent-strong";
+
+/**
+ * 文字链接。站内跳转用 `to`；下载文件（如运行卡）用 `href` + `download`，不带箭头、前面可放图标。
+ */
+export function TextLink(
+  props:
+    | { to: string; children: ReactNode; className?: string }
+    | {
+        href: string;
+        download: string;
+        icon?: Icon;
+        children: ReactNode;
+        className?: string;
+      },
+) {
+  if ("href" in props) {
+    const Icon = props.icon;
+    return (
+      <a
+        href={props.href}
+        download={props.download}
+        className={cx(TEXT_LINK, "gap-1", props.className)}
+      >
+        {Icon && <Icon size={14} />}
+        {props.children}
+      </a>
+    );
+  }
   return (
-    <Link
-      to={to}
-      className={cx(
-        "group/link inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-medium text-accent transition-colors hover:text-accent-strong",
-        className,
-      )}
-    >
-      {children}
+    <Link to={props.to} className={cx(TEXT_LINK, props.className)}>
+      {props.children}
       <span
         aria-hidden
         className="inline-block transition-transform duration-150 ease-out group-hover/link:translate-x-0.5"

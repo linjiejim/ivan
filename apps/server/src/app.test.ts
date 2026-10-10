@@ -408,3 +408,290 @@ describe("LLM 用量（spec §10）", () => {
     expect((u.json as unknown as Array<{ id: string }>).some((x) => x.id === "system")).toBe(false);
   });
 });
+
+describe("运行合约（D55、D57、D59）", () => {
+  async function presetVersion(): Promise<{ strategyId: string; versionId: string }> {
+    const s = await call("/api/strategies/from-preset", {
+      body: { presetId: "hk-dividend" },
+      cookie: admin,
+    });
+    return { strategyId: String(s.json.strategyId), versionId: String(s.json.versionId) };
+  }
+
+  /** 直接写一条跑完的回测（server 测试没有 worker） */
+  function doneRun(v: { strategyId: string; versionId: string }, params: Record<string, unknown>) {
+    const id = `r_test_${Math.random().toString(36).slice(2, 10)}`;
+    handle.sqlite
+      .prepare(
+        `INSERT INTO runs (id, user_id, strategy_id, version_id, kind, params, status, engine_version, finished_at)
+         VALUES (?, ?, ?, ?, 'backtest', ?, 'done', '1.2.0', ?)`,
+      )
+      .run(id, adminId, v.strategyId, v.versionId, JSON.stringify(params), Date.now());
+    return id;
+  }
+
+  const clearJobs = () =>
+    handle.sqlite.prepare(`UPDATE jobs SET status = 'done' WHERE user_id = ?`).run(adminId);
+
+  it("成交假设里有不认识的设置：400 和中文说明；合法的存成完整对象", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    const bad = await call("/api/runs", {
+      body: { versionId: v.versionId, start: "2020-01-01", exec: { foo: 1 } },
+      cookie: admin,
+    });
+    expect(bad.status).toBe(400);
+    expect(String(bad.json.error)).toBe("成交假设里有不认识的设置：foo");
+    const ok = await call("/api/runs", {
+      body: { versionId: v.versionId, start: "2020-01-01" },
+      cookie: admin,
+    });
+    expect(ok.status).toBe(200);
+    const row = handle.sqlite
+      .prepare(`SELECT params FROM runs WHERE id = ?`)
+      .get(ok.json.runId) as {
+      params: string;
+    };
+    expect(JSON.parse(row.params).exec).toEqual({ v: 1 });
+    clearJobs();
+  });
+
+  it("复核数据：排一个 verify 任务、计入数据查询额度；同时第二个 → 409；不占回测队列名额", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    const runId = doneRun(v, {
+      start: "2020-01-01",
+      end: "2024-12-31",
+      capital: 1e6,
+      oosMonths: 12,
+    });
+    const used = async () =>
+      ((await call("/api/me", { cookie: admin })).json.usage as { analyses: number }).analyses;
+    const before = await used();
+    const r = await call(`/api/runs/${runId}/verify`, { method: "POST", body: {}, cookie: admin });
+    expect(r.status).toBe(202);
+    expect(r.json.status).toBe("queued");
+    expect(await used()).toBe(before + 1);
+    const job = handle.sqlite
+      .prepare(`SELECT kind, payload FROM jobs WHERE id = ?`)
+      .get(r.json.jobId) as { kind: string; payload: string };
+    expect(job.kind).toBe("verify");
+    expect(JSON.parse(job.payload)).toEqual({ runId });
+    const run = (await call(`/api/runs/${runId}`, { cookie: admin })).json;
+    expect(run.verify).toMatchObject({ status: "queued", kind: "input" });
+    expect(run.exec).toEqual({ v: 1 });
+
+    const again = await call(`/api/runs/${runId}/verify`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(again.status).toBe(409);
+    expect(String(again.json.error)).toBe("上一次复核还没结束");
+    expect(await used()).toBe(before + 1);
+    // 排队中的复核不占 MAX_ACTIVE_JOBS：照样能提交回测
+    const bt = await call("/api/runs", {
+      body: { versionId: v.versionId, start: "2020-01-01" },
+      cookie: admin,
+    });
+    expect(bt.status).toBe(200);
+    clearJobs();
+  });
+
+  it("数据查询额度用完 → 429", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    const runId = doneRun(v, {
+      start: "2020-01-01",
+      end: "2024-12-31",
+      capital: 1e6,
+      oosMonths: 12,
+    });
+    await call(`/api/admin/users/${adminId}/quota`, { body: { analyses: 0 }, cookie: admin });
+    const r = await call(`/api/runs/${runId}/verify`, { method: "POST", body: {}, cookie: admin });
+    expect(r.status).toBe(429);
+    expect(String(r.json.error)).toMatch(/数据查询额度/);
+    await call(`/api/admin/users/${adminId}/quota`, { body: { analyses: null }, cookie: admin });
+  });
+
+  it("完整重跑：计入回测额度，新建 kind = reproduce 的运行，参数照抄；不计入试错次数", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    const params = {
+      start: "2020-01-01",
+      end: "2024-12-31",
+      capital: 1e6,
+      oosMonths: 12,
+      exec: { v: 1 },
+      priorVersions: 2,
+    };
+    const runId = doneRun(v, params);
+    const used = async () =>
+      ((await call("/api/me", { cookie: admin })).json.usage as { backtests: number }).backtests;
+    const before = await used();
+    const r = await call(`/api/runs/${runId}/reproduce`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(r.status).toBe(200);
+    expect(await used()).toBe(before + 1);
+    const row = handle.sqlite
+      .prepare(`SELECT kind, params, version_id FROM runs WHERE id = ?`)
+      .get(r.json.runId) as { kind: string; params: string; version_id: string };
+    expect(row.kind).toBe("reproduce");
+    expect(row.version_id).toBe(v.versionId);
+    expect(JSON.parse(row.params)).toEqual({ ...params, reproOf: runId });
+    const job = handle.sqlite.prepare(`SELECT kind FROM jobs WHERE id = ?`).get(r.json.jobId) as {
+      kind: string;
+    };
+    expect(job.kind).toBe("backtest");
+    // 重跑不算「同一区间回测过的版本」：另一个版本的回测看到的试错次数里没有它
+    const { priorVersionsOnPeriod } = await import("./services/runs.ts");
+    expect(priorVersionsOnPeriod(v.strategyId, params as never, "v_other")).toBe(1);
+    clearJobs();
+  });
+
+  it("完整重跑的终点钉在原运行卡记下的那天；复核与重跑互斥；重跑本身不能复核", async () => {
+    clearJobs();
+    const v = await presetVersion();
+    const runId = doneRun(v, {
+      start: "2020-01-01",
+      end: "2026-10-05",
+      capital: 1e6,
+      oosMonths: 0,
+    });
+    handle.sqlite
+      .prepare(`UPDATE runs SET card = ?, card_hash = 'c' WHERE id = ?`)
+      .run(JSON.stringify({ schema: 1, params: { end: "2026-09-30" } }), runId);
+    const verify = () =>
+      call(`/api/runs/${runId}/verify`, { method: "POST", body: {}, cookie: admin });
+    const reproduce = () =>
+      call(`/api/runs/${runId}/reproduce`, { method: "POST", body: {}, cookie: admin });
+
+    // 复核还在排队：不让重跑
+    expect((await verify()).status).toBe(202);
+    const blocked = await reproduce();
+    expect(blocked.status).toBe(409);
+    expect(String(blocked.json.error)).toMatch(/复核还没结束/);
+    clearJobs();
+
+    const r = await reproduce();
+    expect(r.status).toBe(200);
+    const row = handle.sqlite.prepare(`SELECT params FROM runs WHERE id = ?`).get(r.json.runId) as {
+      params: string;
+    };
+    expect(JSON.parse(row.params)).toMatchObject({ end: "2026-09-30", reproOf: runId });
+    // 重跑还没跑完：不让复核，也不让再重跑一次
+    const v2 = await verify();
+    expect(v2.status).toBe(409);
+    expect(String(v2.json.error)).toMatch(/完整重跑还没结束/);
+    expect((await reproduce()).status).toBe(409);
+
+    // 重跑跑完了：它自己上的 verify 是「和原回测比」的结果，不能被复核盖掉
+    handle.sqlite.prepare(`UPDATE runs SET status = 'done' WHERE id = ?`).run(r.json.runId);
+    const onRepro = await call(`/api/runs/${r.json.runId}/verify`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(onRepro.status).toBe(400);
+    expect(String(onRepro.json.error)).toBe("重跑的结果请到原回测上复核");
+    clearJobs();
+  });
+
+  it("基准回测的成交假设读不懂：上线提案给 409 和中文说明，不是 500", async () => {
+    const v = await presetVersion();
+    doneRun(v, {
+      start: "2020-01-01",
+      end: "2024-12-31",
+      capital: 1e6,
+      oosMonths: 12,
+      exec: { v: 9 },
+    });
+    const p = await call("/api/trackings/propose", {
+      body: { versionId: v.versionId },
+      cookie: admin,
+    });
+    expect(p.status).toBe(409);
+    expect(String(p.json.error)).toBe("基准回测的成交假设读不懂，请先重新回测");
+  });
+
+  it("下载运行卡：没有卡的旧回测 404，有卡的作为附件返回", async () => {
+    const v = await presetVersion();
+    const runId = doneRun(v, {
+      start: "2020-01-01",
+      end: "2024-12-31",
+      capital: 1e6,
+      oosMonths: 12,
+    });
+    expect((await call(`/api/runs/${runId}/card`, { cookie: admin })).status).toBe(404);
+    handle.sqlite
+      .prepare(`UPDATE runs SET card = ?, card_hash = ? WHERE id = ?`)
+      .run(JSON.stringify({ schema: 1, cardHash: "abc" }), "abc", runId);
+    const res = await app.request(`/api/runs/${runId}/card`, { headers: { cookie: admin } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-disposition")).toBe(
+      `attachment; filename="ivan-run-${runId}.json"`,
+    );
+    expect(await res.json()).toEqual({ schema: 1, cardHash: "abc" });
+  });
+
+  it("上线跟踪抄基准回测的成交假设，提案里写明成交假设", async () => {
+    const v = await presetVersion();
+    doneRun(v, { start: "2020-01-01", end: "2024-12-31", capital: 1e6, oosMonths: 12 });
+    const p = await call("/api/trackings/propose", {
+      body: { versionId: v.versionId },
+      cookie: admin,
+    });
+    expect(p.status).toBe(200);
+    expect(p.json.exec).toEqual({ v: 1 });
+    expect(p.json.legacyBaseline).toBe(false);
+    const d = handle.sqlite
+      .prepare(`SELECT summary FROM drafts WHERE id = ?`)
+      .get(p.json.draftId) as {
+      summary: string;
+    };
+    expect(d.summary).toContain("成交假设：开盘价成交，不计滑点（旧口径）");
+    const ok = await call(`/api/drafts/${p.json.draftId}/confirm`, {
+      method: "POST",
+      body: {},
+      cookie: admin,
+    });
+    expect(ok.status).toBe(200);
+    const t = handle.sqlite
+      .prepare(`SELECT exec_config FROM trackings WHERE id = ?`)
+      .get(ok.json.trackingId) as { exec_config: string };
+    expect(JSON.parse(t.exec_config)).toEqual({ v: 1 });
+    const view = await call(`/api/trackings/${ok.json.trackingId}`, { cookie: admin });
+    expect(view.json.execText).toBe("开盘价成交，不计滑点（旧口径）");
+  });
+
+  it("管理员改额度只动提交的那几项；/api/me 带数据查询额度", async () => {
+    await call(`/api/admin/users/${adminId}/quota`, { body: { backtests: 7 }, cookie: admin });
+    await call(`/api/admin/users/${adminId}/quota`, { body: { analyses: 5 }, cookie: admin });
+    const me = await call("/api/me", { cookie: admin });
+    expect(me.json.quota).toMatchObject({
+      backtests: 7,
+      analyses: 5,
+      chatMessages: cfg.quota.chatMessages,
+    });
+    expect(me.json.usage).toHaveProperty("analyses");
+    const bad = await call(`/api/admin/users/${adminId}/quota`, {
+      body: { analyses: -1 },
+      cookie: admin,
+    });
+    expect(bad.status).toBe(400);
+    await call(`/api/admin/users/${adminId}/quota`, {
+      body: { backtests: null, analyses: null },
+      cookie: admin,
+    });
+    const me2 = await call("/api/me", { cookie: admin });
+    expect(me2.json.quota).toMatchObject({
+      backtests: cfg.quota.backtests,
+      analyses: cfg.quota.analyses,
+    });
+    const usage = await call("/api/admin/usage", { cookie: admin });
+    expect((usage.json as unknown as Array<Record<string, unknown>>)[0]).toHaveProperty("analyses");
+  });
+});

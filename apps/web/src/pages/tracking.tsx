@@ -46,7 +46,7 @@ import {
   tone,
 } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { Check, TrackingChart, TrackingView } from "../lib/types.ts";
+import type { Check, TrackingChart, TrackingSummary, TrackingView } from "../lib/types.ts";
 
 type TrackingDetail = TrackingView & {
   days: Array<{ date: string; nav: number; bench: number; cash: number; positions: number }>;
@@ -100,7 +100,7 @@ export function TrackingPage() {
     checks?: Check[];
     waitingForStart?: boolean;
     dataAsOf?: string;
-    replay?: { navDrift: number; benchDrift: number; firstDrift: string | null; at: string };
+    replay?: NonNullable<TrackingSummary["replay"]>;
     /** 仓位控制（D52）：当前仓位系数与下一个交易日要调到的系数 */
     exposure?: { current: number; next: number } | null;
   };
@@ -134,6 +134,7 @@ export function TrackingPage() {
               <span className="font-mono">{t.startDate}</span> 上线，已跟踪{" "}
               <span className="tabular font-medium text-ink-2">{t.days.length}</span> 天
             </span>
+            {t.execText && <Tag>成交假设：{t.execText}</Tag>}
             <TextLink to={`/strategies/${t.strategyId}`}>策略详情</TextLink>
           </>
         }
@@ -227,8 +228,17 @@ export function TrackingPage() {
         )}
         {drift && (
           <p className="mt-3 text-xs text-muted">
-            {drift.at} 结算时发现数据被修订过（最早影响 {drift.firstDrift}：净值 {drift.navDrift}{" "}
-            天、基准 {drift.benchDrift} 天），曲线已按最新数据重算。
+            {drift.causeText ? (
+              <>
+                {drift.at} 结算时重放与上次不一致：{drift.causeText}；净值 {drift.navDrift} 天、基准{" "}
+                {drift.benchDrift} 天不一致，曲线已按最新数据重算。
+              </>
+            ) : (
+              <>
+                {drift.at} 结算时发现数据被修订过（最早影响 {drift.firstDrift}：净值{" "}
+                {drift.navDrift} 天、基准 {drift.benchDrift} 天），曲线已按最新数据重算。
+              </>
+            )}
           </p>
         )}
       </Card>

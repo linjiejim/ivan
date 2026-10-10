@@ -3,16 +3,20 @@
  */
 import { type Market, toCode, validateSpec } from "@ivan/core";
 import {
+  captureStatus,
+  committedAsOf,
+  dataVersionState,
   FACTOR_COLUMNS,
   latestDataVersion,
   screenOn,
   sqlCodeList,
   weakRegimeDates,
 } from "@ivan/data";
-import { jobs } from "@ivan/db";
+import { computeBlocked, jobs } from "@ivan/db";
 import { and, desc, eq, like } from "drizzle-orm";
 import { Hono } from "hono";
-import { env } from "./env.ts";
+import { env, todayOf } from "./env.ts";
+import { marketDayStatus } from "./market-day.ts";
 import { wake } from "./runner.ts";
 
 export function createInternalApp() {
@@ -29,7 +33,20 @@ export function createInternalApp() {
     return c.json({ error: err.message }, 500);
   });
 
-  app.get("/internal/health", (c) => c.json({ ok: true }));
+  // 维护状态（行情仓还没升级到第 3 版，D76）：读行情仓的接口一律 503；健康检查、数据状态、唤醒照常
+  const maintenanceSafe = new Set([
+    "/internal/health",
+    "/internal/jobs/kick",
+    "/internal/data-status",
+  ]);
+  app.use("/internal/*", async (c, next) => {
+    const m = env().wh.maintenance;
+    if (m && !maintenanceSafe.has(c.req.path)) return c.json({ error: m }, 503);
+    return next();
+  });
+
+  // 部署健康检查只看 200：维护状态也是「活着」，带上说明
+  app.get("/internal/health", (c) => c.json({ ok: true, maintenance: env().wh.maintenance }));
 
   app.post("/internal/jobs/kick", (c) => {
     wake();
@@ -38,6 +55,9 @@ export function createInternalApp() {
 
   app.get("/internal/data-status", async (c) => {
     const { wh, app: db } = env();
+    const blocked = computeBlocked(db.sqlite);
+    const computePaused = blocked ? { reason: blocked.kind, since: blocked.since } : null;
+    if (wh.maintenance) return c.json({ markets: [], maintenance: wh.maintenance, computePaused });
     const markets = [];
     for (const m of ["A", "HK"] as Market[]) {
       const v = await latestDataVersion(wh, m);
@@ -47,9 +67,20 @@ export function createInternalApp() {
         .where(and(eq(jobs.kind, "etl"), like(jobs.payload, `%"market":"${m}"%`)))
         .orderBy(desc(jobs.createdAt))
         .get();
-      markets.push({ market: m, asOf: v.asOf, dataVersion: v.id, lastEtl: last ?? null });
+      markets.push({
+        market: m,
+        asOf: v.asOf,
+        dataVersion: v.id,
+        lastEtl: last ?? null,
+        // 今天的状态（D78）：已更新 / 休市 / 没更新 / 进行中
+        day: await marketDayStatus(m),
+        // 正在写的版本、上一个版本的结果（D60）
+        ...(await dataVersionState(wh, m)),
+        // 点时数据的采集情况（D61）
+        capture: await captureStatus(wh, m, todayOf()),
+      });
     }
-    return c.json({ markets });
+    return c.json({ markets, maintenance: null, computePaused });
   });
 
   app.post("/internal/screen", async (c) => {
@@ -57,11 +88,8 @@ export function createInternalApp() {
     const v = validateSpec(b.spec);
     if (!v.spec) return c.json({ error: v.errors.join("；") }, 400);
     const { wh } = env();
-    const date =
-      b.date ??
-      (await wh.scalar<string>(`SELECT max(date)::VARCHAR FROM factors_daily WHERE market = $m`, {
-        m: v.spec.market,
-      }));
+    // 默认选最新的已提交交易日（D60），不读还没提交的数据
+    const date = b.date ?? (await committedAsOf(wh, v.spec.market));
     if (!date) return c.json({ error: "行情仓还没有数据" }, 400);
     const rows = await screenOn(wh, v.spec, date, Math.min(Math.max(b.limit ?? 30, 1), 100));
     // 按大盘状态切换排序的策略（D53）：告诉前端这天用的是哪套排序

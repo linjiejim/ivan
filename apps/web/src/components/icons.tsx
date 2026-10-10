@@ -40,6 +40,9 @@ export {
   ArrowsClockwiseIcon as IconRefresh,
   UploadSimpleIcon as IconImport,
   CopyIcon as IconCopy,
+  SealCheckIcon as IconVerify, // 复核数据（只比输入指纹）
+  ArrowCounterClockwiseIcon as IconReproduce, // 完整重跑
+  DownloadSimpleIcon as IconDownload,
   LinkSimpleIcon as IconLink,
   KeyIcon as IconKey,
   ArrowUpIcon as IconSend,

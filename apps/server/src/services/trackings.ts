@@ -1,7 +1,18 @@
 /**
  * 向前跟踪（spec §7）：上线只能经草稿确认（D4、验收 6）；结算由 worker 每晚从起点重放（D13）。
  */
-import { addDays, BENCHMARKS, benchmarkOf, type Metrics, todayCN, weekday } from "@ivan/core";
+import {
+  addDays,
+  BENCHMARKS,
+  benchmarkOf,
+  defaultExec,
+  describeExec,
+  isLegacyExec,
+  type Metrics,
+  resolveExec,
+  todayCN,
+  weekday,
+} from "@ivan/core";
 import {
   drafts,
   newId,
@@ -17,7 +28,7 @@ import type { SeriesPoint } from "@ivan/core";
 import { env } from "../env.ts";
 import { AppError, notFound } from "../lib/errors.ts";
 import { downsample, latestDoneRun } from "./runs.ts";
-import { getVersion } from "./strategies.ts";
+import { getVersion, trackingExec } from "./strategies.ts";
 
 /** 下一个工作日（节假日由 worker 按真实交易日历顺延） */
 function nextWeekday(d: string): string {
@@ -39,6 +50,10 @@ export function proposeTracking(
   if (!(capital >= 10_000)) throw new AppError(400, "跟踪资金至少 1 万");
   const baseline = latestDoneRun(userId, version.id);
   const startDate = nextWeekday(todayCN());
+  const market = version.spec.market;
+  const exec = trackingExec(userId, baseline?.id ?? null, market);
+  // 基准回测是旧口径、而这个市场已经有更新的口径（R2 起）：上线后会沿用旧口径，卡片上说清楚
+  const legacyBaseline = !!baseline && isLegacyExec(exec) && !isLegacyExec(defaultExec(market));
   const draftId = newId("d_");
   db.insert(drafts)
     .values({
@@ -48,7 +63,10 @@ export function proposeTracking(
       strategyId: strategy.id,
       baseVersionId: version.id,
       payload: { versionId: version.id, startDate, capital, baselineRunId: baseline?.id ?? null },
-      summary: `上线跟踪「${strategy.name}」v${version.n}，${startDate} 起，模拟资金 ${capital.toLocaleString()}`,
+      summary:
+        `上线跟踪「${strategy.name}」v${version.n}，${startDate} 起，模拟资金 ${capital.toLocaleString()}` +
+        `，成交假设：${describeExec(exec)}` +
+        (legacyBaseline ? "。基准回测用的是旧口径，上线后也会沿用；建议先按新口径重新回测" : ""),
       threadId: input.threadId ?? null,
     })
     .run();
@@ -62,10 +80,23 @@ export function proposeTracking(
     capital,
     baselineRunId: baseline?.id ?? null,
     hasBaseline: !!baseline,
+    exec,
+    execText: describeExec(exec),
+    legacyBaseline,
   };
 }
 
 type TrackingRow = typeof trackings.$inferSelect;
+
+/** 跟踪锁定的成交假设与中文摘要；读不懂时给 null，不让整页报错 */
+function execView(stored: unknown) {
+  try {
+    const e = resolveExec(stored);
+    return { execConfig: e, execText: describeExec(e) };
+  } catch {
+    return { execConfig: null, execText: null };
+  }
+}
 
 function view(t: TrackingRow, name: string) {
   const excess = t.lastNav && t.lastBench ? t.lastNav / t.lastBench - 1 : null;
@@ -85,6 +116,7 @@ function view(t: TrackingRow, name: string) {
     deviationPct: t.deviationPct,
     baselineRunId: t.baselineRunId,
     summary: t.summary,
+    ...execView(t.execConfig),
     createdAt: t.createdAt,
   };
 }

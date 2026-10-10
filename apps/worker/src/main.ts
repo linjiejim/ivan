@@ -9,10 +9,16 @@ import { createInternalApp } from "./internal.ts";
 import { enqueue, recoverStale, runLoop, stopRunner } from "./runner.ts";
 import { startPool } from "./sim-pool.ts";
 
-const e = await initEnv();
+const e = await initEnv({
+  migrate: process.env.WAREHOUSE_MIGRATE_ON_BOOT === "1" ? "auto" : "light",
+});
+if (e.wh.maintenance) console.log(`行情仓维护中：${e.wh.maintenance}（调度不排任务，任务不认领）`);
 const stale = recoverStale();
 if (stale) console.log(`上次有 ${stale} 个任务没跑完，已标为失败`);
-startPool(e.cfg.backtestPoolSize);
+startPool(e.cfg.backtestPoolSize, {
+  timeoutMs: e.cfg.backtestTimeoutMs,
+  maxOldGenMb: e.cfg.backtestThreadMemoryMb,
+});
 
 const server = serve(
   { fetch: createInternalApp().fetch, port: e.cfg.workerPort, hostname: "127.0.0.1" },
@@ -20,7 +26,8 @@ const server = serve(
     console.log(`ivan-worker 内部接口：127.0.0.1:${info.port}（行情仓 ${e.cfg.warehousePath}）`),
 );
 
-if (e.cfg.schedulerEnabled) {
+// 维护状态（行情仓还没升级）不排任务：升级完 scripts/migrate.sh 会重启 worker
+if (e.cfg.schedulerEnabled && !e.wh.maintenance) {
   const tz = { timezone: "Asia/Shanghai" };
   // spec §8：17:30 A 股、18:00 港股（交易日判断在 daily() 里），19:00 简报
   new Cron("30 17 * * 1-5", tz, () => void enqueue("etl", { market: "A" }));

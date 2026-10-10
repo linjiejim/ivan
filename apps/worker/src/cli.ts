@@ -10,19 +10,29 @@
  *                                              回测一份策略（CLI 版，不写应用库）
  *   screen <spec.json> [--date 日期] [--limit 30] 按策略在某天选股
  *   doctor                                    体检：数据源连通性 + 行情仓各表的规模与最新日期 + 失败的回填项
+ *   migrate                                   升级行情仓表结构（要改大表时 worker 不自己做，见 scripts/migrate.sh）
  *   sql "<SQL>"                               对行情仓执行只读查询（调试用）
  *
  * 注意：worker 服务运行时独占行情仓文件，命令行要在 worker 停掉时跑（或通过管理页触发任务）。
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { loadConfig } from "@ivan/core/config";
-import { DEFAULT_PARAMS, type Market, todayCN, validateSpec } from "@ivan/core";
+import {
+  DEFAULT_PARAMS,
+  defaultExec,
+  describeExec,
+  type Market,
+  todayCN,
+  validateSpec,
+} from "@ivan/core";
 import { simulate } from "@ivan/engine";
 import {
   backfill,
   BACKFILL_STEPS,
   type BackfillStep,
   buildSimInput,
+  committedAsOf,
+  hashSimInput,
   computeFactors,
   screenOn,
   daily,
@@ -30,6 +40,7 @@ import {
   Http,
   renderProbeMarkdown,
   runProbe,
+  SCHEMA_VERSION,
   Warehouse,
 } from "@ivan/data";
 
@@ -47,7 +58,8 @@ function market(): Market {
   return m;
 }
 
-async function openCtx(): Promise<EtlContext> {
+/** ETL 上下文 + 具体的 Http（上下文里只是 HttpLike，统计要从具体实例拿）。 */
+async function openCtx(): Promise<{ ctx: EtlContext; http: Http }> {
   const cfg = loadConfig();
   const wh = await Warehouse.open(cfg.warehousePath, cfg.duckdb);
   const klineMs = process.env.KLINE_INTERVAL_MS ? Number(process.env.KLINE_INTERVAL_MS) : undefined;
@@ -59,12 +71,13 @@ async function openCtx(): Promise<EtlContext> {
       : {}),
   });
   const t0 = Date.now();
-  return {
+  const ctx: EtlContext = {
     wh,
     http,
     today: flag("today") ?? todayCN(),
     log: (m) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0).padStart(5)}s] ${m}`),
   };
+  return { ctx, http };
 }
 
 async function main() {
@@ -84,7 +97,7 @@ async function main() {
       return;
     }
     case "backfill": {
-      const ctx = await openCtx();
+      const { ctx, http } = await openCtx();
       const steps = flag("steps")?.split(",") as BackfillStep[] | undefined;
       for (const s of steps ?? []) {
         if (!BACKFILL_STEPS.includes(s))
@@ -98,20 +111,20 @@ async function main() {
         top: flag("top") ? Number(flag("top")) : undefined,
         force: has("force"),
       });
-      printHttp(ctx);
+      printHttp(http);
       ctx.wh.close();
       return;
     }
     case "daily": {
-      const ctx = await openCtx();
+      const { ctx, http } = await openCtx();
       const r = await daily(ctx, market());
       console.log(r);
-      printHttp(ctx);
+      printHttp(http);
       ctx.wh.close();
       return;
     }
     case "factors": {
-      const ctx = await openCtx();
+      const { ctx } = await openCtx();
       await computeFactors(ctx, market(), flag("from") ?? "2013-01-01", {
         codes: flag("codes")?.split(","),
       });
@@ -131,14 +144,8 @@ async function main() {
       const cfg = loadConfig();
       const wh = await Warehouse.open(cfg.warehousePath, { ...cfg.duckdb, readOnly: true });
       if (cmd === "screen") {
-        const date =
-          flag("date") ??
-          (await wh.scalar<string>(
-            `SELECT max(date)::VARCHAR FROM factors_daily WHERE market = $m`,
-            {
-              m: v.spec.market,
-            },
-          ))!;
+        const date = flag("date") ?? (await committedAsOf(wh, v.spec.market));
+        if (!date) throw new Error("行情仓还没有提交过的数据，先运行回填");
         const rows = await screenOn(wh, v.spec, date, Number(flag("limit") ?? 30));
         console.log(`${date} 选股 ${rows.length} 只`);
         console.table(
@@ -160,14 +167,20 @@ async function main() {
         end: flag("end") ?? todayCN(),
         capital: Number(flag("capital") ?? DEFAULT_PARAMS.capital),
         oosMonths: Number(flag("oos") ?? DEFAULT_PARAMS.oosMonths),
+        // 和网页回测一样显式传成交假设（D55），不让引擎悄悄按缺省跑
+        exec: defaultExec(v.spec.market),
       });
       const t1 = Date.now();
+      const hashes = hashSimInput(built.input);
       const r = simulate(built.input);
       const t2 = Date.now();
       const m = r.metrics;
       const p = (x: number) => `${(x * 100).toFixed(2)}%`;
       console.log(
         `区间 ${m.start} ~ ${m.end}（数据版本 ${built.dataVersion.id}，截至 ${built.dataVersion.asOf}）`,
+      );
+      console.log(
+        `引擎 ${r.engineVersion}，成交假设：${describeExec(r.exec)}，输入指纹 ${hashes.inputHash.slice(0, 8)}`,
       );
       console.log(
         `组装 ${t1 - t0}ms（决策日 ${built.stats.decisionDates}，股票 ${built.stats.codes}，日线 ${built.stats.priceRows} 行），模拟 ${t2 - t1}ms，内存 ${(process.memoryUsage().rss / 1e6).toFixed(0)}MB`,
@@ -270,11 +283,16 @@ async function main() {
           `SELECT market, count(*) AS 因子行数, max(date)::VARCHAR AS 最新 FROM factors_daily GROUP BY market ORDER BY market`,
         ),
       );
-      console.table(
-        await q(
-          `SELECT id, market, as_of::VARCHAR AS as_of, kind, finished_at::VARCHAR AS 完成 FROM data_versions ORDER BY id DESC LIMIT 4`,
-        ),
-      );
+      if (await wh.pendingHeavyMigration()) {
+        console.log("\n⚠️  行情仓还是第 2 版，需要升级：bash scripts/migrate.sh");
+      } else {
+        console.table(
+          await q(
+            `SELECT id, market, as_of::VARCHAR AS as_of, kind, coalesce(status, 'ok') AS 状态,
+                    finished_at::VARCHAR AS 完成 FROM data_versions ORDER BY id DESC LIMIT 4`,
+          ),
+        );
+      }
       const failed = await q(
         `SELECT task, count(*) AS n FROM etl_progress WHERE status = 'failed' GROUP BY task`,
       );
@@ -283,6 +301,18 @@ async function main() {
         console.table(failed);
       }
       wh.close();
+      return;
+    }
+    case "migrate": {
+      // 改大表的升级（第 3 版在约 2500 万行日线上补列）：worker 要先停掉，scripts/migrate.sh 负责停与拉起
+      const cfg = loadConfig();
+      const t0 = Date.now();
+      const wh = await Warehouse.open(cfg.warehousePath, { ...cfg.duckdb, migrate: "auto" });
+      await wh.checkpoint();
+      wh.close();
+      console.log(
+        `行情仓已升级到第 ${SCHEMA_VERSION} 版，用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒`,
+      );
       return;
     }
     case "sql": {
@@ -295,14 +325,14 @@ async function main() {
     }
     default:
       console.log(
-        "用法：pnpm ivan <probe|backfill|daily|factors|backtest|screen|sql> [参数]，详见 apps/worker/src/cli.ts",
+        "用法：pnpm ivan <probe|backfill|daily|factors|backtest|screen|doctor|migrate|sql> [参数]，详见 apps/worker/src/cli.ts",
       );
       process.exitCode = cmd ? 1 : 0;
   }
 }
 
-function printHttp(ctx: EtlContext) {
-  for (const s of ctx.http.stats()) {
+function printHttp(http: Http) {
+  for (const s of http.stats()) {
     console.log(`  ${s.host}: ${s.requests} 次请求，失败 ${s.failures}，平均 ${s.avgMs}ms`);
   }
 }

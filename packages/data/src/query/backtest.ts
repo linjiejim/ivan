@@ -24,12 +24,49 @@ export interface DataVersionInfo {
   asOf: DateStr | null;
 }
 
+/**
+ * 最新的已提交数据版本（D60）：只认 ok（旧行 status 为空也算 ok）；open、incomplete、failed、skipped 都不会被引用。
+ */
 export async function latestDataVersion(wh: Warehouse, market: string): Promise<DataVersionInfo> {
   const r = await wh.one<{ id: number; as_of: string }>(
-    `SELECT id, as_of::VARCHAR AS as_of FROM data_versions WHERE market = $m ORDER BY id DESC LIMIT 1`,
+    `SELECT id, as_of::VARCHAR AS as_of FROM data_versions
+     WHERE market = $m AND coalesce(status, 'ok') = 'ok' ORDER BY id DESC LIMIT 1`,
     { m: market },
   );
   return { id: r?.id ?? null, asOf: r?.as_of ?? null };
+}
+
+/**
+ * 「读到哪一天」（D60）：最新 ok 版本的截至日。回测终点、跟踪结算、选股默认日期都用它——
+ * 某晚写了因子却失败时，读的人还停在上一个提交过的版本上。
+ */
+export async function committedAsOf(wh: Warehouse, market: string): Promise<DateStr | null> {
+  return (await latestDataVersion(wh, market)).asOf;
+}
+
+/** 正在写的版本与上一个版本的结果（管理页「正在更新」、版本状态徽标用） */
+export async function dataVersionState(
+  wh: Warehouse,
+  market: string,
+): Promise<{
+  /** startedAt：毫秒时间戳（库里存的是 DuckDB 时区下的本地时间，按同一时区换算） */
+  openVersion: { id: number; startedAt: number | null } | null;
+  lastVersionStatus: string | null;
+}> {
+  const open = await wh.one<{ id: number; started_at: number | null }>(
+    `SELECT id, epoch_ms(started_at::TIMESTAMPTZ) AS started_at FROM data_versions
+     WHERE market = $m AND status = 'open' ORDER BY id DESC LIMIT 1`,
+    { m: market },
+  );
+  const last = await wh.one<{ status: string }>(
+    `SELECT coalesce(status, 'ok') AS status FROM data_versions
+     WHERE market = $m AND coalesce(status, 'ok') <> 'open' ORDER BY id DESC LIMIT 1`,
+    { m: market },
+  );
+  return {
+    openVersion: open ? { id: open.id, startedAt: open.started_at ?? null } : null,
+    lastVersionStatus: last?.status ?? null,
+  };
 }
 
 export interface BuildOptions {
@@ -57,12 +94,10 @@ export async function buildSimInput(
 ): Promise<BuiltInput> {
   const t0 = Date.now();
   const market = spec.market;
+  // 只读到最新的已提交版本（D60）：之后写进来的日线、因子（夜间更新写到一半或失败）都不读
   const dataVersion = await latestDataVersion(wh, market);
-  const lastDay = await wh.scalar<string>(
-    `SELECT max(date)::VARCHAR FROM factors_daily WHERE market = $m`,
-    { m: market },
-  );
-  if (!lastDay) throw new Error(`${market} 行情仓还没有数据，先运行回填`);
+  const lastDay = dataVersion.asOf;
+  if (!lastDay) throw new Error(`${market} 行情仓还没有提交过的数据，先运行回填`);
   const params = { ...paramsIn, end: paramsIn.end > lastDay ? lastDay : paramsIn.end };
 
   // 起点前多带一段日历与价格：仓位控制（D52）要回看持仓近 N 个交易日的波动
@@ -111,7 +146,8 @@ export async function buildSimInput(
        WHERE b.code IN (${sqlCodeList(codeList)})
          AND b.date >= $a::DATE AND b.date <= $b::DATE
        ORDER BY b.code, b.date`,
-      { a: calendar[0]!, b: calendar.at(-1)! },
+      // 补出来的「下一个交易日」只是计划日期，不读那天的行情（可能是还没提交的数据）
+      { a: calendar[0]!, b: lastDay < calendar.at(-1)! ? lastDay : calendar.at(-1)! },
     );
     const code = cols.code as string[];
     const d = cols.d as string[];
@@ -192,7 +228,7 @@ export async function buildSimInput(
   const benchRows = await wh.all<{ d: string; close: number }>(
     `SELECT date::VARCHAR AS d, close FROM index_bars
      WHERE sym = $s AND date >= $a::DATE AND date <= $b::DATE ORDER BY date`,
-    { s: bk.sym, a: calendar[0]!, b: calendar.at(-1)! },
+    { s: bk.sym, a: calendar[0]!, b: lastDay < calendar.at(-1)! ? lastDay : calendar.at(-1)! },
   );
   const benchMap = new Map(benchRows.map((r) => [r.d, r.close]));
   const bench = Float64Array.from(calendar, (d) => benchMap.get(d) ?? NaN);

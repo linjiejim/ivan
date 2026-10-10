@@ -1,0 +1,14 @@
+{
+  "version": "fixture",
+  "result": {
+    "pages": 2,
+    "data": [
+      { "SECUCODE": "600519.SH", "END_DATE": "2026-06-30 00:00:00", "TOTAL_SHARES": 1256197800 },
+      { "SECUCODE": "000001.SZ", "END_DATE": "2026-06-30 00:00:00", "TOTAL_SHARES": 19405918198 }
+    ],
+    "count": 3
+  },
+  "success": true,
+  "message": "ok",
+  "code": 0
+}

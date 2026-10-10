@@ -5,7 +5,7 @@
  *
  * 不用 push2.eastmoney.com：部分网络环境下连不上。
  */
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 
 const HOSTS = {
   web: "https://datacenter-web.eastmoney.com/api/data/v1/get",
@@ -35,7 +35,7 @@ export type EmRow = Record<string, string | number | null>;
 
 export class EastmoneyError extends Error {}
 
-export async function emQuery<T = EmRow>(http: Http, q: EmQuery): Promise<T[]> {
+export async function emQuery<T = EmRow>(http: HttpLike, q: EmQuery): Promise<T[]> {
   const pageSize = q.pageSize ?? 500;
   const out: T[] = [];
   for (let page = 1; ; page++) {
@@ -65,7 +65,7 @@ export async function emQuery<T = EmRow>(http: Http, q: EmQuery): Promise<T[]> {
 }
 
 /** 只要总行数（探针/体检用）。 */
-export async function emCount(http: Http, q: Omit<EmQuery, "pageSize" | "maxRows">): Promise<number> {
+export async function emCount(http: HttpLike, q: Omit<EmQuery, "pageSize" | "maxRows">): Promise<number> {
   const params = new URLSearchParams({
     reportName: q.report,
     columns: q.columns ?? "ALL",

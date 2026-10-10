@@ -20,6 +20,7 @@ import {
   periodKey,
   priceLimitPct,
   limitPrices,
+  resolveExec,
   type SeriesPoint,
   sharesForBudget,
   type SimInput,
@@ -31,7 +32,11 @@ import {
 import { runChecks } from "./checks.ts";
 import { attribution, computeMetrics, periodMetrics } from "./metrics.ts";
 
-export const ENGINE_VERSION = "1.1.0";
+/**
+ * 引擎版本（D56）：本轮只从 1.1.0 升到 1.2.0 一次；之后的新行为都挂在成交假设 exec 的字段上，
+ * 旧口径（exec 缺省 / LEGACY_EXEC）必须逐字节复现 1.1.0 的结果（legacy.test.ts）。
+ */
+export const ENGINE_VERSION = "1.2.0";
 
 interface Position {
   code: string;
@@ -82,6 +87,8 @@ export function rebalanceDays(
 
 export function simulate(input: SimInput): SimResult {
   const { spec, params, calendar, prices, securities } = input;
+  // 成交假设：缺省字段按旧口径补齐（S02 还没有改变成交的字段，只回显）
+  const exec = resolveExec(params.exec);
   const { startIdx, endIdx } = periodIndexes(calendar, params);
   if (startIdx < 1) throw new SimError("交易日历需要包含回测起点之前至少一个交易日");
   if (endIdx < startIdx) throw new SimError("回测区间内没有交易日");
@@ -539,6 +546,7 @@ export function simulate(input: SimInput): SimResult {
 
   return {
     engineVersion: ENGINE_VERSION,
+    exec,
     series,
     trades,
     holdings,

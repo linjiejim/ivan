@@ -1,16 +1,20 @@
 /**
  * 任务执行器：从应用库 jobs 表按先后认领（原子 UPDATE … RETURNING），分两条道：
- * - compute：回测、扫描（并发 = BACKTEST_POOL_SIZE）
+ * - compute：回测、扫描、复核数据（并发 = BACKTEST_POOL_SIZE，三者共用名额）
  * - etl：夜间 ETL、结算、简报（并发 1，互不重叠）
  * 进度写回 jobs 表，server 读它推给前端。
+ *
+ * 行情仓写库期间不跑回测（D60）：etl / check 排队或在跑时 compute 道不认领；etl 道轮到 etl / check 时
+ * 先等正在跑的 compute 任务结束（compute 道这时已经不再认领，不会饿死）。行情仓在维护状态（还没升级）时两条道都不认领。
  */
-import type { jobs } from "@ivan/db";
+import { computeBlocked, type jobs, WAREHOUSE_WRITERS } from "@ivan/db";
 import { env } from "./env.ts";
 import { backtestJob, sweepJob } from "./jobs/backtest.ts";
 import { briefJob } from "./jobs/brief.ts";
 import { checkJob } from "./jobs/check.ts";
 import { etlJob } from "./jobs/etl.ts";
 import { settleJob } from "./jobs/settle.ts";
+import { verifyJob } from "./jobs/verify.ts";
 
 type JobRow = typeof jobs.$inferSelect;
 
@@ -25,6 +29,7 @@ type Handler = (ctx: JobContext) => Promise<Record<string, unknown>>;
 const HANDLERS: Record<string, { lane: "compute" | "etl"; run: Handler }> = {
   backtest: { lane: "compute", run: backtestJob },
   sweep: { lane: "compute", run: sweepJob },
+  verify: { lane: "compute", run: verifyJob },
   etl: { lane: "etl", run: etlJob },
   settle: { lane: "etl", run: settleJob },
   brief: { lane: "etl", run: briefJob },
@@ -58,6 +63,14 @@ export function recoverStale(): number {
       AND id NOT IN (SELECT json_extract(payload, '$.runId') FROM jobs WHERE status = 'queued')`,
     )
     .run();
+  // 没跑完的复核：原运行上的 verify 状态也要收尾，否则回测页会一直显示「复核中」
+  sqlite
+    .prepare(
+      `UPDATE runs SET verify = json_set(verify, '$.status', 'failed', '$.error', 'worker 重启')
+       WHERE json_extract(verify, '$.status') IN ('queued', 'running')
+      AND id NOT IN (SELECT json_extract(payload, '$.runId') FROM jobs WHERE status = 'queued' AND kind = 'verify')`,
+    )
+    .run();
   return r.changes;
 }
 
@@ -77,12 +90,52 @@ export function enqueue(
   return id;
 }
 
-function claim(lane: "compute" | "etl"): JobRow | undefined {
-  const { sqlite } = env().app;
-  const kinds = Object.entries(HANDLERS)
+export { computeBlocked, WAREHOUSE_WRITERS };
+
+type Lane = "compute" | "etl";
+
+/**
+ * 这条道现在该不该等（纯函数，单测覆盖）：
+ * - 维护状态：两条道都等；
+ * - compute：有写库任务排队或在跑就等；
+ * - etl：下一个要认领的是写库任务、且还有 compute 任务在跑就等。
+ */
+export function shouldWait(
+  lane: Lane,
+  nextKind: string | null,
+  state: { maintenance: boolean; blocked: boolean; computeRunning: number },
+): boolean {
+  if (state.maintenance) return true;
+  if (lane === "compute") return state.blocked;
+  return nextKind !== null && WAREHOUSE_WRITERS.has(nextKind) && state.computeRunning > 0;
+}
+
+function laneKinds(lane: Lane): string {
+  return Object.entries(HANDLERS)
     .filter(([, h]) => h.lane === lane)
     .map(([k]) => `'${k}'`)
     .join(",");
+}
+
+function claim(lane: Lane): JobRow | undefined {
+  const { sqlite } = env().app;
+  const kinds = laneKinds(lane);
+  const next =
+    lane === "etl"
+      ? ((
+          sqlite
+            .prepare(
+              `SELECT kind FROM jobs WHERE status = 'queued' AND kind IN (${kinds}) ORDER BY created_at LIMIT 1`,
+            )
+            .get() as { kind: string } | undefined
+        )?.kind ?? null)
+      : null;
+  const wait = shouldWait(lane, next, {
+    maintenance: !!env().wh.maintenance,
+    blocked: lane === "compute" && computeBlocked(sqlite) !== null,
+    computeRunning: running.compute,
+  });
+  if (wait) return undefined;
   const row = sqlite
     .prepare(
       `UPDATE jobs SET status = 'running', started_at = ?

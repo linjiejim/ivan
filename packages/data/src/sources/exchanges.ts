@@ -4,7 +4,7 @@
  * - 上交所：query.sse.com.cn/commonQuery.do（需要 Referer）
  */
 import { type DateStr, normalizeDate } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 
 export interface DelistedRow {
   code: string;
@@ -25,7 +25,7 @@ interface SzseTab<T> {
   data: T[];
 }
 
-async function szsePage<T>(http: Http, catalog: string, tab: string, page: number) {
+async function szsePage<T>(http: HttpLike, catalog: string, tab: string, page: number) {
   const url = `https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=${catalog}&TABKEY=${tab}&PAGENO=${page}`;
   const tabs = await http.json<SzseTab<T>[]>(url);
   const t = tabs.find((x) => x.metadata.tabkey === tab);
@@ -33,7 +33,7 @@ async function szsePage<T>(http: Http, catalog: string, tab: string, page: numbe
   return t;
 }
 
-async function szseAll<T>(http: Http, catalog: string, tab: string, maxPages = 1000): Promise<T[]> {
+async function szseAll<T>(http: HttpLike, catalog: string, tab: string, maxPages = 1000): Promise<T[]> {
   const first = await szsePage<T>(http, catalog, tab, 1);
   const pages = Math.min(first.metadata.pagecount || 1, maxPages);
   const out = [...first.data];
@@ -41,12 +41,12 @@ async function szseAll<T>(http: Http, catalog: string, tab: string, maxPages = 1
   return out;
 }
 
-export async function szseRecordCount(http: Http, catalog: string, tab: string): Promise<number> {
+export async function szseRecordCount(http: HttpLike, catalog: string, tab: string): Promise<number> {
   return (await szsePage(http, catalog, tab, 1)).metadata.recordcount;
 }
 
 /** 深交所终止上市公司。 */
-export async function szseDelisted(http: Http): Promise<DelistedRow[]> {
+export async function szseDelisted(http: HttpLike): Promise<DelistedRow[]> {
   const rows = await szseAll<{ zqdm: string; zqjc: string; ssrq: string; zzrq: string }>(
     http,
     "1793_ssgs",
@@ -61,7 +61,7 @@ export async function szseDelisted(http: Http): Promise<DelistedRow[]> {
 }
 
 /** 深交所证券简称变更（ST 摘帽戴帽的时点来源）。maxPages 用于增量只翻前几页。 */
-export async function szseNameChanges(http: Http, maxPages?: number): Promise<NameChangeRow[]> {
+export async function szseNameChanges(http: HttpLike, maxPages?: number): Promise<NameChangeRow[]> {
   const rows = await szseAll<{ bgrq: string; zqdm: string; bgqzqjc: string; bghzqjc: string }>(
     http,
     "SSGSGMXX",
@@ -84,7 +84,7 @@ interface SseResp<T> {
 }
 
 /** 上交所终止上市公司。stockType：1 主板 A 股，8 科创板。 */
-export async function sseDelisted(http: Http, stockType: "1" | "8" = "1"): Promise<DelistedRow[]> {
+export async function sseDelisted(http: HttpLike, stockType: "1" | "8" = "1"): Promise<DelistedRow[]> {
   const out: DelistedRow[] = [];
   for (let page = 1; page < 100; page++) {
     const url =

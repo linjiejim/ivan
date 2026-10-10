@@ -5,7 +5,8 @@
   "type": "module",
   "description": "行情/财务数据源 adapter（东财、腾讯、交易所、中证、外汇中心）+ DuckDB 行情仓 + ETL",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

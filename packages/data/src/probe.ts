@@ -332,6 +332,32 @@ const CHECKS: Array<{ id: string; area: ProbeCheck["area"]; title: string; run: 
     },
   },
   {
+    // 只在命令行（pnpm ivan probe）里跑：找沪港通的标记列（GANGGUTONGBIAODISHEN 只是深港通，D61）；找到后 S14 加采 hk_connect_sh
+    id: "hk.connect.columns",
+    area: "港股",
+    title: "港股通标记列（证券资料里所有含 GANGGUTONG 的列）",
+    async run(http) {
+      const rows = await emQuery(http, {
+        report: "RPT_HKF10_INFO_SECURITYINFO",
+        host: "sec",
+        columns: "ALL",
+        pageSize: 1,
+        maxRows: 1,
+      });
+      const keys = Object.keys(rows[0] ?? {}).filter((k) => /GANGGUTONG/i.test(k));
+      return {
+        status: keys.length ? "ok" : "warn",
+        facts: [
+          keys.length
+            ? `含 GANGGUTONG 的列：${keys.map((k) => `${k}=${String(rows[0]![k] ?? "空")}`).join("、")}`
+            : "证券资料里没有含 GANGGUTONG 的列",
+        ],
+        conclusion:
+          "GANGGUTONGBIAODISHEN 是深港通标的，记为 hk_connect_sz；另有沪港通的列时核实含义后再采集 hk_connect_sh。",
+      };
+    },
+  },
+  {
     id: "hk.financials",
     area: "港股",
     title: "港股财报（东财港股主要指标）",

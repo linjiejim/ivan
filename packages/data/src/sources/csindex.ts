@@ -3,7 +3,7 @@
  * 实测：数据一般比交易日晚 1 天以上可得，夜间任务要容忍当天缺失。
  */
 import { type DateStr, normalizeDate } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 
 export interface IndexClose {
   date: DateStr;
@@ -11,7 +11,7 @@ export interface IndexClose {
 }
 
 export async function csindexHistory(
-  http: Http,
+  http: HttpLike,
   indexCode: string,
   from: DateStr,
   to: DateStr,

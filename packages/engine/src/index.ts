@@ -3,3 +3,12 @@ export { attribution, computeMetrics, periodMetrics } from "./metrics.ts";
 export { BACKTEST_ONLY_CHECKS, CHECK_THRESHOLDS, runChecks } from "./checks.ts";
 export { deviationPercentile, windowExcesses } from "./deviation.ts";
 export { compareReplay, type ReplayCheck } from "./replay.ts";
+export {
+  attributeDrift,
+  changeCause,
+  type ChangeCause,
+  type DriftCause,
+  type DriftCur,
+  type DriftPrev,
+  type Fingerprint,
+} from "./drift.ts";

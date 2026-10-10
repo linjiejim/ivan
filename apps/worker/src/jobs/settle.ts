@@ -1,10 +1,25 @@
 /**
  * 向前跟踪结算（spec §7，D13）：每个运行中的跟踪都从上线日重放到最新交易日——和回测同一个 simulate，
  * 规则只在一处实现；每天整体重写 tracking_days 与明日计划，数据修订（如全收益基准晚到）会自动被修正。
+ *
+ * 跟踪锁定上线时的成交假设（D55）；重放与上一晚不一致时用前缀指纹归因（D57）：按上一晚的最后结算日、
+ * 「执行日 ≤ cut」重算前缀，和上一晚存的比。整窗指纹每晚都会变（窗口变长），不能拿来比。
  */
-import { type Market, type SeriesPoint, type StrategySpec, validateSpec } from "@ivan/core";
-import { buildSimInput, screenOn } from "@ivan/data";
-import { BACKTEST_ONLY_CHECKS, compareReplay, deviationPercentile } from "@ivan/engine";
+import {
+  type Market,
+  resolveExec,
+  type SeriesPoint,
+  type StrategySpec,
+  validateSpec,
+} from "@ivan/core";
+import { sha256Canonical } from "@ivan/core/node";
+import { buildSimInput, committedAsOf, HASH_VERSION, hashSimInput, screenOn } from "@ivan/data";
+import {
+  attributeDrift,
+  BACKTEST_ONLY_CHECKS,
+  compareReplay,
+  deviationPercentile,
+} from "@ivan/engine";
 import {
   runs,
   strategyVersions,
@@ -58,13 +73,31 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
     return;
   }
 
+  const exec = resolveExec(t.execConfig);
   const built = await buildSimInput(
     wh,
     spec,
-    { start: t.startDate, end: latest, capital: t.capital, oosMonths: 0 },
+    { start: t.startDate, end: latest, capital: t.capital, oosMonths: 0, exec },
     { appendNextDay: true },
   );
   const planDate = built.input.calendar.at(-1)!;
+  // 上一晚存下的指纹；今晚的指纹都要在转交线程之前算
+  const prev = (t.summary ?? {}) as {
+    engineVersion?: string;
+    execHash?: string;
+    prefixHash?: string;
+    hashVersion?: number;
+    lastDate?: string;
+  };
+  // 今晚的最后结算日：日历上最后一个 ≤ latest 的交易日（就是重放序列的最后一天）。前缀指纹的 cut 与
+  // 存下的 lastDate 必须是同一个字符串，下一晚才能按它原样重算（日历缺 latest 时两者会不同）
+  const settleDate = built.input.calendar.findLast((d) => d <= latest) ?? latest;
+  const full = hashSimInput(built.input, { cut: latest });
+  const prefixTonight = hashSimInput(built.input, { cut: settleDate, rule: "executed" }).inputHash;
+  const prefixPrev = prev.lastDate
+    ? hashSimInput(built.input, { cut: prev.lastDate, rule: "executed" }).inputHash
+    : null;
+  const execHash = sha256Canonical(exec);
   const result = await runSimulation(built.input);
   const series = result.series;
   const last = series.at(-1)!;
@@ -88,10 +121,25 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
     .where(eq(trackingDays.trackingId, t.id))
     .all();
   const replay = compareReplay(stored, series);
-  if (replay.navDrift || replay.benchDrift) {
+  const drift = attributeDrift(
+    {
+      engineVersion: prev.engineVersion,
+      execHash: prev.execHash,
+      prefixHash: prev.prefixHash,
+      hashVersion: prev.hashVersion,
+    },
+    {
+      engineVersion: result.engineVersion,
+      execHash,
+      prefixHash: prefixPrev,
+      hashVersion: HASH_VERSION,
+    },
+    replay,
+  );
+  if (drift.cause !== "none") {
     ctx.log(
       `跟踪 ${t.id} 重放与上次不一致：净值 ${replay.navDrift} 天、基准 ${replay.benchDrift} 天，` +
-        `最早 ${replay.firstDrift}（数据被修订过，已按最新数据改写）`,
+        `最早 ${replay.firstDrift}（${drift.text}，已按最新数据改写）`,
     );
   }
 
@@ -141,7 +189,15 @@ async function settleOne(t: TrackingRow, latest: string, ctx: JobContext): Promi
             buys: result.metrics.buys,
           },
           checks: result.checks.filter((c) => !BACKTEST_ONLY_CHECKS.has(c.id)),
-          replay: { ...replay, at: latest },
+          // 指纹（下一晚归因用）：前缀按今晚的最后结算日、「执行日 ≤ cut」算
+          engineVersion: result.engineVersion,
+          dataVersion: built.dataVersion.id,
+          execHash,
+          inputHash: full.inputHash,
+          prefixHash: prefixTonight,
+          hashVersion: HASH_VERSION,
+          lastDate: settleDate,
+          replay: { ...replay, at: latest, cause: drift.cause, causeText: drift.text },
         },
       })
       .where(eq(trackings.id, t.id))
@@ -154,10 +210,8 @@ export async function settleMarket(
   ctx: JobContext,
 ): Promise<{ settled: number; failed: number }> {
   const { db } = env().app;
-  const latest = await env().wh.scalar<string>(
-    `SELECT max(date)::VARCHAR FROM factors_daily WHERE market = $m`,
-    { m: market },
-  );
+  // 只结算到最新的已提交版本（D60）：失败那晚写进来的数据不用
+  const latest = await committedAsOf(env().wh, market);
   if (!latest) return { settled: 0, failed: 0 };
   const active = db
     .select()

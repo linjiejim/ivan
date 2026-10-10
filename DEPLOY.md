@@ -18,7 +18,22 @@ push `main` 触发 GitHub Actions 检查并部署（`.github/workflows/deploy.ym
 | CI 密钥  | GitHub environment `jim-server`：`DEV_SERVER_HOST / PORT / USERNAME / SSH_KEY`（专用 CI 登录 key，不是个人 key）       |
 
 `.env` 里和默认值不同的几项：`PORT=18907`、`HOST=127.0.0.1`、`WORKER_PORT=18917`、`PUBLIC_URL=https://ivan.linjiejim.com`、
-`DATA_DIR=/root/ivan/data`、`DUCKDB_MEMORY_LIMIT=384MB`（服务器只剩约 1.2 GB 可用内存，先保守，看一周 swap 再调）。
+`DATA_DIR=/root/ivan/data`、`DUCKDB_MEMORY_LIMIT=384MB`（服务器只剩约 1.2 GB 可用内存，先保守，看一周 swap 再调）、
+`BACKTEST_THREAD_MEMORY_MB=160`（见下面的内存预算）。
+
+## worker 内存预算
+
+worker 一个进程里放着 DuckDB、主线程和回测线程，pm2 超过 `max_memory_restart`（900M）就重启它，夜间结算会被打断。
+按这条式子配：
+
+```
+DUCKDB_MEMORY_LIMIT + BACKTEST_POOL_SIZE × BACKTEST_THREAD_MEMORY_MB + 约 250 MB ≤ max_memory_restart − 100 MB
+```
+
+约 250 MB 是主线程、转交给回测线程的价格面板（ArrayBuffer，不受线程堆上限约束）和 DuckDB 自身开销。
+jim-server：384 + 1 × 160 + 250 = 794 ≤ 800。回测线程的堆里只有结果对象，160 MB 够用；超了线程会被终止、
+这次回测报错，线程自动重建，不影响后面的任务。单次回测超过 `BACKTEST_TIMEOUT_MS`（默认 120 秒）也一样终止重建。
+上线后实测峰值 RSS（同时跑一个结算与一次全 A 股回测），超了**先降 `DUCKDB_MEMORY_LIMIT`**。
 
 ## 原生模块（OpenCloudOS 8 的特殊处理）
 
@@ -54,6 +69,33 @@ ssh jim-server 'tail -f /root/ivan/ivan/logs/backfill-*.log'
 ```
 
 回填期间网站照常可用，但看板会提示「行情服务没有运行」；东财对服务器 IP 更敏感，被封会自动暂停、换源、等解封。
+
+## 行情仓升级
+
+表结构升级分两种：只加小表、小列的，worker 启动时照常自动做；**要改大表的**（第 3 版在约 2500 万行 `bars_daily` 上补 `src`、`ver` 列）
+worker 启动时不做——部署健康检查只等 24 秒、pm2 有 900M 内存上限，启动时硬做可能超时或重启循环（D76）。
+这时 worker 进入**维护状态**：照常起来、`/internal/health` 返回 200（带 `maintenance` 说明，部署不会失败），但调度不排任务、
+任务不认领、读行情仓的内部接口返回 503，看板和管理页显示「行情仓需要升级到第 3 版，请运行 scripts/migrate.sh」。
+
+部署 R1（S01–S03）之后跑一次升级脚本，横幅消失即完成：
+
+```bash
+ssh jim-server 'cd /root/ivan/ivan && nohup bash scripts/migrate.sh >/dev/null 2>&1 &'
+ssh jim-server 'tail -f /root/ivan/ivan/logs/migrate-*.log'   # 最后一行是「行情仓已升级到第 3 版，用时 N 秒」
+```
+
+脚本和回填一样：等 worker 空闲 → 放维护标记 → 停 worker → `pnpm ivan migrate`（DuckDB 内存上限默认 512MB，
+`MIGRATE_MEMORY_LIMIT=768MB bash scripts/migrate.sh` 可调）→ doctor → 不管成败都拉起 worker、去掉标记。升级语句都是
+`IF NOT EXISTS`，失败了重跑即可。上线前先在一份线上行情仓的副本上用 512MB 演练一次，记下用时。
+开发机想让 worker 启动时直接升级：`WAREHOUSE_MIGRATE_ON_BOOT=1`。
+
+**回滚兼容**：
+
+- 旧代码打开第 3 版行情仓：重跑第 2 版的建表语句（全是 `IF NOT EXISTS`，无害）并把 `schema_version` 写回 2；
+  按列序追加时表尾的 `src`、`ver` 自动补空，读的时候不看这两列，照常可用。
+- 回滚后再部署新代码：第 3 版语句重跑都是空操作；是否进维护状态看的是 `bars_daily` 有没有 `src` 列、不是版本号，所以不会再进维护。
+  回滚期间写进来的行来源为空，界面显示「来源未记录」。
+- 应用库迁移都是加列加表，旧代码不受影响；S08 起加的只追加触发器回滚后仍在，这是有意的。
 
 ## 回滚
 

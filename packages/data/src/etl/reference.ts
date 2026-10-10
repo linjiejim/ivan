@@ -41,24 +41,29 @@ export const INDEXES: Record<
 /** 交易日历来源：A 股看上证，港股看恒指。 */
 const CALENDAR_INDEX: Record<Market, string> = { A: "sse", HK: "hsi" };
 
+/** 指数来源：csi 中证官网、em 东财、tx 腾讯 */
+type IndexSource = "csi" | "em" | "tx";
+
 async function fetchIndex(
   ctx: EtlContext,
   sym: string,
   from: DateStr,
   to: DateStr,
-): Promise<Array<{ date: DateStr; close: number }>> {
+): Promise<{ bars: Array<{ date: DateStr; close: number }>; src: IndexSource }> {
   const def = INDEXES[sym]!;
-  if (def.source === "csindex") return csindexHistory(ctx.http, def.id, from, to);
+  if (def.source === "csindex") {
+    return { bars: await csindexHistory(ctx.http, def.id, from, to), src: "csi" };
+  }
   const useTencent = process.env.KLINE_SOURCE === "tencent";
   if (def.source === "index") {
     if (!useTencent) {
       try {
-        return await emIndexKline(ctx.http, def.id, from, to);
+        return { bars: await emIndexKline(ctx.http, def.id, from, to), src: "em" };
       } catch (e) {
         if (!def.tencentSym || ctx.http.isBlocked("web.ifzq.gtimg.cn")) throw e;
       }
     }
-    return indexKline(ctx.http, def.tencentSym!, from, to);
+    return { bars: await indexKline(ctx.http, def.tencentSym!, from, to), src: "tx" };
   }
   // ETF：总收益序列 = 不复权收盘 × 等比因子（从上市或 from 起算，只看涨跌）
   if (!useTencent) {
@@ -66,7 +71,7 @@ async function fetchIndex(
       const raw = await emKline(ctx.http, def.id, "raw", from, to);
       const hfq = await emKline(ctx.http, def.id, "hfq", from, to);
       const { adj } = decomposeHfq(raw.bars, hfq.bars, hfq.decimals);
-      return raw.bars.map((b, i) => ({ date: b.date, close: b.close * adj[i]! }));
+      return { bars: raw.bars.map((b, i) => ({ date: b.date, close: b.close * adj[i]! })), src: "em" };
     } catch (e) {
       if (ctx.http.isBlocked("web.ifzq.gtimg.cn")) throw e;
     }
@@ -74,7 +79,7 @@ async function fetchIndex(
   const raw = await klineRange(ctx.http, def.id, "raw", from, to);
   const hfq = await klineRange(ctx.http, def.id, "hfq", from, to);
   const { adj } = decomposeHfq(raw, hfq, 3);
-  return raw.map((b, i) => ({ date: b.date, close: b.close * adj[i]! }));
+  return { bars: raw.map((b, i) => ({ date: b.date, close: b.close * adj[i]! })), src: "tx" };
 }
 
 /**
@@ -101,7 +106,8 @@ export async function updateIndexes(
   // 日历指数必须成功；其他指数（全收益、ETF）失败时跳过，下次再补
   const fetched = await mapLimit(syms, 3, async (sym) => {
     try {
-      let bars = await fetchIndex(ctx, sym, from, ctx.today);
+      const got = await fetchIndex(ctx, sym, from, ctx.today);
+      let bars = got.bars;
       if (INDEXES[sym]!.source === "etf" && bars.length) {
         const anchor = await ctx.wh.one<{ date: string; close: number }>(
           `SELECT date::VARCHAR AS date, close FROM index_bars
@@ -110,15 +116,16 @@ export async function updateIndexes(
         );
         bars = chainToStored(bars, anchor);
       }
-      return { sym, bars };
+      return { sym, bars, src: got.src as IndexSource | null };
     } catch (e) {
       if (sym === CALENDAR_INDEX[market]) throw e;
       ctx.log(`指数 ${sym} 更新失败，先跳过：${e instanceof Error ? e.message : e}`);
-      return { sym, bars: [] as Array<{ date: string; close: number }> };
+      return { sym, bars: [] as Array<{ date: string; close: number }>, src: null };
     }
   });
+  const ver = ctx.ver ?? null;
   await ctx.wh.exclusive(async () => {
-    for (const { sym, bars } of fetched) {
+    for (const { sym, bars, src } of fetched) {
       if (!bars.length) continue;
       await ctx.wh.run(`DELETE FROM index_bars WHERE sym = $s AND date >= $f::DATE`, {
         s: sym,
@@ -126,7 +133,7 @@ export async function updateIndexes(
       });
       await ctx.wh.append(
         "index_bars",
-        bars.map((b) => [sym, b.date, b.close, false]),
+        bars.map((b) => [sym, b.date, b.close, false, src, ver]),
       );
     }
     const cal = fetched.find((f) => f.sym === CALENDAR_INDEX[market])!;
@@ -137,7 +144,7 @@ export async function updateIndexes(
       });
       await ctx.wh.append(
         "trade_calendar",
-        cal.bars.map((b) => [market, b.date]),
+        cal.bars.map((b) => [market, b.date, ver]),
       );
     }
   });
@@ -171,7 +178,14 @@ async function fillProvisionalTr(ctx: EtlContext, market: Market): Promise<void>
       if (px.length < 2 || px[0]!.date !== lastTr.date) return;
       const rows: unknown[][] = [];
       for (let i = 1; i < px.length; i++) {
-        rows.push([tr, px[i]!.date, lastTr.close * (px[i]!.close / px[0]!.close), true]);
+        rows.push([
+          tr,
+          px[i]!.date,
+          lastTr.close * (px[i]!.close / px[0]!.close),
+          true,
+          "prov",
+          ctx.ver ?? null,
+        ]);
       }
       await ctx.wh.append("index_bars", rows);
     });

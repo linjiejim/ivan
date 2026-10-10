@@ -1,11 +1,13 @@
 /**
  * 回测报告（spec §11、D40）：先回答「好不好、要注意什么」——4 个核心指标、诚实检查、净值图；
- * 月度收益、个股与行业归因、期末持仓、交易明细、样本内外收进下方分页，次要指标与回测设置收进 ⓘ。
+ * 月度收益、个股与行业归因、期末持仓、交易明细、样本内外收进下方分页，次要指标与复现信息收进 ⓘ。
  * 参数扫描显示各取值的结果与「参数脆弱」检查。
+ * 复现（D57）：「复核数据」只比输入指纹（排队任务，轮询到完成）；「完整重跑」新建一次重跑，比结果指纹。
  */
-import { useQuery } from "@tanstack/react-query";
+import { defaultExec, describeExec, isLegacyExec } from "@ivan/core";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import {
   axisStyle,
@@ -23,13 +25,18 @@ import {
   IconChecks,
   IconChevronLeft,
   IconChevronRight,
+  IconDownload,
+  IconReproduce,
+  IconRun,
   IconSweep,
+  IconVerify,
 } from "../components/icons.tsx";
 import {
   Badge,
   Callout,
   Card,
   Checks,
+  CopyButton,
   cx,
   DataTable,
   Empty,
@@ -44,23 +51,148 @@ import {
   Tabs,
   Tag,
   Td,
+  TextLink,
   Th,
   Button,
 } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
 import { money, NA, num, pct, tone } from "../lib/format.ts";
 import { usePageTitle } from "../lib/title.ts";
-import type { RunDetail, Trade } from "../lib/types.ts";
+import {
+  computePausedNote,
+  reproReason,
+  reproVerdict,
+  runPollInterval,
+  verifyBadgeState,
+  verifyInFlight,
+} from "../lib/verify.ts";
+import type { RunDetail, RunVerify, Trade } from "../lib/types.ts";
 
 function useRun(id: string) {
   return useQuery({
     queryKey: ["run", id],
     queryFn: () => api.get<RunDetail>(`/api/runs/${id}`),
-    refetchInterval: (q) =>
-      q.state.data && (q.state.data.status === "done" || q.state.data.status === "failed")
-        ? false
-        : 1500,
+    refetchInterval: (q) => runPollInterval(q.state.data),
   });
+}
+
+const short = (h: string | null | undefined) => (h ? h.slice(0, 8) : NA);
+
+/** 复现信息（ⓘ）：区间、资金、策略指纹、数据版本、引擎、成交假设、输入指纹、运行卡指纹 */
+function ReproRows({ r }: { r: RunDetail }) {
+  return (
+    <InfoRows
+      rows={[
+        ["区间", `${r.params.start} ~ ${r.params.end}`],
+        ["初始资金", money(r.params.capital)],
+        ["样本外", r.params.oosMonths ? `最后 ${r.params.oosMonths} 个月` : "不分"],
+        [
+          "策略",
+          r.versionN ? `v${r.versionN}${r.card ? `（${short(r.card.spec.specHash)}）` : ""}` : NA,
+        ],
+        [
+          "数据截至",
+          r.dataAsOf ? `${r.dataAsOf}${r.dataVersion ? `（#${r.dataVersion}）` : ""}` : NA,
+        ],
+        ["引擎", r.engineVersion ?? NA],
+        ["成交假设", r.exec ? describeExec(r.exec) : NA],
+        [
+          "输入指纹",
+          r.inputHash ? (
+            <span className="inline-flex items-center gap-1">
+              <span className="font-mono">{short(r.inputHash)}</span>
+              <CopyButton text={r.inputHash} className="-my-1" />
+            </span>
+          ) : (
+            NA
+          ),
+        ],
+        ["运行卡", <span className="font-mono">{short(r.cardHash)}</span>],
+      ]}
+    />
+  );
+}
+
+/** 原运行上的复核结果徽标 */
+function VerifyBadge({ v, paused }: { v: RunVerify | null; paused: string | null }) {
+  const st = verifyBadgeState(v);
+  if (!st) return null;
+  switch (st.kind) {
+    case "queued":
+      return paused ? (
+        <span className="inline-flex items-center gap-1">
+          <Badge>排队中</Badge>
+          <Info label="排队中">{paused}</Info>
+        </span>
+      ) : (
+        <Badge>排队中</Badge>
+      );
+    case "running":
+      return <Badge tone="accent">复核中</Badge>;
+    case "failed":
+      return (
+        <span className="inline-flex items-center gap-1">
+          <Badge tone="warn">复核失败</Badge>
+          {st.error && <Info label="复核失败">{st.error}</Info>}
+        </span>
+      );
+    case "full":
+      return (
+        <span className="inline-flex items-center gap-1.5">
+          {st.same ? <Badge>逐笔一致</Badge> : <Badge tone="warn">结果不同：{st.reason}</Badge>}
+          {st.reproRunId && <TextLink to={`/runs/${st.reproRunId}`}>查看重跑</TextLink>}
+        </span>
+      );
+    case "unrecorded":
+      return (
+        <span className="inline-flex items-center gap-1">
+          <Badge>早于指纹记录</Badge>
+          <Info label="早于指纹记录">这次回测早于指纹记录，没法只比输入，可以完整重跑。</Info>
+        </span>
+      );
+    case "hashVersion":
+      return <Badge>指纹口径升级过</Badge>;
+    case "input":
+      return st.same ? <Badge>输入一致</Badge> : <Badge tone="warn">数据已修订</Badge>;
+  }
+}
+
+/** 重跑页：和原回测比的结论 */
+function ReproCallout({ r }: { r: RunDetail }) {
+  const v = reproVerdict(r);
+  const orig = r.params.reproOf ? (
+    <TextLink to={`/runs/${r.params.reproOf}`}>原回测</TextLink>
+  ) : undefined;
+  if (!v)
+    return (
+      <Callout tone="neutral" action={orig}>
+        {runPollInterval(r) === false
+          ? "没拿到比对结果，可以回原回测再完整重跑一次"
+          : "正在和原回测比对"}
+      </Callout>
+    );
+  if (v.status === "failed")
+    return (
+      <Callout tone="warn" title="没比对成" action={orig}>
+        {v.error ?? "比对出错了"}
+      </Callout>
+    );
+  return (
+    <div className="space-y-2">
+      {v.sameResult ? (
+        <Callout tone="info" title="逐笔一致" action={orig}>
+          和原回测相比，成交、净值与指标完全相同。
+        </Callout>
+      ) : (
+        <Callout tone="warn" title="结果不同" action={orig}>
+          {reproReason(v)}
+        </Callout>
+      )}
+      {v.reportSame === false && (
+        <Callout tone="neutral">提示项有变化（例如数据提示或试错次数）</Callout>
+      )}
+    </div>
+  );
 }
 
 const REASON: Record<string, string> = {
@@ -232,7 +364,9 @@ function RunningCard({ r }: { r: RunDetail }) {
         <div className="py-2">
           <div className="flex items-baseline justify-between gap-3 text-sm">
             <span className="ai-shimmer font-medium">
-              {r.status === "queued" ? "排队中…" : (r.job?.note ?? "回测中…")}
+              {r.status === "queued"
+                ? (computePausedNote(r) ?? "排队中…")
+                : (r.job?.note ?? "回测中…")}
             </span>
             <span className="tabular text-xs text-muted">{progress}%</span>
           </div>
@@ -269,6 +403,22 @@ export function RunPage() {
   const { id = "" } = useParams();
   const q = useRun(id);
   const chat = useChatUi();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const verify = useMutation({
+    mutationFn: () => api.post<{ status: string }>(`/api/runs/${id}/verify`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["run", id] });
+      void qc.invalidateQueries({ queryKey: ["me"] });
+    },
+  });
+  const reproduce = useMutation({
+    mutationFn: () => api.post<{ runId: string }>(`/api/runs/${id}/reproduce`),
+    onSuccess: (x) => {
+      void qc.invalidateQueries({ queryKey: ["me"] });
+      navigate(`/runs/${x.runId}`);
+    },
+  });
   const r = q.data;
   usePageTitle(r ? `${r.strategyName ?? "回测"} 回测报告` : "回测报告");
   useEffect(() => {
@@ -283,6 +433,16 @@ export function RunPage() {
   if (q.isLoading) return <PageSkeleton />;
   if (!r) return <ErrorNote error={q.error} />;
   const m = r.metrics;
+  const verifiable = r.status === "done" && (r.kind === "backtest" || r.kind === "sweep_child");
+  // 复核与完整重跑都写原运行的 verify，一个没结束时不让点另一个
+  const verifying = verifyInFlight(r.verify);
+  // 旧口径的回测，而这个市场已经有更新的口径（R2 起）：给一个按新口径重跑的入口
+  const legacyExec =
+    r.kind === "backtest" &&
+    !!r.market &&
+    !!r.exec &&
+    isLegacyExec(r.exec) &&
+    !isLegacyExec(defaultExec(r.market));
 
   const header = (
     <PageHeader
@@ -292,6 +452,7 @@ export function RunPage() {
         <>
           {r.versionN ? <Tag mono>v{r.versionN}</Tag> : null}
           {r.kind === "sweep" && <Tag>{r.label}</Tag>}
+          {r.kind === "reproduce" && <Tag>复现</Tag>}
         </>
       }
       meta={
@@ -300,39 +461,83 @@ export function RunPage() {
             {r.params.start} ~ {r.params.end}
           </span>
           <span className="inline-flex items-center gap-1">
-            回测设置
-            <Info label="回测设置">
-              <InfoRows
-                rows={[
-                  ["区间", `${r.params.start} ~ ${r.params.end}`],
-                  ["初始资金", money(r.params.capital)],
-                  ["样本外", r.params.oosMonths ? `最后 ${r.params.oosMonths} 个月` : "不分"],
-                  ["数据截至", r.dataAsOf ?? NA],
-                  ["引擎版本", r.engineVersion ?? NA],
-                ]}
-              />
+            复现信息
+            <Info label="复现信息" width={320}>
+              <ReproRows r={r} />
               <p className="mt-2">
                 收盘后决策、次日开盘成交；涨停买不进、跌停卖不出、停牌顺延；持仓含分红再投入；费用按日期生效的费率表。
               </p>
             </Info>
           </span>
+          {r.kind !== "reproduce" && <VerifyBadge v={r.verify} paused={computePausedNote(r)} />}
+          {r.cardHash && (
+            <TextLink
+              href={`/api/runs/${r.id}/card`}
+              download={`ivan-run-${r.id}.json`}
+              icon={IconDownload}
+            >
+              下载运行卡
+            </TextLink>
+          )}
         </>
       }
       actions={
         r.status === "done" &&
         r.kind !== "sweep" && (
-          <Button
-            variant="ai"
-            icon={IconAI}
-            onClick={() =>
-              chat.ask("帮我解读一下这次回测：表现怎么样，最值得注意的是什么？", { runId: r.id })
-            }
-          >
-            让 AI 解读
-          </Button>
+          <>
+            {verifiable && (
+              <>
+                <Button
+                  variant="ghost"
+                  icon={IconVerify}
+                  loading={verify.isPending}
+                  disabled={verifying}
+                  onClick={() => verify.mutate()}
+                >
+                  {r.verify?.status === "queued"
+                    ? "排队中"
+                    : r.verify?.status === "running"
+                      ? "复核中"
+                      : "复核数据"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  icon={IconReproduce}
+                  loading={reproduce.isPending}
+                  disabled={verifying}
+                  onClick={() => reproduce.mutate()}
+                >
+                  完整重跑
+                </Button>
+              </>
+            )}
+            {legacyExec && (
+              <Button
+                variant="ghost"
+                icon={IconRun}
+                onClick={() =>
+                  navigate(`/strategies/${r.strategyId}?backtest=${r.id}&exec=default`)
+                }
+              >
+                按新口径重新回测
+              </Button>
+            )}
+            <Button
+              variant="ai"
+              icon={IconAI}
+              onClick={() =>
+                chat.ask("帮我解读一下这次回测：表现怎么样，最值得注意的是什么？", { runId: r.id })
+              }
+            >
+              让 AI 解读
+            </Button>
+          </>
         )
       }
     />
+  );
+  const actionError = (verify.error ?? reproduce.error) && (
+    <ErrorNote error={verify.error ?? reproduce.error} />
   );
 
   if (r.status === "queued" || r.status === "running") {
@@ -415,6 +620,8 @@ export function RunPage() {
   return (
     <div className="space-y-6">
       {header}
+      {actionError}
+      {r.kind === "reproduce" && <ReproCallout r={r} />}
       <div className="grid grid-cols-2 gap-3 @3xl:grid-cols-4">
         <Stat
           label="年化收益"

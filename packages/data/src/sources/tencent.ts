@@ -9,7 +9,7 @@
  * - 退市股（如 000418 小天鹅A、600087 长航油运）的历史日 K 仍可取到。
  */
 import { addDays, type DateStr, marketOf, tencentSymbol } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 
 export type Fq = "raw" | "hfq";
 
@@ -51,7 +51,7 @@ interface KlineResp {
   data: Record<string, Record<string, unknown>> | unknown[];
 }
 
-async function klineCall(http: Http, url: string, sym: string): Promise<KBar[]> {
+async function klineCall(http: HttpLike, url: string, sym: string): Promise<KBar[]> {
   const res = await http.json<KlineResp>(url);
   if (res.code !== 0 || Array.isArray(res.data)) return [];
   const node = res.data[sym];
@@ -62,7 +62,7 @@ async function klineCall(http: Http, url: string, sym: string): Promise<KBar[]> 
 
 /** 单次请求：区间内最后 ≤640 条（港股复权忽略 from）。 */
 export async function klineOnce(
-  http: Http,
+  http: HttpLike,
   code: string,
   fq: Fq,
   from: DateStr,
@@ -78,7 +78,7 @@ export async function klineOnce(
 
 /** 取整段区间：A 股与港股不复权按窗口向前推进；港股复权从截止日往回翻。 */
 export async function klineRange(
-  http: Http,
+  http: HttpLike,
   code: string,
   fq: Fq,
   from: DateStr,
@@ -112,7 +112,7 @@ export async function klineRange(
 
 /** 指数日 K（腾讯原始代码：sh000300 沪深300、sh000001 上证、hkHSI 恒指、hkHSCEI 国企）。 */
 export async function indexKline(
-  http: Http,
+  http: HttpLike,
   sym: string,
   from: DateStr,
   to: DateStr,
@@ -148,7 +148,7 @@ export interface Quote {
  * 指数实时报价的日期（`sh000001`、`hkHSI`）。夜间增量用它交叉验证「今天是否开市」：
  * 休市日报价停在上一个交易日。
  */
-export async function indexQuoteDate(http: Http, sym: string): Promise<DateStr | null> {
+export async function indexQuoteDate(http: HttpLike, sym: string): Promise<DateStr | null> {
   const text = await http.text(`https://qt.gtimg.cn/q=${sym}`, { encoding: "gbk" });
   const t = (text.split("~")[30] ?? "").replace(/\D/g, "").slice(0, 8);
   return t.length === 8 ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` : null;
@@ -164,7 +164,7 @@ function quoteAmount(code: string, f: string[]): number {
   return Number.isFinite(a) && a > 0 ? a : Number(f[37]) * 10_000;
 }
 
-export async function quotes(http: Http, codes: string[]): Promise<Quote[]> {
+export async function quotes(http: HttpLike, codes: string[]): Promise<Quote[]> {
   if (!codes.length) return [];
   const syms = codes.map(tencentSymbol);
   const text = await http.text(`https://qt.gtimg.cn/q=${syms.join(",")}`, { encoding: "gbk" });

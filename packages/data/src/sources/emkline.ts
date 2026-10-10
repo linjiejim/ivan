@@ -4,7 +4,7 @@
  * 价格精度 A 股 2 位小数、港股 3 位。本机与 jim-server 均可达（注意不是 push2.eastmoney.com）。
  */
 import { type DateStr, parseCode } from "@ivan/core";
-import type { Http } from "../http.ts";
+import type { HttpLike } from "../http.ts";
 import type { Fq, KBar } from "./tencent.ts";
 
 const URL_BASE = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
@@ -28,7 +28,7 @@ export interface EmKBar extends KBar {
 }
 
 export async function emKline(
-  http: Http,
+  http: HttpLike,
   code: string,
   fq: Fq,
   from: DateStr,
@@ -67,7 +67,7 @@ export async function emKline(
 
 /** 指数日 K（收盘价）。secid 如 1.000300 沪深300、1.000001 上证、100.HSI 恒指、100.HSCEI 国企。 */
 export async function emIndexKline(
-  http: Http,
+  http: HttpLike,
   secid: string,
   from: DateStr,
   to: DateStr,

@@ -2,6 +2,7 @@
  * 回测/跟踪的输入输出类型：引擎产出、数据层组装、服务端存储、前端渲染共用。
  */
 import type { DateStr } from "./dates.ts";
+import type { ExecConfig } from "./exec.ts";
 import type { StrategySpec } from "./strategy.ts";
 
 export interface BacktestParams {
@@ -11,6 +12,8 @@ export interface BacktestParams {
   capital: number;
   /** 样本外月数（最后 N 个月单独算指标）；0 = 不分段 */
   oosMonths: number;
+  /** 成交假设（D55）；缺省按旧口径 LEGACY_EXEC */
+  exec?: ExecConfig;
 }
 
 export const DEFAULT_PARAMS: Omit<BacktestParams, "end"> = {
@@ -191,6 +194,8 @@ export interface PendingOrder {
 
 export interface SimResult {
   engineVersion: string;
+  /** 实际使用的成交假设（缺省字段已按旧口径补齐） */
+  exec: ExecConfig;
   series: SeriesPoint[];
   trades: Trade[];
   holdings: HoldingSnapshot[];

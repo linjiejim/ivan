@@ -30,15 +30,30 @@ import {
   type SecurityRow,
 } from "./context.ts";
 
-type BarRow = [string, DateStr, number, number, number, number, number, number | null, number];
+/** bars_daily 的一行（按列序）：表尾是来源与数据版本号（第 3 版） */
+export type BarRow = [
+  code: string,
+  date: DateStr,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+  volume: number,
+  amount: number | null,
+  adj: number,
+  src: BarSource,
+  ver: number | null,
+];
 
+/** 日线来源：em 东财日 K、tx 腾讯日 K、txq 腾讯实时报价 */
+export type BarSource = "em" | "tx" | "txq";
 
 const KLINE_HOSTS = ["push2his.eastmoney.com", "web.ifzq.gtimg.cn"];
 
-interface FetchedBars {
+export interface FetchedBars {
   rows: BarRow[];
   actions: RefAction[];
-  source: "eastmoney" | "tencent";
+  source: "em" | "tx";
 }
 
 /** 后复权反推出来的事件 → 除权事实（前收、参考价） */
@@ -73,14 +88,14 @@ async function fetchOnce(
         const raw = await emKline(ctx.http, code, "raw", from, to);
         if (raw.bars.length) {
           const { adj, actions } = adjFromRefPrices(raw.bars);
-          return { raw: raw.bars, adj, actions, source: "eastmoney" };
+          return { raw: raw.bars, adj, actions, source: "em" };
         }
       } else {
         const raw = await emKline(ctx.http, code, "raw", from, to);
         if (raw.bars.length) {
           const hfq = await emKline(ctx.http, code, "hfq", from, to);
           const { adj, events } = decomposeHfq(raw.bars, hfq.bars, hfq.decimals);
-          return { raw: raw.bars, adj, actions: toRefActions(raw.bars, events), source: "eastmoney" };
+          return { raw: raw.bars, adj, actions: toRefActions(raw.bars, events), source: "em" };
         }
       }
     } catch (e) {
@@ -93,7 +108,7 @@ async function fetchOnce(
   const raw = await klineRange(ctx.http, code, "raw", from, to);
   const hfq = await klineRange(ctx.http, code, "hfq", from, to);
   const { adj, events } = decomposeHfq(raw, hfq, 3);
-  return { raw, adj, actions: toRefActions(raw, events), source: "tencent" };
+  return { raw, adj, actions: toRefActions(raw, events), source: "tx" };
 }
 
 /** 两家日 K 都被封时，等最早解封的那家（回填不把这种情况记成失败）。 */
@@ -142,11 +157,14 @@ export async function fetchBars(
     b.volume * mult,
     b.amount ?? null,
     adj[i]! * scale,
+    source,
+    ctx.ver ?? null,
   ]);
   return { rows, actions, source };
 }
 
-async function writeBars(
+/** 整段写入一只股票的日线与公司行动（先删后写）；导出给测试 */
+export async function writeBars(
   ctx: EtlContext,
   code: string,
   from: DateStr,
@@ -168,7 +186,16 @@ async function writeBars(
       "corp_actions",
       fetched.actions
         .filter((a) => !first || a.date > first)
-        .map((a) => [code, a.date, a.prevClose, a.refPrice, a.cash, a.split]),
+        .map((a) => [
+          code,
+          a.date,
+          a.prevClose,
+          a.refPrice,
+          a.cash,
+          a.split,
+          fetched.source,
+          ctx.ver ?? null,
+        ]),
     );
   });
 }
@@ -194,7 +221,7 @@ export async function backfillBars(
   let ok = 0;
   let failed = 0;
   let n = 0;
-  const sources = { eastmoney: 0, tencent: 0 };
+  const sources = { em: 0, tx: 0 };
   await mapLimit(todo, opts.concurrency ?? 2, async (s) => {
     const from = s.list_date && s.list_date > opts.since ? s.list_date : opts.since;
     const to = s.delist_date ? addDays(s.delist_date, -1) : ctx.today;
@@ -211,7 +238,7 @@ export async function backfillBars(
     }
     n++;
     if (n % 200 === 0 || n === todo.length) {
-      ctx.log(`日线 ${n}/${todo.length}（东财 ${sources.eastmoney}，腾讯 ${sources.tencent}）`);
+      ctx.log(`日线 ${n}/${todo.length}（东财 ${sources.em}，腾讯 ${sources.tx}）`);
       ctx.progress?.(n / todo.length, `日线 ${n}/${todo.length}`);
     }
   });
@@ -288,6 +315,8 @@ export async function updateBars(
         q.volume * volumeMultiplier(q.code, [{ close: q.price, volume: q.volume, amount: q.amount }]),
         q.amount > 0 ? q.amount : null,
         l.adj,
+        "txq",
+        ctx.ver ?? null,
       ]);
     }
   });
