@@ -14,3 +14,4 @@ export * from "./versions.ts";
 export * from "./ledger.ts";
 export * from "./data-quality.ts";
 export * from "./pit.ts";
+export * from "./analytics.ts";

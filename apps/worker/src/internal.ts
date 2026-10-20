@@ -15,6 +15,7 @@ import {
 } from "@ivan/core";
 import { sha256Canonical } from "@ivan/core/node";
 import {
+  AnalyticsError,
   benchFirstDates,
   captureStatus,
   committedAsOf,
@@ -48,6 +49,7 @@ import { computeBlocked, jobs } from "@ivan/db";
 import { evaluatePlanItem } from "@ivan/engine";
 import { and, desc, eq, like } from "drizzle-orm";
 import { Hono } from "hono";
+import { registerAnalytics } from "./analytics-routes.ts";
 import { env, etlContext, todayOf } from "./env.ts";
 import { eventsJobActive, eventsPayload } from "./jobs/events.ts";
 import { marketDayStatus } from "./market-day.ts";
@@ -183,6 +185,8 @@ export function createInternalApp() {
     if (err instanceof EvidenceError) return c.json({ error: err.message }, err.status);
     // 选股要的数据还没有（港股通名单没有记录，D77）
     if (err instanceof SelectionDataError) return c.json({ error: err.message }, err.status);
+    // 对话分析工具：参数不对、对象找不到或数据还没有（spec 20261020）
+    if (err instanceof AnalyticsError) return c.json({ error: err.message }, err.status);
     console.error(err);
     return c.json({ error: err.message }, 500);
   });
@@ -603,6 +607,8 @@ export function createInternalApp() {
     );
     return c.json({ security: sec, factors: factors ?? null, financials, actions });
   });
+
+  registerAnalytics(app);
 
   return app;
 }

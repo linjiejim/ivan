@@ -175,7 +175,8 @@ export function registerChat(app: Hono<AppEnv>): void {
       system: systemPrompt(summary),
       messages: await convertToModelMessages(all, { tools, ignoreIncompleteToolCalls: true }),
       tools,
-      stopWhen: stepCountIs(8),
+      // 分析类问题会连着调好几个工具（走势、估值、财报、计算），步数给到 12（spec 20261020 D106）
+      stopWhen: stepCountIs(12),
       onFinish: ({ totalUsage }) => {
         recordTokens(u.id, totalUsage.inputTokens ?? 0, totalUsage.outputTokens ?? 0);
       },

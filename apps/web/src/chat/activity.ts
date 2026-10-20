@@ -25,6 +25,13 @@ export const TOOL_ACTIVITY: Record<string, string> = {
   get_overview: "查看看板",
   propose_stop_tracking: "准备停止跟踪",
   get_plan: "查计划依据",
+  get_price_history: "查走势",
+  compare_securities: "对比个股",
+  get_market_overview: "看大盘",
+  get_industry_performance: "看行业",
+  get_factor_history: "查估值历史",
+  get_financials: "查财报",
+  calculate: "计算",
 };
 
 /**

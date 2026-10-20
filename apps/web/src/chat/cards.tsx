@@ -30,6 +30,12 @@ import {
   IconChips,
   IconPlan,
   IconWarn,
+  IconCalc,
+  IconChart,
+  IconFinancials,
+  IconIndustry,
+  IconMarket,
+  IconValuation,
 } from "../components/icons.tsx";
 import { EventsBody } from "../components/events-body.tsx";
 import { EvidenceBody } from "../components/evidence-modal.tsx";
@@ -74,7 +80,7 @@ import type {
 import { computePausedNote } from "../lib/verify.ts";
 import { TOOL_ACTIVITY } from "./activity.ts";
 
-function Frame({
+export function Frame({
   title,
   icon: Ico,
   children,
@@ -102,7 +108,7 @@ function Frame({
 }
 
 /** 卡片里的小指标：标签在上、数字在下 */
-function MiniStats({ items }: { items: Array<[string, string, string?]> }) {
+export function MiniStats({ items }: { items: Array<[string, string, string?]> }) {
   return (
     <div className="grid grid-cols-4 gap-2">
       {items.map(([l, v, c]) => (
@@ -779,6 +785,13 @@ const TOOL_META: Record<string, [string, Icon]> = {
   get_overview: ["查看看板", IconBoard],
   propose_stop_tracking: ["准备停止跟踪", IconStop],
   get_plan: ["查看计划依据", IconPlan],
+  get_price_history: ["查走势", IconChart],
+  compare_securities: ["对比个股", IconCompare],
+  get_market_overview: ["查看大盘", IconMarket],
+  get_industry_performance: ["查看行业", IconIndustry],
+  get_factor_history: ["查估值历史", IconValuation],
+  get_financials: ["查财报", IconFinancials],
+  calculate: ["计算", IconCalc],
 };
 
 export function ToolChip({ name, state, error }: { name: string; state: string; error?: string }) {

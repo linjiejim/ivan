@@ -209,6 +209,8 @@ export {
   securityEvents,
 } from "./query/events.ts";
 export { eventCoverage, type EventCoverageResult, eventFactorsUsed } from "./query/event-coverage.ts";
+export * from "./compute/price-stats.ts";
+export * from "./query/analytics/index.ts";
 export {
   BENCH_MISMATCH,
   benchFirstDate,

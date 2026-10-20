@@ -43,6 +43,15 @@ import {
   TrackingCard,
   TrackingDraftCard,
 } from "./cards.tsx";
+import {
+  CalcCard,
+  CompareSecuritiesCard,
+  FactorHistoryCard,
+  FinancialsCard,
+  IndustryCard,
+  MarketCard,
+  PriceHistoryCard,
+} from "./analysis-cards.tsx";
 import type { GroundingResult } from "../lib/types.ts";
 import { activityOf } from "./activity.ts";
 import { type PageContext, useChatUi } from "./chat-context.tsx";
@@ -201,6 +210,45 @@ function renderTool(part: ToolPart, send: (t: string) => void): ReactNode {
       ) : (
         <ToolChip name="get_tracking" state={part.state} />
       );
+    // 分析工具（spec 20261020）
+    case "get_price_history":
+      return out ? (
+        <PriceHistoryCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "compare_securities":
+      return out ? (
+        <CompareSecuritiesCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "get_market_overview":
+      return out ? (
+        <MarketCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "get_industry_performance":
+      return out ? (
+        <IndustryCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "get_factor_history":
+      return out ? (
+        <FactorHistoryCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "get_financials":
+      return out ? (
+        <FinancialsCard output={out as never} />
+      ) : (
+        <ToolChip name={name} state={part.state} />
+      );
+    case "calculate":
+      return out ? <CalcCard output={out as never} /> : <ToolChip name={name} state={part.state} />;
     default:
       return <ToolChip name={name} state={part.state} />;
   }

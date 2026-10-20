@@ -19,6 +19,11 @@ export {
   ListMagnifyingGlassIcon as IconScreen, // 按策略选股（今日选股）
   FileMagnifyingGlassIcon as IconEvidence, // 个股证据（某个决策日为什么选它）
   UsersThreeIcon as IconChips, // 筹码：两融与筹码（融资余额、股东户数、解禁、大宗交易）
+  GlobeHemisphereEastIcon as IconMarket, // 大盘与市场宽度
+  FactoryIcon as IconIndustry, // 行业
+  ScalesIcon as IconValuation, // 估值与因子的历史位置
+  ReceiptIcon as IconFinancials, // 财报与分红
+  CalculatorIcon as IconCalc, // 计算器
   EyeIcon as IconOverview, // 概览
   ClipboardTextIcon as IconSignals, // 信号集
   BookOpenTextIcon as IconTemplate, // 模板

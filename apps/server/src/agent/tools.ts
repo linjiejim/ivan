@@ -15,6 +15,7 @@ import {
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { worker } from "../lib/worker-client.ts";
+import { analysisTools } from "./analysis.ts";
 import {
   compareRuns,
   enqueueBacktest,
@@ -946,5 +947,8 @@ export function buildTools(ctx: AgentContext): ToolSet {
           ...planForModel(output.plan, output.plan.items),
         }),
     }),
+
+    // 分析工具（spec 20261020）：走势、对比、大盘、行业、因子历史、财报、计算器
+    ...analysisTools(userId),
   };
 }

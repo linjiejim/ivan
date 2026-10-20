@@ -8,3 +8,4 @@
 |---|---|---|
 | [20260928-ivan-mvp](20260928-ivan-mvp.md) | 首版 MVP：A 股 + 港股数据仓、策略 DSL、回测引擎、向前跟踪、对话 Agent、看板、邀请码账号 | confirmed |
 | [20261005-vt-borrowing](20261005-vt-borrowing.md) | 借鉴 Vibe-Trading：数据源接口与完整性闸门、成交假设与运行卡、流动性成交、可信度区间、个股证据、决策账本与计划快照、数字核对、跟踪健康度、全收益基准与港股通股票池、两融与筹码事件数据（R1–R5），Tushare 可选数据源（R6）、持仓与风险透视（R7）；分 7 批上线，R1–R5 已在分支 `claude/vt-enhance` 实现、未合并 | draft |
+| [20261020-chat-analysis-tools](20261020-chat-analysis-tools.md) | 对话分析工具：个股与指数走势、多只对比、大盘与市场宽度、行业表现、估值与因子历史、财报与分红、计算器；数字核对第 3 版 | confirmed |
