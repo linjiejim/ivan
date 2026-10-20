@@ -10,8 +10,13 @@
  */
 import { FACTOR_MAP, type FactorDef } from "@ivan/core";
 
-/** 1 = S09；2 = S15b：「户」是计数单位，带「万 / 亿」的计数（万户、万股……）按写出的精度核对；裸「股」仍不是计数单位 */
-export const GROUNDING_VERSION = 2;
+/**
+ * 1 = S09；2 = S15b：「户」是计数单位，带「万 / 亿」的计数（万户、万股……）按写出的精度核对；裸「股」仍不是计数单位。
+ * 3 = 对话分析工具（spec 20261020 D104）：价格键（close、highClose、firstOpen、dealPrice……）按金额归类；
+ * 对象里写了 unit 时，同一对象里的其他数值（current、min、median……）也按这个单位归类；
+ * 「24211 点」（≥ 100）按普通数核对；负数的方向词也可以紧跟在数字后面（「还有 37.2% 的回撤」）。
+ */
+export const GROUNDING_VERSION = 3;
 
 /** 文字里的数：百分数、百分点、金额（已按万 / 亿换算）、普通数（小数或倍数）、计数、裸整数（不核对） */
 export type FigureKind = "percent" | "points" | "money" | "ratio" | "count" | "plain";
@@ -111,7 +116,7 @@ const EXEMPT: RegExp[] = [
 
 /** 单位 → 种类与倍数 */
 const UNIT =
-  /^(\s*)(%|个百分点|bp|BP|万亿|亿港元|亿元|万港元|万元|亿户|万户|亿股|万股|港元|元|亿|万|倍|x(?![A-Za-z])|个交易日|天|只|笔|次|名|户)/;
+  /^(\s*)(%|个百分点|bp|BP|万亿|亿港元|亿元|万港元|万元|亿户|万户|亿股|万股|港元|元|亿|万|倍|x(?![A-Za-z])|个交易日|天|只|笔|次|名|户|点(?![数心评名位赞击]))/;
 const MONEY_SCALE: Record<string, number> = {
   万亿: 1e12,
   亿港元: 1e8,
@@ -195,6 +200,12 @@ export function extractFigures(text: string): { figures: ProseFigure[]; exempt: 
       fig = { ...base, raw, value: signed * scale, kind: "count", decimals: d, scale };
     } else if (unit === "倍" || unit === "x")
       fig = { ...base, raw, value: signed, kind: "ratio", decimals: d };
+    // 指数点位（第 3 版）：「恒指 24211 点」按普通数核对；小于 100 的多半是钟点（「下午 3 点」），不核对
+    else if (unit === "点")
+      fig =
+        abs >= 100
+          ? { ...base, raw, value: signed, kind: "ratio", decimals: d }
+          : { ...base, raw, value: signed, kind: "plain", decimals: 0 };
     else if (unit && COUNT_UNITS.has(unit))
       fig = { ...base, raw, value: signed, kind: d === 0 ? "count" : "ratio", decimals: d };
     else if (d > 0) fig = { ...base, raw, value: signed, kind: "ratio", decimals: d };
@@ -206,6 +217,10 @@ export function extractFigures(text: string): { figures: ProseFigure[]; exempt: 
 
 // ── 证据 ──
 
+/** 价格键（第 3 版）：收盘、开盘、最高、最低、成交价……按金额核对（「收盘 9.5 元」对得上 close: 9.5） */
+const PRICE_KEY = /^(?:close|open|high|low|price)$|(?:Close|Open|Price)$/;
+/** 同一对象里写了 unit 时不跟着单位走的键：计数、样本数 */
+const UNITLESS_KEY = /Count$|^observations$|^samples$/;
 /** 键名直接说明是百分点（0–100）的 */
 const POINTS_KEY = /Pct$|percentile|beatBacktest/i;
 /** 键名说明是金额的（单独的 value 不算：条件、证据项里的 value 先按因子或单位归类） */
@@ -300,8 +315,19 @@ function classify(
         ? byUnit(parent.unit, v)
         : null;
     if (c) return c;
+  } else if (
+    parent &&
+    typeof parent.unit === "string" &&
+    !POINTS_KEY.test(key) &&
+    !COUNT_KEYS.has(key) &&
+    !UNITLESS_KEY.test(key)
+  ) {
+    // 第 3 版：{ key: "dividend_yield_ttm", unit: "%", current: 5.2, median: 4.1 }
+    const c = byUnit(parent.unit, v);
+    if (c) return c;
   }
   if (FIN_UNIT[key]) return byUnit(FIN_UNIT[key], v)!;
+  if (PRICE_KEY.test(key)) return { kind: "money", value: v };
   // 2. 按键名
   if (POINTS_KEY.test(key)) return { kind: "points", value: v };
   if (key !== "value" && MONEY_KEY.test(key)) return { kind: "money", value: v };
@@ -363,6 +389,8 @@ export function collectEvidence(source: string, payload: unknown): EvidenceValue
 const EPS = 1e-9;
 /** 证据为负时，文字前 12 个字里有这些词就算说清了方向 */
 const NEGATIVE_CUE = /跌|回撤|亏|跑输|落后|下滑|低于|下降|负|折价|减少|回落|缩水|少了/;
+/** 第 3 版：方向词也可以紧跟在数字后面（「还有 37.2% 的回撤」「5% 的跌幅」） */
+const NEGATIVE_CUE_AFTER = /^\s*(?:的)?\s*(?:回撤|跌幅|亏损|下跌|跌|折价|缺口)/;
 
 /** 一个数与一条证据的差距与余量（在同一个量纲里）；类型不兼容时为 null */
 function compare(f: ProseFigure, e: EvidenceValue): { diff: number; tol: number } | null {
@@ -423,7 +451,9 @@ export function checkGrounding(text: string, evidence: readonly EvidenceValue[])
     }
     // 符号：对上的证据全是负数、文字却没写负号时，要么写了「+」，要么前面没有「跌、回撤」这类词，都算不符
     if (f.negative || matched.some((e) => e.value >= 0)) continue;
-    const cue = NEGATIVE_CUE.test(t.slice(Math.max(0, f.start - 12), f.start));
+    const cue =
+      NEGATIVE_CUE.test(t.slice(Math.max(0, f.start - 12), f.start)) ||
+      NEGATIVE_CUE_AFTER.test(t.slice(f.end, f.end + 8));
     if (f.plus || !cue) {
       const e = matched[0]!;
       unverified.push({

@@ -172,8 +172,8 @@ describe("数字核对：匹配（表驱动）", () => {
 
 describe("数字核对第 2 版（S15b）：户是计数单位，带万 / 亿的计数按写出的精度核对", () => {
   const ev = (payload: unknown) => collectEvidence("get_security_events", payload);
-  it("版本号是 2", () => {
-    expect(GROUNDING_VERSION).toBe(2);
+  it("版本号是 3（第 3 版见下）", () => {
+    expect(GROUNDING_VERSION).toBe(3);
   });
 
   it("「4.8 万户」对 48,212 成立，对 48,600 不成立", () => {
@@ -248,5 +248,56 @@ describe("数字核对第 2 版（S15b）：户是计数单位，带万 / 亿的
       }),
     );
     expect(r.unverified).toEqual([]);
+  });
+});
+
+describe("数字核对第 3 版（spec 20261020 D104）：价格按金额、对象里的 unit 管到同对象的其他数", () => {
+  it("「收盘 9.5 元」对得上 close: 9.5；「最高 12.3 港元」对得上 highClose", () => {
+    const ev = collectEvidence("get_price_history", {
+      levels: { endClose: 9.5, highClose: 12.3 },
+      factors: { close: 9.5 },
+    });
+    expect(checkGrounding("收盘 9.5 元，区间最高 12.3 港元", ev).unverified).toEqual([]);
+    expect(checkGrounding("收盘 9.8 元", ev).unverified).toHaveLength(1);
+  });
+
+  it("因子历史：unit 为 % 的行里 current、median 是百分点", () => {
+    const ev = collectEvidence("get_factor_history", {
+      factors: [
+        {
+          key: "dividend_yield_ttm",
+          unit: "%",
+          current: 5.2,
+          median: 4.1,
+          percentile: 88,
+          observations: 1200,
+        },
+        { key: "pe_ttm", unit: "x", current: 25.3, percentile: 12 },
+      ],
+    });
+    expect(
+      checkGrounding("股息率 5.2%，5 年中位数 4.1%，分位 88%；PE 25.3 倍", ev).unverified,
+    ).toEqual([]);
+    // 5.2 不能被当成 520%
+    expect(checkGrounding("股息率 520%", ev).unverified).toHaveLength(1);
+  });
+
+  it("样本数不跟着 unit 走", () => {
+    const ev = collectEvidence("x", { row: { unit: "%", observations: 12, marketCount: 30 } });
+    expect(ev.find((e) => e.path.endsWith("observations"))?.kind).not.toBe("points");
+    expect(ev.find((e) => e.path.endsWith("marketCount"))?.kind).not.toBe("points");
+  });
+
+  it("方向词在数字后面也算说清了；指数点位（≥ 100 点）要核对，钟点不核对", () => {
+    const ev = collectEvidence("get_price_history", {
+      currentDrawdown: -0.3722,
+      levels: { highClose: 27968.12, endClose: 24211.35 },
+    });
+    expect(checkGrounding("距高点还有 37.2% 的回撤没修复", ev).unverified).toEqual([]);
+    expect(checkGrounding("距高点还差 37.2%", ev).unverified[0]?.reason).toBe("sign_mismatch");
+    expect(checkGrounding("年内高点 27968 点，现在 24211 点", ev).unverified).toEqual([]);
+    expect(checkGrounding("现在 25000 点", ev).unverified).toHaveLength(1);
+    expect(checkGrounding("下午 3 点更新", ev).unverified).toEqual([]);
+    expect(checkGrounding("高了 2 个百分点", ev).unverified).toHaveLength(1);
   });
 });
