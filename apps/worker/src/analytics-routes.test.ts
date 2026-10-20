@@ -96,6 +96,16 @@ describe("对话分析工具的内部接口", () => {
     expect(b.date).toBe(calendar.at(-1));
     expect(b.notes[0]).toMatch(/港股的数据没更新成功/);
     expect(b.breadth.traded).toBe(2);
+    await t.env.wh.run(
+      `INSERT INTO financials (code, report_date, period, eff_date, revenue, np)
+       VALUES ('00700.HK', DATE '2025-12-31', 'FY', DATE '2026-03-31', 100, 10)`,
+    );
+    const fin = (await (
+      await post("/internal/analytics/financials", { query: "00700" })
+    ).json()) as {
+      notes: string[];
+    };
+    expect(fin.notes[0]).toMatch(/港股的数据没更新成功/);
   });
 
   it("行业、因子历史、财报都能走通", async () => {

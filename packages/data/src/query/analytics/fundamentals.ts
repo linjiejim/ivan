@@ -1,13 +1,10 @@
-import { periodLabel } from "@ivan/core";
 /**
  * 因子历史与横截面位置、财报与分红历史（spec 20261020 D103）。
  */
 import type { DividendRow, FactorHistory, FactorHistoryRow, FinancialHistory, FinancialRow, PeriodInput } from "@ivan/core";
-import { type DateStr, diffDays, FACTOR_MAP, type FactorDef } from "@ivan/core";
+import { addMonths, type DateStr, diffDays, FACTOR_MAP, type FactorDef, periodLabel } from "@ivan/core";
 import { downsample, median, percentileOf } from "../../compute/price-stats.ts";
-
 import { type Warehouse } from "../../warehouse/db.ts";
-
 import { AnalyticsError, asOfOf, endOf, fromOf, dataNote, latestFactors, resolveInstrument } from "./common.ts";
 
 // ── 5. 因子历史与横截面位置 ──
@@ -126,7 +123,6 @@ export async function financialHistory(
   type Row = {
     rd: string;
     period: string | null;
-    fy: string | null;
     nd: string | null;
     ed: string;
     currency: string | null;
@@ -142,7 +138,7 @@ export async function financialHistory(
     ocf: number | null;
   };
   const all = await wh.all<Row>(
-    `SELECT report_date::VARCHAR AS rd, period, fy_start::VARCHAR AS fy, notice_date::VARCHAR AS nd,
+    `SELECT report_date::VARCHAR AS rd, period, notice_date::VARCHAR AS nd,
             eff_date::VARCHAR AS ed, currency, revenue, np, deducted_np, revenue_yoy, np_yoy, deducted_np_yoy,
             roe, gross_margin, debt_ratio, ocf
      FROM financials WHERE code = $c
@@ -151,16 +147,29 @@ export async function financialHistory(
     { c: inst.code },
   );
   if (!all.length) throw new AnalyticsError(404, `行情仓里没有${inst.name}的财报`);
+  // 财年键 = 财年结束的年月，由报告期末与期别推出（一季报 + 9 个月、半年报 + 6、三季报 + 3、年报本身）：
+  // 不靠 fy_start（港股等来源可能为空，为空时各年会挤在一个键上），非 12 月年结的公司也对
+  const FY_OFFSET: Record<string, number> = { Q1: 9, H1: 6, Q3: 3, FY: 0 };
+  const fyOf = (r: Row): string | null => {
+    const off = FY_OFFSET[r.period ?? ""];
+    return off === undefined ? null : addMonths(r.rd, off).slice(0, 7);
+  };
+  const prevFy = (fy: string | null) => (fy ? addMonths(`${fy}-01`, -12).slice(0, 7) : null);
+  const keyOf = (fy: string | null, period: string | null) =>
+    fy && period ? `${fy}|${period}` : null;
   const byKey = new Map<string, Row>();
-  for (const r of all) byKey.set(`${r.fy}|${r.period}`, r);
-  const prevFy = (fy: string | null) => (fy ? `${Number(fy.slice(0, 4)) - 1}${fy.slice(4)}` : null);
+  for (const r of all) {
+    const k = keyOf(fyOf(r), r.period);
+    if (k && !byKey.has(k)) byKey.set(k, r);
+  }
+  const at = <T,>(m: Map<string, T>, k: string | null) => (k ? m.get(k) : undefined);
   /** 同一财年里这一期之前那一期的累计数（单季 = 本期累计 − 前一期累计） */
   const priorInYear = (r: Row): Row | null => {
     const o = PERIOD_ORDER[r.period ?? ""] ?? 0;
     let best: Row | null = null;
     for (const [p, n] of Object.entries(PERIOD_ORDER)) {
       if (n >= o) continue;
-      const x = byKey.get(`${r.fy}|${p}`);
+      const x = at(byKey, keyOf(fyOf(r), p));
       if (x && (!best || (PERIOD_ORDER[best.period ?? ""] ?? 0) < n)) best = x;
     }
     return best;
@@ -184,22 +193,25 @@ export async function financialHistory(
   };
   const ttm = (r: Row, k: "revenue" | "np") => {
     if (r.period === "FY") return r[k];
-    const fy = byKey.get(`${prevFy(r.fy)}|FY`);
-    const same = byKey.get(`${prevFy(r.fy)}|${r.period}`);
+    const fy = at(byKey, keyOf(prevFy(fyOf(r)), "FY"));
+    const same = at(byKey, keyOf(prevFy(fyOf(r)), r.period));
     const a = r[k];
     return a !== null && fy?.[k] != null && same?.[k] != null ? a + fy[k]! - same[k]! : null;
   };
   const yoyPct = (a: number | null, b: number | null) =>
     a !== null && b !== null && b > 0 ? (a / b - 1) * 100 : null;
   const singles = new Map<string, ReturnType<typeof singleOf>>();
-  for (const r of all) singles.set(`${r.fy}|${r.period}`, singleOf(r));
+  for (const r of all) {
+    const k = keyOf(fyOf(r), r.period);
+    if (k && !singles.has(k)) singles.set(k, singleOf(r));
+  }
   const n = Math.min(Math.max(q.periods ?? 8, 1), 20);
   const rows: FinancialRow[] = all
     .filter((r) => !q.annualOnly || r.period === "FY")
     .slice(0, n)
     .map((r) => {
-      const s = singles.get(`${r.fy}|${r.period}`) ?? null;
-      const ly = singles.get(`${prevFy(r.fy)}|${r.period}`) ?? null;
+      const s = at(singles, keyOf(fyOf(r), r.period)) ?? null;
+      const ly = at(singles, keyOf(prevFy(fyOf(r)), r.period)) ?? null;
       return {
         reportDate: r.rd,
         period: r.period,
@@ -242,15 +254,13 @@ export async function financialHistory(
     split: d.split,
     yieldPct: d.cash && d.prev_close ? (d.cash / d.prev_close) * 100 : null,
   }));
-  const years = new Map<string, { cash: number; count: number }>();
-  for (const d of dividends) {
-    if (!d.cash) continue;
-    const y = d.date.slice(0, 4);
-    const v = years.get(y) ?? { cash: 0, count: 0 };
-    v.cash += d.cash;
-    v.count++;
-    years.set(y, v);
-  }
+  // 每年合计按全部记录算（不受上面只取最近 30 条的限制，免得最早那一年被截掉一部分）
+  const years = await wh.all<{ year: string; cash: number; count: number }>(
+    `SELECT strftime(date, '%Y') AS year, sum(cash) AS cash, count(*)::INTEGER AS count
+     FROM corp_actions WHERE code = $c AND coalesce(cash, 0) > 0
+     GROUP BY 1 ORDER BY 1 DESC LIMIT 10`,
+    { c: inst.code },
+  );
   const end = await asOfOf(wh, inst.market);
   const f = await latestFactors(wh, [inst.code], end, ["dividend_yield_ttm"]);
   const notes = [
@@ -263,10 +273,7 @@ export async function financialHistory(
     instrument: inst,
     rows,
     dividends: dividends.slice(0, 12),
-    dividendsByYear: [...years]
-      .map(([year, v]) => ({ year, cash: v.cash, count: v.count }))
-      .sort((a, b) => b.year.localeCompare(a.year))
-      .slice(0, 10),
+    dividendsByYear: years,
     dividend_yield_ttm: f.get(inst.code)?.values.dividend_yield_ttm ?? null,
     notes,
   };

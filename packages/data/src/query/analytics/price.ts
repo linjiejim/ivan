@@ -1,15 +1,12 @@
-import { periodLabel } from "@ivan/core";
 /**
  * 个股 / 指数走势与多只对比（spec 20261020 D99、D100）。
  */
 import type { ChartPoint, CompareItem, CompareResult, Instrument, PeriodInput, PriceHistory, StockInstrument } from "@ivan/core";
-import { addDays, addMonths, BENCHMARKS, type BenchmarkKey, DEFAULT_BENCHMARK, type DateStr, diffDays, type Market } from "@ivan/core";
+import { addDays, addMonths, type BenchmarkKey, BENCHMARKS, type DateStr, DEFAULT_BENCHMARK, diffDays, type Market, periodLabel } from "@ivan/core";
 import { downsample, indexOnOrBefore, rangeStats, relativeStats, vsMovingAverage, windowReturns } from "../../compute/price-stats.ts";
 import { INDEXES } from "../../etl/reference.ts";
 import { type Warehouse } from "../../warehouse/db.ts";
-
 import { latestDataVersion } from "../versions.ts";
-
 import { AnalyticsError, asOfOf, endOf, fromOf, dataNote, latestFactors, loadSeries, loadIndexSeries, resolveInstrument, instrumentName, instrumentId, type PriceSeries } from "./common.ts";
 
 // ── 1. 个股 / 指数走势 ──
@@ -58,7 +55,13 @@ export async function priceHistory(
     );
   }
   const r = rangeStats(s.dates, s.adj, from);
-  if (!r) throw new AnalyticsError(404, `${instrumentName(inst)}在这个区间没有行情`);
+  if (!r) {
+    const last = s.dates.at(-1)!;
+    throw new AnalyticsError(
+      404,
+      `${instrumentName(inst)}最后一根 K 线是 ${last}${inst.kind === "stock" && inst.delistDate ? `（${inst.delistDate} 退市）` : "（之后停牌或没有数据）"}，这个区间没有行情；可以把区间往前挪`,
+    );
+  }
   const { stats, startIndex } = r;
   const d = s.dates.slice(startIndex);
   const raw = s.close.slice(startIndex);
@@ -97,7 +100,8 @@ export async function priceHistory(
     const def = BENCHMARKS[bk];
     benchSeries = await loadIndexSeries(wh, def.sym, addDays(stats.start, -10), end);
     const i0 = indexOnOrBefore(benchSeries.dates, stats.start);
-    const i1 = indexOnOrBefore(benchSeries.dates, end);
+    // 基准也算到个股最后一根 K 线那天（停牌、退市的股票比请求的终点早结束），两边比的是同一段
+    const i1 = indexOnOrBefore(benchSeries.dates, stats.end);
     if (i0 >= 0 && i1 > i0) {
       const bret = benchSeries.close[i1]! / benchSeries.close[i0]! - 1;
       const rel = relativeStats(

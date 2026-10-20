@@ -110,5 +110,7 @@ describe("行情区间统计（D99）", () => {
     expect(c.stats.startClamped).toBe(true);
     expect(c.stats.start).toBe("2026-01-05");
     expect(rangeStats([], [], null)).toBeNull();
+    // 序列在起点日之前就结束了：没有区间，不报 0%
+    expect(rangeStats(dates, v, "2026-01-09")).toBeNull();
   });
 });

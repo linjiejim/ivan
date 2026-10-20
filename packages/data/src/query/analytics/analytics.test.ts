@@ -62,6 +62,10 @@ beforeEach(async () => {
         close: (i) => (i < last ? 10 : 11),
         factors: () => ({ pe_ttm: 20, pb: 3, mcap: 50, roe_ttm: 15, dividend_yield_ttm: 1 }),
       },
+      // 最后一天才上市：没有前一天的行情，不进涨跌样本，但成交额要算
+      { code: "600005.SH", name: "戊新股", listDate: "2026-01-01", close: (i) => (i < last ? NaN : 8) },
+      // 最后 5 天停牌
+      { code: "600006.SH", name: "己停牌", listDate: "2010-01-04", close: (i) => (i < last - 4 ? 5 + i * 0.001 : NaN) },
     ],
   }));
   committed = cal.at(-1)!;
@@ -128,6 +132,17 @@ describe("走势（D99）", () => {
     expect(r.notes.join("")).toMatch(/没有发行价/);
   });
 
+  it("停牌的股票：基准也算到它最后一根 K 线；区间里没有行情时说明最后一天", async () => {
+    const r = await priceHistory(wh, { query: "己停牌", period: "1m" });
+    expect(r.stats.end).toBe(cal.at(-6));
+    const i0 = cal.findLastIndex((d) => d <= r.stats.start);
+    expect(r.benchmark!.ret).toBeCloseTo(1.0005 ** (DAYS - 6 - i0) - 1, 10);
+    expect(r.suspendedDays).toBe(0);
+    await expect(priceHistory(wh, { query: "己停牌", from: cal.at(-3)! })).rejects.toThrow(
+      new RegExp(`最后一根 K 线是 ${cal.at(-6)}`),
+    );
+  });
+
   it("指数：同期全收益与价格指数并列", async () => {
     const r = await priceHistory(wh, { query: "沪深300", period: "3m" });
     expect(r.instrument.kind).toBe("index");
@@ -165,7 +180,12 @@ describe("大盘与行业（D101、D102）", () => {
     expect(r.breadth.limitUp).toBe(1);
     expect(r.breadth.limitDown).toBe(0);
     expect(r.breadth.buckets.reduce((a, b) => a + b.count, 0)).toBe(4);
-    expect(r.turnover.amount).toBeGreaterThan(0);
+    // 成交额按当天所有有行情的股票合计（含没有前一天行情的新股）
+    const all = await wh.scalar<number>(
+      `SELECT sum(close * volume) FROM bars_daily WHERE date = $d::DATE`,
+      { d: committed },
+    );
+    expect(r.turnover.amount).toBeCloseTo(all!, 2);
     expect(r.turnover.ratioTo20d).not.toBeNull();
     expect(r.indices.map((i) => i.sym)).toEqual(["sse", "csi300"]);
     expect(r.valuation.pe_ttm).toBeCloseTo((5 + (DAYS - 1) * 0.01 + 20) / 2, 8);
@@ -227,5 +247,49 @@ describe("因子历史与财报（D103）", () => {
     expect(r.dividends[0]).toMatchObject({ date: "2025-07-10", cash: 0.5, yieldPct: 5 });
     expect(r.dividendsByYear.map((y) => y.year)).toEqual(["2025", "2024"]);
     expect(r.dividend_yield_ttm).toBe(5);
+  });
+
+  it("没有 fy_start 的港股式半年报：各年不串，H2、同比、TTM 都对", async () => {
+    const rows: Array<[string, string, number]> = [
+      ["2024-06-30", "H1", 100],
+      ["2024-12-31", "FY", 220],
+      ["2025-06-30", "H1", 130],
+      ["2025-12-31", "FY", 280],
+    ];
+    for (const [rd, p, rev] of rows) {
+      await wh.run(
+        `INSERT INTO financials (code, report_date, period, eff_date, revenue, np)
+         VALUES ('600002.SH', $rd::DATE, $p, $rd::DATE, $rev, $rev / 10)`,
+        { rd, p, rev },
+      );
+    }
+    const r = await financialHistory(wh, { query: "乙银行" });
+    const [fy25, h125, fy24] = r.rows;
+    expect(fy25!.single).toMatchObject({ label: "H2", revenue: 150 });
+    expect(fy25!.single!.revenueYoyPct).toBeCloseTo((150 / 120 - 1) * 100, 10);
+    expect(h125!.single).toMatchObject({ label: "H1", revenue: 130 });
+    expect(h125!.single!.revenueYoyPct).toBeCloseTo(30, 10);
+    expect(h125!.revenueTtm).toBe(130 + 220 - 100);
+    expect(fy24!.single).toMatchObject({ label: "H2", revenue: 120 });
+  });
+
+  it("每年分红合计按全部记录算，不被最近 30 条截断", async () => {
+    const vals: string[] = [];
+    for (let y = 2016; y <= 2025; y++)
+      for (const m of ["03", "06", "09", "12"]) vals.push(`('600003.SH', DATE '${y}-${m}-15', 30, 29, 1, 1)`);
+    await wh.run(
+      `INSERT INTO corp_actions (code, date, prev_close, ref_price, cash, split) VALUES ${vals.join(", ")}`,
+    );
+    const r = await financialHistory(wh, { query: "丙食品测试" }).catch((e: unknown) => e);
+    // 丙没有财报：404；分红合计的口径用 SQL 直接核
+    expect((r as Error).message).toMatch(/没有.*财报/);
+    await wh.run(
+      `INSERT INTO financials (code, report_date, period, eff_date, revenue, np)
+       VALUES ('600003.SH', DATE '2025-12-31', 'FY', DATE '2026-03-01', 1, 1)`,
+    );
+    const ok = await financialHistory(wh, { query: "丙食品测试" });
+    expect(ok.dividendsByYear).toHaveLength(10);
+    expect(ok.dividendsByYear.every((y) => y.cash === 4 && y.count === 4)).toBe(true);
+    expect(ok.dividends.length).toBeLessThanOrEqual(12);
   });
 });

@@ -127,6 +127,8 @@ export function registerAnalytics(app: Hono): void {
       periods: num(b.periods),
       annualOnly: b.annualOnly === true,
     });
+    // 股息率是最新已提交那天的：当天更新失败时同样写明
+    r.notes.unshift(...(await staleNotes([r.instrument.market])));
     return c.json(r);
   });
 }

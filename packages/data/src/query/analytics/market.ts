@@ -1,14 +1,12 @@
-import { periodLabel } from "@ivan/core";
 /**
  * 大盘与市场宽度、行业表现（spec 20261020 D101、D102）。
  */
 import type { IndustryMember, IndustryPerformance, IndustryRow, MarketOverview, PeriodInput } from "@ivan/core";
-import { addDays, addMonths, diffDays, limitPrices, type Market, priceLimitPct } from "@ivan/core";
+import { addDays, addMonths, diffDays, limitPrices, type Market, periodLabel, priceLimitPct } from "@ivan/core";
 import { indexOnOrBefore, median, percentileOf, vsMovingAverage, windowReturns } from "../../compute/price-stats.ts";
 import { INDEXES } from "../../etl/reference.ts";
 import { type Warehouse } from "../../warehouse/db.ts";
 import { lastTradingDay } from "../backtest.ts";
-
 import { AnalyticsError, asOfOf, endOf, fromOf, dataNote, loadIndexSeries } from "./common.ts";
 
 // ── 3. 大盘与市场宽度 ──
@@ -136,7 +134,14 @@ export async function marketOverview(
   );
 
   // 成交额：今天与之前 20 个交易日
-  const amount = traded.reduce((a, r) => a + (r.amt ?? 0), 0);
+  // 成交额按当天所有有行情的股票合计（新股、复牌股前一天没有行情、不在涨跌样本里，但成交额要算；和 20 日均同口径）
+  const amount =
+    (await wh.scalar<number>(
+      `SELECT sum(coalesce(b.amount, b.close * b.volume)) FROM bars_daily b
+       JOIN securities s ON s.code = b.code AND s.market = $m
+       WHERE b.date = $d::DATE`,
+      { m, d: date },
+    )) ?? 0;
   const prior = await wh.all<{ d: string; amt: number }>(
     `WITH cal AS (
        SELECT date FROM trade_calendar WHERE market = $m AND date < $d::DATE ORDER BY date DESC LIMIT 20)

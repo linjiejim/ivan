@@ -211,7 +211,14 @@ export function industryForModel(r: IndustryPerformance) {
     benchmark: r.benchmark ? { label: r.benchmark.label, ret: ratio(r.benchmark.ret) } : null,
     industryCount: n,
     strongest: r.industries.slice(0, Math.min(10, n)).map(row),
-    weakest: n > 15 ? r.industries.slice(-5).reverse().map(row) : [],
+    // 最弱的几个：和最强的 10 个不重叠的部分（11–15 个行业时也要给，否则问「最弱」没有数）
+    weakest:
+      n > 10
+        ? r.industries
+            .slice(Math.max(10, n - 5))
+            .reverse()
+            .map(row)
+        : [],
     focus: r.focus
       ? {
           industry: r.focus.industry,

@@ -5,7 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkGrounding, collectEvidence } from "@ivan/ai";
-import type { FactorHistory, MarketOverview, PriceHistory } from "@ivan/core";
+import type { FactorHistory, IndustryPerformance, MarketOverview, PriceHistory } from "@ivan/core";
 import { loadConfig } from "@ivan/core/config";
 import { openAppDb, usageDaily, userQuotas } from "@ivan/db";
 import { eq } from "drizzle-orm";
@@ -14,6 +14,7 @@ import { setEnvForTest } from "../env.ts";
 import {
   calcForModel,
   factorHistoryForModel,
+  industryForModel,
   marketForModel,
   priceHistoryForModel,
 } from "./analysis.ts";
@@ -267,5 +268,33 @@ describe("模型摘要与数字核对（D104）", () => {
     );
     expect(checkGrounding("超额 4.5%，100 万现在值 112.3 万元", ev).unverified).toEqual([]);
     expect(checkGrounding("超额 5.5%", ev).unverified).toHaveLength(1);
+  });
+
+  it("行业：11–15 个行业时也给最弱的几个（和最强的 10 个不重叠）", () => {
+    const mk = (i: number) => ({
+      industry: `行业${i}`,
+      count: 5,
+      members: 5,
+      capWeightedRet: 0.1 - i * 0.01,
+      medianRet: 0,
+      upRatio: 0.5,
+      mcap: 100,
+      median: { pe_ttm: 10, pb: 1, roe_ttm: 10, dividend_yield_ttm: 2 },
+    });
+    const r = {
+      market: "A",
+      level: "l1",
+      start: "2026-09-30",
+      end: "2026-10-20",
+      period: { label: "近 1 月" },
+      benchmark: null,
+      industries: Array.from({ length: 12 }, (_, i) => mk(i)),
+      focus: null,
+      notes: [],
+    } as IndustryPerformance;
+    const v = industryForModel(r);
+    expect(v.strongest).toHaveLength(10);
+    expect(v.weakest.map((x) => x.industry)).toEqual(["行业11", "行业10"]);
+    expect(industryForModel({ ...r, industries: r.industries.slice(0, 8) }).weakest).toEqual([]);
   });
 });

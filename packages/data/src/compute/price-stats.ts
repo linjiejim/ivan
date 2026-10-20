@@ -248,6 +248,8 @@ export function rangeStats(
   from: DateStr | null,
 ): { stats: RangeStats; startIndex: number } | null {
   if (!dates.length) return null;
+  // 序列在起点日之前就结束了（停牌、退市）：区间里没有行情，不拿最后一根 K 线报一个 0% 的区间
+  if (from && dates.at(-1)! < from) return null;
   let s = from ? indexOnOrBefore(dates, from) : 0;
   const startClamped = from !== null && s < 0;
   if (s < 0) s = 0;
