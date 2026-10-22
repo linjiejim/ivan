@@ -16,7 +16,7 @@ import {
   type PitDatasetId,
   todayCN,
 } from "@ivan/core";
-import type { HttpLike } from "../http.ts";
+import { BlockedError, type HttpLike } from "../http.ts";
 import { backfillBars, fetchBars, recordHygiene, updateBars, writeBars } from "./bars.ts";
 import type { Issue } from "../compute/hygiene.ts";
 import {
@@ -395,6 +395,10 @@ export async function daily(ctx: EtlContext, market: Market, opts: DailyOptions 
   } catch (e) {
     // 闸门没过时版本已经提交成 incomplete，不再改成 failed
     if (!(e instanceof IncompleteDataError)) await failDataVersion(ctx, ver, e);
+    // 风控（日历指数被拦等，D108）：数据源过一阵会放开，交给 45 分钟后的自动重跑，不让整晚失败在那里等人点
+    if (e instanceof BlockedError) {
+      throw new RetryableEtlError(`数据源风控：${e.message}，稍后自动重跑`, { cause: e });
+    }
     throw e;
   }
 }

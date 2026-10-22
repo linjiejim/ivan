@@ -1,6 +1,7 @@
 import type { DateStr, Market } from "@ivan/core";
 import type { HttpLike } from "../http.ts";
 import type { FetchLedger } from "../sources/chain.ts";
+import type { RateLimitWaitBudget } from "./rate-limit.ts";
 import type { Warehouse } from "../warehouse/db.ts";
 
 export type LogFn = (msg: string) => void;
@@ -16,6 +17,11 @@ export interface EtlContext {
   ver?: number;
   /** 这次任务的取数台账（D72）：夜间增量与回填才有，提交数据版本时写进 data_versions.sources */
   ledger?: FetchLedger;
+  /**
+   * 等风控解封的总预算（D108）：worker 里的夜间更新与每周抽检才有；用完了被拦的股票不再等、记成 rate_limited 缺失。
+   * 不给（命令行回填，worker 停着）= 照旧等到解封
+   */
+  rateLimitBudget?: RateLimitWaitBudget;
 }
 
 export interface SecurityRow {

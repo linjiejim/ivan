@@ -26,6 +26,7 @@ import type { Quote } from "../sources/tencent.ts";
 import { type SourceBar, type SourceBars, type SourceCtx, srcCode } from "../sources/types.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import type { MissingReason } from "./completeness.ts";
+import { RateLimitBudgetError } from "./rate-limit.ts";
 import {
   doneKeys,
   errMsg,
@@ -99,14 +100,33 @@ async function fetchOnce(
   };
 }
 
-/** 整条日线链都被封时，等最早解封的那家（回填不把这种情况记成失败）。 */
+/**
+ * 整条日线链都被封时，等最早解封的那家（回填不把这种情况记成失败）。
+ * 带了等风控的预算（D108，worker 里的夜间更新与抽检）时只在预算内等：不够等到解封就抛 RateLimitBudgetError，
+ * 这只股票记成 rate_limited 缺失，交给完整性闸门。
+ */
 async function withUnblockWait<T>(ctx: EtlContext, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (e) {
-      if (!(e instanceof BlockedError) || attempt >= 12) throw e;
-      const wait = Math.max(e.until - Date.now(), 0) + 5_000;
+      if (!(e instanceof BlockedError) || e instanceof RateLimitBudgetError || attempt >= 12) throw e;
+      const until = Math.max(e.until, Date.now()) + 5_000;
+      const budget = ctx.rateLimitBudget;
+      if (budget) {
+        const first = !budget.isExhausted;
+        if (!budget.reserve(until)) {
+          // 只在第一次用完时记一行，剩下被拦的股票不再逐只刷日志
+          if (first) {
+            ctx.log(
+              `日 K 接口被风控（${e.message}），等风控的 ${Math.round(budget.totalMs / 60_000)} 分钟预算不够等到解封，` +
+                `剩下被拦的股票这次不等、记成缺失`,
+            );
+          }
+          throw new RateLimitBudgetError(e, budget);
+        }
+      }
+      const wait = until - Date.now();
       ctx.log(`日 K 接口被风控，等待 ${Math.round(wait / 60_000)} 分钟后继续`);
       await sleep(wait);
     }
@@ -710,6 +730,9 @@ export async function updateBars(
             { rule: "caliber", severity: "reject", date: latestTradeDate, detail: errMsg(e).slice(0, 200) },
           ],
         });
+      } else if (e instanceof BlockedError) {
+        // 整条链被风控、没等到解封（D108）：单独记原因，闸门与管理页能说清是风控
+        lost("rate_limited", null);
       } else {
         lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
       }

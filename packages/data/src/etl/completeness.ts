@@ -2,7 +2,7 @@
  * 完整性闸门（D73，修正 D36）：日线更新之后、财报与因子计算之前判断今晚拿全了没有。拿不全就别往下算——
  * 缺数据会被引擎当成停牌，悄悄改变成交与跟踪重放。
  *
- * - 缺失（整条链都没拿到、被体检拒收、口径换算失败，或报价漏掉又补不上的 quote_omitted）超过
+ * - 缺失（整条链都没拿到、被风控又没等到解封的 rate_limited、被体检拒收、口径换算失败，或报价漏掉又补不上的 quote_omitted）超过
  *   A 股 max(3, ⌈0.2% × 应更新数⌉)、港股 max(5, ⌈0.3% × 应更新数⌉) → 失败；
  * - 无成交数 > max(2 × 近 20 个版本的中位数, 中位数 + 30) → 失败（防止报价没更新）；历史不足 5 个版本时不判；
  * - 缺失的股票是运行中跟踪的持仓或明日计划（critical）→ 不让整晚失败，记进 missingCritical，相关跟踪显示「数据未更新」；
@@ -28,8 +28,15 @@ export class RetryableEtlError extends Error {
 /** 完整性闸门没过：版本已提交成 incomplete */
 export class IncompleteDataError extends RetryableEtlError {}
 
-/** 缺失原因：整条链失败 / 报价漏掉又补不上 / 被体检拒收（rejected:<规则>，口径换算失败是 rejected:caliber） */
-export type MissingReason = "chain_failed" | "quote_omitted" | `rejected:${string}`;
+/**
+ * 缺失原因：整条链失败 / 报价漏掉又补不上 / 整条链被风控、没等到解封（rate_limited，D108）/
+ * 被体检拒收（rejected:<规则>，口径换算失败是 rejected:caliber）
+ */
+export type MissingReason =
+  | "chain_failed"
+  | "quote_omitted"
+  | "rate_limited"
+  | `rejected:${string}`;
 
 export interface SoftOutcome {
   step: SoftStep;
@@ -118,7 +125,14 @@ export function assessCompleteness(i: CompletenessInput): Completeness {
   }
   const label = MARKET_LABEL[i.market];
   if (counted > missingThreshold(i.market, i.expected)) {
-    reasons.push(`${label}有 ${counted} 只股票今天的日线没拿到，已停止更新，以免被当成停牌`);
+    const limited = i.missing.filter(
+      (m) => m.reason === "rate_limited" && !i.accepted.has(m.code) && !i.critical.has(m.code),
+    ).length;
+    reasons.push(
+      `${label}有 ${counted} 只股票今天的日线没拿到` +
+        (limited ? `（其中 ${limited} 只是数据源风控、没等到解封）` : "") +
+        `，已停止更新，以免被当成停牌`,
+    );
   }
   if (i.noTradeHistory.length >= 5) {
     const m = median(i.noTradeHistory);

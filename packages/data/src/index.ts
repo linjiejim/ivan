@@ -241,6 +241,12 @@ export {
   type SoftStepStatus,
 } from "./etl/completeness.ts";
 export {
+  DEFAULT_RATE_LIMIT_WAIT_MS,
+  RateLimitBudgetError,
+  RateLimitWaitBudget,
+  rateLimitWaitMsFromEnv,
+} from "./etl/rate-limit.ts";
+export {
   type HygieneCtx,
   type Issue,
   type IssueRule,

@@ -102,6 +102,14 @@ jim-server 现在跑的是 916a43c（R1 之前），这次一步跳到 S01–S15
 - **应用库的只追加表**（`ledger_entries`、`plan_snapshots`、`plan_items`、`tracking_health`、`brief_editions`）有触发器挡住 UPDATE / DELETE，
   手工 SQL 改它们会报 `append-only`。真要做修正迁移，迁移里先 DROP 触发器、改完再按原样建回来，并在决策账本里说明。
 
+## 数据源风控时的夜间更新
+
+服务器 IP 被东财、腾讯日 K 风控时（`curl` 东财 push2his 连不上、腾讯返回 501 WAF 页），夜间更新与管理页手动触发的更新最多等解封
+`ETL_RATE_LIMIT_WAIT_MS`（默认 30 分钟），等不到就把被拦的股票记成缺失、交给完整性闸门，45 分钟后自动重跑，最多 2 次（D108）。
+所以一次更新最多挡回测半小时左右，不用再 `pm2 restart ivan-worker` 去停它（任务没有取消功能，重启会把在跑的任务标成失败，只在紧急时用）。
+三次都没拿全时当天的数据停在上一个交易日、横幅写「数据没更新」；第二天的夜间更新会把缺的日子一起补上。
+风控期间别手动排更新：先在服务器上各 `curl` 一次两家日 K 接口，确认放开了再点。
+
 ## 维护：回填、手动重跑
 
 worker 独占行情仓，**回填要先停 worker**。`scripts/backfill-full.sh` 把这些都包好了：放维护标记（部署会等它，不会中途重启 worker）

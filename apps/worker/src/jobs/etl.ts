@@ -3,14 +3,15 @@
  *
  * 完整性闸门（D73）：运行中跟踪的持仓与明日计划是 critical，缺了只让相关跟踪显示「数据未更新」；
  * 闸门没过、或开市了但指数日 K 还没有今天（可重跑的失败）时 45 分钟后自动再排一次，最多 2 次。
- * 排着队等重跑期间市场当日状态是「没更新」（market-day.ts）。重跑成功而当天的简报已经写过时再排一次简报（加一版）。
+ * 排着队等重跑期间市场当日状态是「没更新」（market-day.ts）。数据源风控（D108）：等解封有预算，用完了被拦的股票记成缺失、
+ * 日历指数被拦时整晚抛可重跑的错，两种都走这条自动重跑，排着队时不挡回测。重跑成功而当天的简报已经写过时再排一次简报（加一版）。
  * A 股夜间更新成功后，如果事件数据的历史已补齐、而事件因子列的补算标记和当前签名或版本对不上（部署了新口径），排上按年补算（S15b）。
  */
 import { MARKET_LABEL, type Market, nowHmCN, todayCN } from "@ivan/core";
 import { acceptMissingFromEnv, daily } from "@ivan/data";
 import { jobs } from "@ivan/db";
 import { and, eq } from "drizzle-orm";
-import { env, etlContext, todayOf } from "../env.ts";
+import { boundedEtlContext, env, todayOf } from "../env.ts";
 import { enqueue, type JobContext } from "../runner.ts";
 import { enqueueEventColsIfNeeded } from "./event-cols.ts";
 import { criticalCodes, settleMarket } from "./settle.ts";
@@ -38,7 +39,9 @@ function briefDoneToday(): boolean {
 export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> {
   const market = (ctx.job.payload.market === "HK" ? "HK" : "A") as Market;
   const attempt = ctx.job.attempt ?? 0;
-  const etl = etlContext(ctx.log, (f, note) => ctx.progress(f * 0.8, note));
+  // 等风控有预算（D108）：用完了被拦的股票记成缺失，交给闸门与下面的自动重跑，不一直占着写库任务的位置挡回测
+  const etl = boundedEtlContext(ctx.log, (f, note) => ctx.progress(f * 0.8, note));
+  const waited = () => Math.round(etl.rateLimitBudget?.spentMs ?? 0);
   let r: Awaited<ReturnType<typeof daily>>;
   try {
     r = await daily(etl, market, {
@@ -55,7 +58,13 @@ export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> 
     }
     throw e;
   }
-  if (!r.tradingDay) return { market, tradingDay: false, latest: r.latest };
+  if (!r.tradingDay)
+    return {
+      market,
+      tradingDay: false,
+      latest: r.latest,
+      ...(waited() ? { rateLimitWaitMs: waited() } : {}),
+    };
   ctx.progress(0.85, "结算跟踪");
   const s = await settleMarket(market, ctx, { staleCodes: r.completeness?.missingCritical ?? [] });
   // 重跑成功时，当天的简报如果已经写过（还说着「数据没更新」），再排一次，加一版（S10）
@@ -71,6 +80,7 @@ export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> 
     ...(attempt > 0 ? { attempt } : {}),
     ...(briefAgain ? { briefAgain: true } : {}),
     ...(eventCols ? { eventCols } : {}),
+    ...(waited() ? { rateLimitWaitMs: waited() } : {}),
     ...s,
   };
 }

@@ -3,7 +3,14 @@
  */
 import { type Config, loadConfig } from "@ivan/core/config";
 import { type DateStr, todayCN } from "@ivan/core";
-import { type EtlContext, Http, type HttpLike, Warehouse } from "@ivan/data";
+import {
+  type EtlContext,
+  Http,
+  type HttpLike,
+  RateLimitWaitBudget,
+  rateLimitWaitMsFromEnv,
+  Warehouse,
+} from "@ivan/data";
 import { type AppDbHandle, openAppDb } from "@ivan/db";
 import type { LanguageModel } from "ai";
 
@@ -58,4 +65,18 @@ export function etlContext(
 ): EtlContext {
   const { wh, http } = env();
   return { wh, http, today: todayOf(), log, progress };
+}
+
+/**
+ * 夜间更新、每周抽检用的上下文：带等风控的预算（D108，ETL_RATE_LIMIT_WAIT_MS，默认 30 分钟）。
+ * 这两种任务在跑时回测排队（D60），不能为了等数据源解封一挂好几个小时。
+ */
+export function boundedEtlContext(
+  log: (m: string) => void,
+  progress?: EtlContext["progress"],
+): EtlContext {
+  return {
+    ...etlContext(log, progress),
+    rateLimitBudget: new RateLimitWaitBudget(rateLimitWaitMsFromEnv()),
+  };
 }

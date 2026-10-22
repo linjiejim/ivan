@@ -2,7 +2,7 @@
  * 行情仓写库期间不跑回测（D60）：认领规则的真值表，以及 computeBlocked 读 jobs 表的判断；
  * 自动重跑（D73）：没到时间的任务不认领、不挡回测，闸门没过时最多重跑 2 次。
  */
-import { IncompleteDataError } from "@ivan/data";
+import { IncompleteDataError, RetryableEtlError } from "@ivan/data";
 import {
   A_INDEX_SECIDS,
   emDailyRoute,
@@ -12,7 +12,7 @@ import {
 } from "@ivan/data/testing";
 import { jobs, newId } from "@ivan/db";
 import { eq } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { etlJob } from "./jobs/etl.ts";
 import { claim, computeBlocked, shouldWait } from "./runner.ts";
 import { fakeJobContext, makeTestEnv } from "./testing/harness.ts";
@@ -152,5 +152,70 @@ describe("自动重跑（D73）", () => {
       expect(j.notBefore! - Date.now()).toBeLessThanOrEqual(45 * 60_000);
       expect(j.payload).toMatchObject({ market: "A" });
     }
+  });
+
+  describe("数据源风控（D108）", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    const setup = async (http: FakeHttp) => {
+      const codes = Array.from({ length: 20 }, (_, i) => `${600000 + i}.SH`);
+      const t = await makeTestEnv({ http, today: "2026-10-09" });
+      cleanup = t.cleanup;
+      await seedSyntheticMarket(t.env.wh, {
+        market: "A",
+        start: "2026-09-21",
+        days: 14,
+        stocks: codes.map((code, k) => ({ code, name: `股${k}`, close: () => 10 + k })),
+      });
+      const retries = () =>
+        t.env.app.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.kind, "etl"))
+          .all()
+          .map((j) => ({ attempt: j.attempt, status: j.status, notBefore: j.notBefore }));
+      return { t, retries };
+    };
+
+    it("日 K 被封、等风控的预算不够：不睡，闸门判缺（写明风控），排 45 分钟后重跑，排队期间不挡回测", async () => {
+      vi.stubEnv("ETL_RATE_LIMIT_WAIT_MS", "0");
+      const until = Date.now() + 60 * 60_000;
+      const http = new FakeHttp([
+        // 报价出错：全部转逐股日 K；指数照常（先于日线），个股日 K 两家都被封
+        { match: /qt\.gtimg\.cn/, status: 500 },
+        { match: /push2his\.eastmoney\.com.*secid=1\.6/, block: { untilMs: until } },
+        { match: /web\.ifzq\.gtimg\.cn/, block: { untilMs: until } },
+        emDailyRoute({ ...A_INDEX_SECIDS }),
+      ]);
+      const { t, retries } = await setup(http);
+      const ctx = fakeJobContext("etl", { market: "A" }, { attempt: 0 });
+      const t0 = Date.now();
+      const e = await etlJob(ctx).catch((x: unknown) => x);
+      expect(Date.now() - t0).toBeLessThan(10_000);
+      expect(e).toBeInstanceOf(IncompleteDataError);
+      expect((e as Error).message).toMatch(/其中 \d+ 只是数据源风控、没等到解封/);
+      expect(ctx.logs.some((l) => /预算不够等到解封/.test(l))).toBe(true);
+      expect(ctx.logs.at(-1)).toMatch(/自动重试（第 1\/2 次）$/);
+      const [r] = retries();
+      expect(r).toMatchObject({ attempt: 1, status: "queued" });
+      expect(r!.notBefore! - Date.now()).toBeGreaterThan(40 * 60_000);
+      // 排着队等重跑：回测照常
+      expect(computeBlocked(t.env.app.sqlite, Date.now())).toBeNull();
+    });
+
+    it("日历指数被封：整晚抛可重跑的错，同样排 45 分钟后重跑", async () => {
+      const http = new FakeHttp([]);
+      for (const h of ["push2his.eastmoney.com", "web.ifzq.gtimg.cn"]) {
+        http.setBlocked(h, Date.now() + 30 * 60_000);
+      }
+      const { retries } = await setup(http);
+      const ctx = fakeJobContext("etl", { market: "A" }, { attempt: 0 });
+      const e = await etlJob(ctx).catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(RetryableEtlError);
+      expect((e as Error).message).toMatch(/^数据源风控：/);
+      expect(retries()).toEqual([expect.objectContaining({ attempt: 1, status: "queued" })]);
+    });
   });
 });
