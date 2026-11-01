@@ -236,7 +236,7 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 
 ![分享卡片](design/share-card.webp)
 
-- 图由 create-image（gpt-image-2，low 质量）生成，提示词见附录；后期用 [`scripts/ink-art.py`](../scripts/ink-art.py)：
+- 图由 gpt-image-2（low 质量）生成，提示词见附录；后期用 [`scripts/ink-art.py`](../scripts/ink-art.py)：
   `alpha` 去掉纸色只留墨与颜料（透明底，放在任何表面上都没有底框），`flatten` 把背景图的纸纹拉平。
 - 深色模式不另外画：`.ink-art` 用 `invert(1) hue-rotate(180deg)` 把墨反成月色，花青的色相保持不变。
 - 不用照片、不画 K 线、不画牛熊、不盖红色印章（红在这里是「涨」）。
@@ -268,7 +268,7 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 - 每个页面单独一个包，ECharts 跟着第一个有图的页面按需加载：登录页首屏 JS 从 375 KB 降到约 162 KB（gzip）；
   图标家族 tree-shake 到只剩用到的几十个。
 
-## 附录：生成提示词（create-image，gpt-image-2，low）
+## 附录：生成提示词（gpt-image-2，low）
 
 **标志推演**（1536×1024）
 > Premium minimal brand identity concept board for a product named "Ivan": a calm, honest research tool that backtests stock-picking strategies and then tracks them live every trading day (Chinese A-shares and Hong Kong stocks). Logo idea: an extremely simple monogram. One upright vertical stroke (reads as the capital letter I, and marks the moment a strategy goes live) crossed by one continuous line. Left of the stroke the line is thin and faint (the backtest); right of the stroke the same line becomes bold and solid and rises gently (live tracking). Geometric, consistent round-cap strokes, legible at 16px. Layout: clean 2x3 grid … Style: Swiss minimalism with Chinese ink-painting restraint … The only text allowed anywhere is "Ivan".

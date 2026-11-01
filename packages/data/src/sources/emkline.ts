@@ -1,7 +1,7 @@
 /**
  * 东财历史日 K（push2his.eastmoney.com）：一次请求返回整段历史，含成交额。
  * 口径（2026-09 实测）：fqt=0 不复权、fqt=2 后复权；后复权同腾讯一样是「a × 不复权价 + b」的仿射形式，
- * 价格精度 A 股 2 位小数、港股 3 位。本机与 jim-server 均可达（注意不是 push2.eastmoney.com）。
+ * 价格精度 A 股 2 位小数、港股 3 位。开发机与线上服务器均实测可达（注意不是 push2.eastmoney.com）。
  */
 import { type DateStr, parseCode } from "@ivan/core";
 import type { HttpLike } from "../http.ts";

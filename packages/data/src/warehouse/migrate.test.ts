@@ -69,7 +69,7 @@ describe("行情仓第 3 版升级", () => {
     wh.close();
   });
 
-  it("线上的真实路径（916a43c 的第 2 版：没有事件表、没有事件因子列）：light 进第 3 版维护，一次 auto 直接到第 5 版", async () => {
+  it("线上的真实路径（R0 的第 2 版：没有事件表、没有事件因子列）：light 进第 3 版维护，一次 auto 直接到第 5 版", async () => {
     const p2 = await makeV2("v2-to-v5.duckdb");
     let wh = await Warehouse.open(p2, { migrate: "light" });
     expect(wh.maintenance).toBe(MAINTENANCE_V3);

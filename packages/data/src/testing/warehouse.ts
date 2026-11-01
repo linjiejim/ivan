@@ -9,7 +9,7 @@ import { PROVENANCE_TABLES } from "../warehouse/schema.ts";
 export const V4_TABLES = ["margin_daily", "holder_counts", "lockups", "block_trades", "pit_sync", "pit_batches"] as const;
 
 /**
- * 把新建的（第 5 版）行情仓退回第 2 版（916a43c）的样子：删掉第 3 版加的列与表、第 4 版的事件表与序列、
+ * 把新建的（第 5 版）行情仓退回第 2 版（首版 R0，R1 之前）的样子：删掉第 3 版加的列与表、第 4 版的事件表与序列、
  * 第 5 版的 7 个事件因子列，版本号写回 2。线上的旧库就是这个形状，升级要一次 auto 走到第 5 版。
  */
 export async function downgradeWarehouseToV2(wh: Warehouse): Promise<void> {

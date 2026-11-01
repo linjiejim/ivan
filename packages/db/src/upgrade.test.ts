@@ -1,5 +1,5 @@
 /**
- * 应用库从 916a43c（只有 0000_init）升级到当前：旧行原样、新列取默认值、只追加的触发器建好；
+ * 应用库从首版 R0（R1 之前，只有 0000_init）升级到当前：旧行原样、新列取默认值、只追加的触发器建好；
  * 两个进程同时迁移时后到的那个出错会重来（重新读进度），不会把启动搞挂。
  */
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,7 +12,7 @@ import { migrateWithRetry, openAppDb } from "./index.ts";
 
 const MIGRATIONS = resolve(dirname(fileURLToPath(import.meta.url)), "../migrations");
 
-/** 只含 0000_init 的迁移目录（916a43c 那时的样子） */
+/** 只含 0000_init 的迁移目录（R0 那时的样子） */
 function baseFolder(): string {
   const dir = mkdtempSync(join(tmpdir(), "ivan-mig-"));
   mkdirSync(join(dir, "meta"));

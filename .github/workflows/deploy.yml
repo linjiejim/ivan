@@ -1,7 +1,10 @@
-# 持续集成 + 部署到 jim-server（说明见 DEPLOY.md）。
+# 持续集成 + 部署演示站（自己部署见 DEPLOY.md）。
 #   - PR：只跑检查（lint / format / typecheck / test / build）
 #   - push main：检查通过后 SSH 到服务器，等 worker 空闲 → 拉代码 → 锁文件变了才重装 → 构建前端 → 重启 → 健康检查
-# 需要 GitHub environment `jim-server`：DEV_SERVER_HOST / PORT / USERNAME / SSH_KEY（专用 CI 登录 key）。
+# 部署只在配了仓库变量 DEPLOY_ENVIRONMENT（environment 名）的仓库运行，fork 里默认不会触发。
+# environment 的 secrets：DEV_SERVER_HOST / PORT / USERNAME / SSH_KEY（专用 CI 登录 key），以及 DEPLOY_APP_DIR（服务器上的仓库目录）——
+# 它也放 secrets，是为了在公开的运行日志里打码（vars.* 会原样印出来）。端口从服务器上的 .env 读，不进日志。
+# 服务器用只读 deploy key（~/.ssh/deploy_ivan）经 ssh.github.com:443 拉代码，仓库私有或公开都一样。
 name: CI / Deploy
 
 on:
@@ -30,12 +33,12 @@ jobs:
 
   deploy:
     needs: [check]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: vars.DEPLOY_ENVIRONMENT != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: jim-server
+    environment: ${{ vars.DEPLOY_ENVIRONMENT }}
     # 两次部署不并行：后一次排队等前一次做完
     concurrency:
-      group: deploy-jim-server
+      group: deploy
       cancel-in-progress: false
     steps:
       - name: Deploy via SSH
@@ -49,14 +52,14 @@ jobs:
           script: |
             set -e
             export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; nvm use 22 >/dev/null
-            APP_DIR=/root/ivan/ivan; cd "$APP_DIR"; export CI=true; mkdir -p logs
+            APP_DIR="${{ secrets.DEPLOY_APP_DIR }}"; cd "$APP_DIR"; export CI=true; mkdir -p logs
 
             # 夜间任务 / 回测 / 回填在跑就先等（最多 15 分钟）；还忙就放弃，什么都不动
             node --no-warnings scripts/deploy-wait-idle.mjs
 
             eval "$(ssh-agent -s)" >/dev/null
             trap 'eval "$(ssh-agent -k)" >/dev/null 2>&1 || true' EXIT
-            ssh-add ~/.ssh/ivan_deploy 2>/dev/null
+            ssh-add ~/.ssh/deploy_ivan 2>/dev/null
             export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o HostName=ssh.github.com -p 443"
             git fetch origin main && git reset --hard origin/main
             echo "部署 $(git log -1 --format='%h %s')"
@@ -64,16 +67,23 @@ jobs:
             NEW_HASH=$(md5sum pnpm-lock.yaml | cut -d' ' -f1)
             OLD_HASH=$(cat .deploy-lock-hash 2>/dev/null || echo "")
             if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-              # 系统 Python 是 3.6，node-gyp 要 ≥ 3.8（服务器装了并存的 python3.11）
+              # node-gyp 要 Python ≥ 3.8；系统自带的太旧时用并存的 python3.11（见 DEPLOY.md「较老的发行版」）
               export npm_config_python="$(command -v python3.11 || command -v python3)"
-              pnpm install --frozen-lockfile
-              pnpm rebuild esbuild   # 这台机器会忽略 esbuild 的安装脚本；tsx 运行时要用它
-              bash scripts/ensure-native.sh   # glibc 2.28 跑不了 better-sqlite3 自带的预编译，就地编译（约 2 分钟）
+              # 有的主机会忽略 esbuild 的安装脚本（tsx 运行时要用它），所以 rebuild 一次；
+              # better-sqlite3 自带的预编译加载不了时 ensure-native 就地编译（约 2 分钟）。
+              # 安装输出里可能有服务器上的路径（pnpm store、node-gyp），写到服务器的日志里，不进公开的运行记录
+              {
+                pnpm install --frozen-lockfile &&
+                  pnpm rebuild esbuild &&
+                  bash scripts/ensure-native.sh
+              } >logs/deploy-install.log 2>&1 || { echo "依赖安装失败，详情在服务器的 logs/deploy-install.log"; exit 1; }
+              echo "依赖已重装"
               echo "$NEW_HASH" > .deploy-lock-hash
             fi
             pnpm --filter @ivan/web build
 
-            pm2 startOrRestart ecosystem.config.cjs --update-env && pm2 save
+            # PM2 的输出会列出主机上的所有进程，公开仓库的运行日志里不要它
+            pm2 startOrRestart ecosystem.config.cjs --update-env >/dev/null && pm2 save >/dev/null
 
             PORT=$(grep -E '^PORT=' .env | cut -d= -f2)
             WPORT=$(grep -E '^WORKER_PORT=' .env | cut -d= -f2)
@@ -85,8 +95,5 @@ jobs:
               echo "attempt $i: server HTTP $S, worker HTTP $W"
               [ "$S" = "200" ] && [ "$W" = "200" ] && break
             done
-            if [ "$S" != "200" ] || [ "$W" != "200" ]; then
-              tail -30 logs/server.error.log 2>/dev/null || true
-              tail -30 logs/worker.error.log 2>/dev/null || true
-              exit 1
-            fi
+            # 失败时不把日志打进公开的运行记录：到服务器上看 logs/
+            [ "$S" = "200" ] && [ "$W" = "200" ] || exit 1

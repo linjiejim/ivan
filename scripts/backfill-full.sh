@@ -8,7 +8,7 @@
 #
 # 用法：bash scripts/backfill-full.sh            （仓库根目录；日志写到 logs/backfill-日期.log）
 #       也可以交给定时器在夜里跑，比如：
-#       systemd-run --unit=ivan-backfill --setenv=HOME=/root --on-calendar="2026-09-29 20:30:00" /bin/bash /root/ivan/ivan/scripts/backfill-full.sh
+#       systemd-run --unit=ivan-backfill --setenv=HOME="$HOME" --on-calendar="YYYY-MM-DD 20:30:00" /bin/bash "$PWD/scripts/backfill-full.sh"
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)

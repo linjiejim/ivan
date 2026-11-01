@@ -11,7 +11,7 @@
 #
 # 用法：bash scripts/migrate.sh            （仓库根目录；日志写到 logs/migrate-日期.log）
 #       MIGRATE_MEMORY_LIMIT=768MB bash scripts/migrate.sh
-#       bash scripts/migrate.sh --down 4   （换回 R4 或更早的代码之前，包括 916a43c：删掉第 5 版的 7 个事件因子列、版本号写回 4；
+#       bash scripts/migrate.sh --down 4   （换回 R4 或更早的代码之前，包括 R1 之前的首版 R0：删掉第 5 版的 7 个事件因子列、版本号写回 4；
 #                                            要在当前代码的目录里、git reset 之前跑，见 DEPLOY.md）
 set -uo pipefail
 cd "$(dirname "$0")/.."

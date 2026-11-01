@@ -1,5 +1,5 @@
 /**
- * 回测线程池：大小由 BACKTEST_POOL_SIZE 决定（jim-server 默认 1）。线程起不来时退回主线程执行。
+ * 回测线程池：大小由 BACKTEST_POOL_SIZE 决定（默认 1，小内存机器保持 1）。线程起不来时退回主线程执行。
  *
  * 加固（spec §1）：线程崩溃（error / 非零 exit）时拒绝当前调用并重建线程；单次调用超过 timeoutMs 终止并重建；
  * 线程堆上限 resourceLimits.maxOldGenerationSizeMb。结算在串行的 etl 道里调它，一次崩溃或卡死不能堵住后面的任务。

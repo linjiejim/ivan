@@ -1344,7 +1344,7 @@ describe("个股证据（D67、D59）", () => {
         // worker 内部出错：原文带 SQL 与文件路径
         return new Response(
           JSON.stringify({
-            error: "Binder Error: column x not found in /root/ivan/data/market.duckdb",
+            error: "Binder Error: column x not found in /srv/ivan/data/market.duckdb",
           }),
           { status: 500 },
         );
@@ -2280,7 +2280,7 @@ describe("跟踪判词（D70）", () => {
           lastEtl: {
             status: "failed",
             finishedAt: 1,
-            error: "IO Error: /root/ivan/data/market.duckdb",
+            error: "IO Error: /srv/ivan/data/market.duckdb",
           },
           day: "stale" as const,
           sources: {

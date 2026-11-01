@@ -21,7 +21,7 @@
  *   screen <spec.json> [--date 日期] [--limit 30] 按策略在某天选股
  *   doctor                                    体检：数据源连通性 + 行情仓各表的规模与最新日期 + 失败的回填项
  *   migrate [--down 4]                        升级行情仓表结构（要改大表时 worker 不自己做，见 scripts/migrate.sh）；
- *                                              --down 4：换回 R4 或更早的代码（包括 916a43c）之前，删掉 7 个事件因子列（D83）
+ *                                              --down 4：换回 R4 或更早的代码（包括 R1 之前的首版 R0）之前，删掉 7 个事件因子列（D83）
  *   sql "<SQL>"                               对行情仓执行只读查询（调试用）
  *
  * 注意：worker 服务运行时独占行情仓文件，命令行要在 worker 停掉时跑（或通过管理页触发任务）。
@@ -421,7 +421,7 @@ async function main() {
         await wh.checkpoint();
         wh.close();
         console.log(
-          `行情仓已降到第 ${down} 版（删掉了事件因子列），用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒；现在可以换回 R4 或更早的代码（包括 916a43c）`,
+          `行情仓已降到第 ${down} 版（删掉了事件因子列），用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒；现在可以换回 R4 或更早的代码（包括 R1 之前的首版）`,
         );
         return;
       }

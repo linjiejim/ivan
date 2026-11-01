@@ -4,7 +4,7 @@
  * （b）默认成交假设的小盘回测 → get_run 的模型输出带容量提示、区间与行情来源。
  * （c）R5 升级（S15b，验收 20）：第 4 版行情仓上的旧回测与运行中的跟踪 → 迁移到第 5 版 + 事件列按年补算 →
  *     核心列逐字节不变、旧回测「输入一致」且完整重跑逐笔一致、跟踪 0 漂移且不加计划版次；用解禁因子的新回测运行卡带 data.events。
- * （d）从 916a43c 升级：运行卡之前的旧回测（收尾有待执行的卖单）复核「早于指纹记录」、完整重跑逐笔一致；
+ * （d）从首版 R0（R1 之前）升级：运行卡之前的旧回测（收尾有待执行的卖单）复核「早于指纹记录」、完整重跑逐笔一致；
  *     旧形状的跟踪第一晚 0 漂移、健康度补算一次、计划第 1 版，同一晚再结算什么都不加。
  */
 import { planForModel, type RunModelInput, runForModel } from "@ivan/ai";
@@ -460,7 +460,7 @@ describe("场景（验收 20，S15b）", () => {
 /** 旧回测的终点（日历下标）：持有满 3 天的仓位在这天收盘触发卖出，收尾时有待执行的卖单 */
 const LEGACY_END = 28;
 
-describe("场景：从 916a43c 升级（运行卡与健康度之前的跟踪）", () => {
+describe("场景：从 R0 升级（运行卡与健康度之前的跟踪）", () => {
   it("（d）运行卡之前的旧回测：复核「早于指纹记录」、完整重跑逐笔一致；旧形状的跟踪（summary 没有指纹与 lastDate、没有健康读数与计划快照、明日计划没有快照号）：第一晚 0 漂移、补算一次、计划第 1 版；同晚再结算不加任何东西", async () => {
     const { calendar } = await seedSyntheticMarket(t.env.wh, {
       market: "A",
@@ -485,7 +485,7 @@ describe("场景：从 916a43c 升级（运行卡与健康度之前的跟踪）"
     });
     const runOf = (id: string) => t.env.app.db.select().from(runs).where(eq(runs.id, id)).get()!;
 
-    // 916a43c 留下的回测：没有运行卡与输入指纹、引擎 1.1.0、旧口径（参数里没有 exec），收尾时有待执行的卖单（持有到期），
+    // R0 留下的回测：没有运行卡与输入指纹、引擎 1.1.0、旧口径（参数里没有 exec），收尾时有待执行的卖单（持有到期），
     // 存档的 final.pending 只有 1.1.0 写过的 {code, name, side, reason}
     const legacySpec = StrategySpecSchema.parse({ ...spec, exits: { maxHoldDays: 3 } });
     const legacy = insertRun(t.env.app, legacySpec, {
@@ -542,7 +542,7 @@ describe("场景：从 916a43c 升级（运行卡与健康度之前的跟踪）"
       cause: "none",
     });
 
-    // 旧跟踪：成交假设是旧口径（应用库迁移给的默认 {"v":1}）；先用新代码结算一晚拿到逐日净值，再改回 916a43c 留下的样子
+    // 旧跟踪：成交假设是旧口径（应用库迁移给的默认 {"v":1}）；先用新代码结算一晚拿到逐日净值，再改回 R0 留下的样子
     const { trackingId } = seedTracking(t.env.app, { spec, startDate: calendar[1]! });
     expect(await settleMarket("A", fakeJobContext("settle", { market: "A" }))).toEqual({
       settled: 1,
