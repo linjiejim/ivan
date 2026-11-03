@@ -31,6 +31,7 @@ export {
   ShieldCheckIcon as IconChecks, // 诚实检查
   DatabaseIcon as IconData, // 数据
   TicketIcon as IconInvite, // 邀请码
+  EnvelopeSimpleIcon as IconMail, // 试用申请（留邮箱要邀请码）
   UsersIcon as IconUsers, // 用户
   GaugeIcon as IconUsage, // 用量
   GearSixIcon as IconAdmin, // 管理

@@ -75,6 +75,11 @@ const router = createBrowserRouter([
     hydrateFallbackElement: <Boot />,
   },
   {
+    path: "/apply",
+    lazy: page(() => import("./pages/auth.tsx"), "ApplyPage"),
+    hydrateFallbackElement: <Boot />,
+  },
+  {
     path: "/",
     element: <Layout />,
     errorElement: <RouteError />,

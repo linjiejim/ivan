@@ -32,6 +32,28 @@ export const invites = sqliteTable(
   (t) => [uniqueIndex("invites_code").on(t.code)],
 );
 
+/** 试用申请（D109）：登录页公开提交，管理员在管理页发邀请或忽略 */
+export const trialRequests = sqliteTable(
+  "trial_requests",
+  {
+    id: text("id").primaryKey(),
+    email: text("email").notNull(),
+    name: text("name"),
+    message: text("message"),
+    /** pending | invited | dismissed */
+    status: text("status").notNull().default("pending"),
+    inviteCode: text("invite_code"),
+    /** 给管理员的提醒邮件没发出去时的原因；空 = 发出去了或没配发信 */
+    notifyError: text("notify_error"),
+    createdAt: integer("created_at").notNull().default(now),
+    handledAt: integer("handled_at"),
+  },
+  (t) => [
+    index("trial_requests_status").on(t.status, t.createdAt),
+    index("trial_requests_email").on(t.email),
+  ],
+);
+
 /** 每人每日额度覆盖（为空用实例默认值） */
 export const userQuotas = sqliteTable("user_quotas", {
   userId: text("user_id").primaryKey(),

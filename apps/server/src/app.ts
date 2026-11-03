@@ -3,6 +3,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { serveStatic } from "@hono/node-server/serve-static";
 import {
   addDays,
@@ -22,6 +23,7 @@ import { streamSSE } from "hono/streaming";
 import type { Auth } from "./auth.ts";
 import { env } from "./env.ts";
 import { AppError, forbidden } from "./lib/errors.ts";
+import { mailConfigured } from "./lib/mail.ts";
 import { QUOTA_KINDS, type QuotaKind, quotaOf, usageToday } from "./lib/quota.ts";
 import { worker } from "./lib/worker-client.ts";
 import { dashboard, type DataQuality, dataStatus } from "./services/dashboard.ts";
@@ -61,6 +63,13 @@ import {
   trackingChart,
   verdictView,
 } from "./services/trackings.ts";
+import {
+  createInvite,
+  dismissTrialRequest,
+  inviteTrialRequest,
+  listTrialRequests,
+  submitTrialRequest,
+} from "./services/trial-requests.ts";
 
 export interface SessionUser {
   id: string;
@@ -89,12 +98,15 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-function inviteCode(): string {
-  let s = "";
-  for (let i = 0; i < 8; i++)
-    s += INVITE_ALPHABET[Math.floor(Math.random() * INVITE_ALPHABET.length)];
-  return s;
+/** 访客 IP：放在反向代理后面时取代理写的 X-Forwarded-For，直连时取 socket 地址 */
+function clientIp(c: Context): string {
+  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  if (forwarded) return forwarded;
+  try {
+    return getConnInfo(c).remote.address ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void) {
@@ -109,9 +121,10 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
 
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
-  // 除鉴权与健康检查外，/api/* 都要登录
+  // 除鉴权、健康检查与试用申请（D109）外，/api/* 都要登录
   app.use("/api/*", async (c, next) => {
     if (c.req.path === "/api/health" || c.req.path === "/api/setup") return next();
+    if (c.req.path === "/api/trial-requests" && c.req.method === "POST") return next();
     const session = await auth.api.getSession({ headers: c.req.raw.headers });
     if (!session) return c.json({ error: "请先登录" }, 401);
     const u = session.user as unknown as SessionUser;
@@ -125,11 +138,15 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   };
 
   app.get("/api/health", (c) => c.json({ ok: true }));
-  /** 注册页需要知道是不是空库（空库第一个人不需要邀请码） */
+  /** 注册页需要知道是不是空库（空库第一个人不需要邀请码），登录页需要知道能不能申请试用 */
   app.get("/api/setup", (c) => {
-    const { sqlite } = env().app;
-    const n = (sqlite.prepare(`SELECT count(*) AS n FROM "user"`).get() as { n: number }).n;
-    return c.json({ needsAdmin: n === 0 });
+    const { cfg, app: appDb } = env();
+    const n = (appDb.sqlite.prepare(`SELECT count(*) AS n FROM "user"`).get() as { n: number }).n;
+    return c.json({ needsAdmin: n === 0, trialRequests: cfg.trial.enabled });
+  });
+  app.post("/api/trial-requests", async (c) => {
+    await submitTrialRequest(await body(c), clientIp(c));
+    return c.json({ ok: true });
   });
 
   app.get("/api/me", (c) => {
@@ -542,18 +559,26 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   app.post("/api/admin/invites", async (c) => {
     const u = admin(c);
     const b = await body<{ note?: string; days?: number }>(c);
-    const code = inviteCode();
-    env()
-      .app.db.insert(invites)
-      .values({
-        id: newId("inv_"),
-        code,
-        note: b.note ?? null,
-        createdBy: u.id,
-        expiresAt: b.days ? Date.now() + b.days * 86_400_000 : null,
-      })
-      .run();
-    return c.json({ code });
+    return c.json({ code: createInvite(u.id, b.note ?? null, b.days ?? null) });
+  });
+  app.get("/api/admin/trial-requests", (c) => {
+    admin(c);
+    const { trial } = env().cfg;
+    return c.json({
+      enabled: trial.enabled,
+      notifies: trial.notifyTo !== "" && mailConfigured(),
+      mail: mailConfigured(),
+      requests: listTrialRequests(),
+    });
+  });
+  app.post("/api/admin/trial-requests/:id/invite", async (c) => {
+    const u = admin(c);
+    return c.json(await inviteTrialRequest(c.req.param("id"), u.id));
+  });
+  app.post("/api/admin/trial-requests/:id/dismiss", (c) => {
+    admin(c);
+    dismissTrialRequest(c.req.param("id"));
+    return c.json({ ok: true });
   });
   app.delete("/api/admin/invites/:code", (c) => {
     admin(c);

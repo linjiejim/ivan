@@ -1,5 +1,5 @@
 /**
- * 管理页（spec §10、§11）：用户与额度、邀请码、数据状态与手动触发任务、数据质量（D74）、今日用量、近 14 天 LLM 用量。
+ * 管理页（spec §10、§11）：用户与额度、试用申请（D109）、邀请码、数据状态与手动触发任务、数据质量（D74）、今日用量、近 14 天 LLM 用量。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PIT_DATASET_IDS, todayCN } from "@ivan/core";
@@ -12,6 +12,7 @@ import {
   IconData,
   IconInvite,
   IconKey,
+  IconMail,
   IconOffline,
   IconRefresh,
   IconUsage,
@@ -98,6 +99,28 @@ interface Invite {
   expiresAt: number | null;
   usedBy: string | null;
   usedAt: number | null;
+}
+interface TrialRequest {
+  id: string;
+  email: string;
+  name: string | null;
+  message: string | null;
+  status: "pending" | "invited" | "dismissed";
+  inviteCode: string | null;
+  notifyError: string | null;
+  createdAt: number;
+}
+interface TrialRequests {
+  enabled: boolean;
+  /** 新申请会不会发邮件提醒管理员 */
+  notifies: boolean;
+  requests: TrialRequest[];
+}
+interface TrialInviteResult {
+  code: string;
+  link: string;
+  emailed: boolean;
+  emailError: string | null;
 }
 interface JobRow {
   id: string;
@@ -455,6 +478,131 @@ function EventsSection({
   );
 }
 
+/** 试用申请（D109）：待处理的在前，发邀请（配了发信就直接发到对方邮箱）或忽略；已处理的只留最近 10 条 */
+function TrialRequestsCard() {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["admin-trial-requests"],
+    queryFn: () => api.get<TrialRequests>("/api/admin/trial-requests"),
+  });
+  const [results, setResults] = useState<Record<string, TrialInviteResult>>({});
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["admin-trial-requests"] });
+    void qc.invalidateQueries({ queryKey: ["admin-invites"] });
+  };
+  const invite = useMutation({
+    mutationFn: (id: string) =>
+      api.post<TrialInviteResult>(`/api/admin/trial-requests/${id}/invite`),
+    onSuccess: (r, id) => {
+      setResults((prev) => ({ ...prev, [id]: r }));
+      refresh();
+    },
+  });
+  const dismiss = useMutation({
+    mutationFn: (id: string) => api.post(`/api/admin/trial-requests/${id}/dismiss`),
+    onSuccess: refresh,
+  });
+  const data = q.data;
+  if (!data || (!data.enabled && data.requests.length === 0)) return null;
+  const pending = data.requests.filter((r) => r.status === "pending");
+  const handled = data.requests.filter((r) => r.status !== "pending").slice(0, 10);
+  const subtitle = !data.enabled
+    ? "登录页已关闭申请；下面是以前的记录"
+    : data.notifies
+      ? "登录页可以申请；新申请会发邮件提醒你"
+      : "登录页可以申请；没配发信，新申请只记在这里";
+  return (
+    <Card
+      title={pending.length ? `试用申请 · ${pending.length} 条待处理` : "试用申请"}
+      icon={IconMail}
+      subtitle={subtitle}
+    >
+      {data.requests.length === 0 ? (
+        <p className="text-sm text-muted">还没有人申请。</p>
+      ) : (
+        <ul>
+          {[...pending, ...handled].map((r) => {
+            const result = results[r.id];
+            const busy =
+              (invite.isPending && invite.variables === r.id) ||
+              (dismiss.isPending && dismiss.variables === r.id);
+            return (
+              <li key={r.id} className="border-b border-line py-3 text-sm last:border-0">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span
+                    className={cx(
+                      "font-medium",
+                      r.status === "pending" ? "text-ink" : "text-muted",
+                    )}
+                  >
+                    {r.email}
+                  </span>
+                  {r.name && <span className="text-ink-2">{r.name}</span>}
+                  {r.status === "invited" && <Badge tone="accent">已邀请</Badge>}
+                  {r.status === "dismissed" && <Badge>已忽略</Badge>}
+                  {r.notifyError && (
+                    <span title={r.notifyError}>
+                      <Badge tone="warn" icon={IconWarn} iconWeight="fill">
+                        提醒没发出去
+                      </Badge>
+                    </span>
+                  )}
+                  <span className="ml-auto font-mono text-[11px] text-muted">
+                    {dateTime(r.createdAt)}
+                  </span>
+                </div>
+                {r.message && (
+                  <p className="mt-1 text-[13px] leading-6 whitespace-pre-line text-ink-2">
+                    {r.message}
+                  </p>
+                )}
+                {r.status === "pending" && (
+                  <div className="mt-2 flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={IconInvite}
+                      loading={invite.isPending && invite.variables === r.id}
+                      disabled={busy}
+                      onClick={() => invite.mutate(r.id)}
+                    >
+                      发邀请
+                    </Button>
+                    <Button
+                      size="sm"
+                      loading={dismiss.isPending && dismiss.variables === r.id}
+                      disabled={busy}
+                      onClick={() => dismiss.mutate(r.id)}
+                    >
+                      忽略
+                    </Button>
+                  </div>
+                )}
+                {result &&
+                  (result.emailed ? (
+                    <p className="mt-2 flex items-center gap-1.5 text-[13px] text-ink-2">
+                      <IconCheck size={14} className="text-accent" />
+                      注册链接已发到对方邮箱
+                    </p>
+                  ) : (
+                    <Callout
+                      tone="warn"
+                      className="mt-2 text-[13px]"
+                      action={<CopyButton text={result.link} label="复制注册链接" />}
+                    >
+                      邮件没发出去（{result.emailError}），复制注册链接自己发给对方。
+                    </Callout>
+                  ))}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <ErrorNote error={invite.error ?? dismiss.error} />
+    </Card>
+  );
+}
+
 export function AdminPage() {
   usePageTitle("管理");
   const me = useMe();
@@ -682,6 +830,8 @@ export function AdminPage() {
       </Card>
 
       <DataQualityCard quality={data.data?.quality ?? null} />
+
+      <TrialRequestsCard />
 
       <Card title="邀请码" icon={IconInvite} subtitle="一次性，14 天有效；把注册链接发给朋友">
         <form

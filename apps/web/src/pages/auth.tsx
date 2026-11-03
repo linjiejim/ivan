@@ -1,5 +1,5 @@
 /**
- * 登录 / 注册（D11）：空库第一个注册的人自动成为管理员，之后注册要邀请码。
+ * 登录 / 注册（D11）：空库第一个注册的人自动成为管理员，之后注册要邀请码；没有邀请码的人可以申请试用（D109）。
  * 这是品牌的第一面：整幅水墨（山脊是一条从淡到浓、一路上扬的净值线），表单落在留白的那一半纸上。
  */
 import { useQuery } from "@tanstack/react-query";
@@ -8,8 +8,8 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import tallArt from "../assets/ink/auth-tall.webp";
 import wideArt from "../assets/ink/auth-wide.webp";
 import { Wordmark } from "../components/brand.tsx";
-import { IconArrowRight, IconHide, IconShow } from "../components/icons.tsx";
-import { Button, Callout, ErrorNote, Field, Input } from "../components/ui.tsx";
+import { IconArrowRight, IconHide, IconSend, IconShow, IconSuccess } from "../components/icons.tsx";
+import { Button, Callout, ErrorNote, Field, Input, Textarea } from "../components/ui.tsx";
 import { api } from "../lib/api.ts";
 import { authClient } from "../lib/auth.ts";
 import { usePageTitle } from "../lib/title.ts";
@@ -91,6 +91,14 @@ function PasswordInput({
   );
 }
 
+/** 空库要不要建管理员、这个实例开没开放试用申请 */
+function useSetup() {
+  return useQuery({
+    queryKey: ["setup"],
+    queryFn: () => api.get<{ needsAdmin: boolean; trialRequests?: boolean }>("/api/setup"),
+  });
+}
+
 function FootLink({ to, children }: { to: string; children: ReactNode }) {
   return (
     <Link
@@ -114,6 +122,7 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const trial = useSetup().data?.trialRequests;
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -129,6 +138,11 @@ export function LoginPage() {
       foot={
         <>
           没有账号？<FootLink to="/register">用邀请码注册</FootLink>
+          {trial && (
+            <span className="mt-1.5 block">
+              没有邀请码？<FootLink to="/apply">申请试用</FootLink>
+            </span>
+          )}
         </>
       }
     >
@@ -157,10 +171,7 @@ export function LoginPage() {
 
 export function RegisterPage() {
   usePageTitle("注册");
-  const setup = useQuery({
-    queryKey: ["setup"],
-    queryFn: () => api.get<{ needsAdmin: boolean }>("/api/setup"),
-  });
+  const setup = useSetup();
   const [params] = useSearchParams();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -218,7 +229,22 @@ export function RegisterPage() {
           />
         </Field>
         {!first && (
-          <Field label="邀请码" hint="向管理员要一个；注册链接里带的会自动填好">
+          <Field
+            label="邀请码"
+            hint={
+              setup.data?.trialRequests ? (
+                <>
+                  没有的话可以
+                  <Link to="/apply" className="text-accent hover:text-accent-strong">
+                    申请一个
+                  </Link>
+                  ；注册链接里带的会自动填好
+                </>
+              ) : (
+                "向管理员要一个；注册链接里带的会自动填好"
+              )
+            }
+          >
             <Input
               required
               value={invite}
@@ -234,6 +260,97 @@ export function RegisterPage() {
           {first ? "创建并进入" : "注册"}
         </Button>
       </form>
+    </Shell>
+  );
+}
+
+export function ApplyPage() {
+  usePageTitle("申请试用");
+  const setup = useSetup();
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [message, setMessage] = useState("");
+  const [website, setWebsite] = useState("");
+  const [err, setErr] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post("/api/trial-requests", { email, name, message, website });
+      setDone(true);
+    } catch (error) {
+      setErr(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const closed = setup.data && !setup.data.trialRequests;
+  return (
+    <Shell
+      title="申请试用"
+      foot={
+        <>
+          已经有邀请码？<FootLink to="/register">去注册</FootLink>
+        </>
+      }
+    >
+      {done ? (
+        <Callout tone="info" icon={IconSuccess} className="text-sm leading-6">
+          收到了。看过之后会把注册链接发到 <span className="font-medium text-ink">{email}</span>
+          ，一般一两天内。
+        </Callout>
+      ) : closed ? (
+        <Callout tone="neutral" className="text-sm leading-6">
+          这个实例没有开放申请，向管理员要一个邀请码吧。
+        </Callout>
+      ) : (
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="邮箱" hint="邀请码会发到这里，只用来联系你">
+            <Input
+              type="email"
+              required
+              autoFocus
+              maxLength={200}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
+            />
+          </Field>
+          <Field label="怎么称呼" hint="可以不填">
+            <Input
+              maxLength={50}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="nickname"
+            />
+          </Field>
+          <Field label="想用 Ivan 看什么" hint="比如想验证的选股思路，一两句就够；可以不填">
+            <Textarea
+              rows={3}
+              maxLength={1000}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+            />
+          </Field>
+          {/* 蜜罐：人看不到也点不到，脚本才会填 */}
+          <div aria-hidden className="absolute -left-[9999px] size-px overflow-hidden">
+            <input
+              tabIndex={-1}
+              autoComplete="off"
+              name="website"
+              value={website}
+              onChange={(e) => setWebsite(e.target.value)}
+            />
+          </div>
+          <ErrorNote error={err} className="mt-0" />
+          <Button type="submit" variant="primary" icon={IconSend} className="w-full" loading={busy}>
+            提交申请
+          </Button>
+        </form>
+      )}
     </Shell>
   );
 }

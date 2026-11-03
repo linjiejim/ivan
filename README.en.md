@@ -64,6 +64,10 @@ A full A-share + HK backfill takes roughly 2–4 hours because requests are deli
 
 Open `PUBLIC_URL`; **the first account to register becomes the admin**, after which sign-up needs an invite code (generated in the admin page or with `pnpm admin invite`).
 
+To let strangers ask for a code, set `TRIAL_REQUESTS_ENABLED=true`: the login page gains a "request a trial" form, requests land in the admin page,
+and the admin sends an invite or dismisses each one. Add a [Resend](https://resend.com) `RESEND_API_KEY` and `TRIAL_NOTIFY_TO` to get an email for every new request;
+to email invites straight to applicants, verify your own domain in Resend and set `MAIL_FROM` (see `.env.example`).
+
 Running it on a VPS behind a reverse proxy, the worker memory budget, older Linux distributions, push-to-deploy with GitHub Actions,
 warehouse upgrades, and rollback are covered in [DEPLOY.md](DEPLOY.md) (Chinese).
 

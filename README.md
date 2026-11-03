@@ -84,6 +84,10 @@ pm2 start ecosystem.config.cjs && pm2 save
 
 打开 `PUBLIC_URL`，**第一个注册的账号自动成为管理员**，之后注册需要邀请码（管理页生成，或 `pnpm admin invite`）。
 
+想让陌生人也能要邀请码，设 `TRIAL_REQUESTS_ENABLED=true`：登录页多一个「申请试用」，访客留下邮箱和想看什么，
+申请记在管理页，管理员一键发邀请或忽略。再配上 [Resend](https://resend.com) 的 `RESEND_API_KEY` 和 `TRIAL_NOTIFY_TO`，
+新申请会发邮件提醒你；要把邀请直接发到申请人邮箱，还得在 Resend 验证自己的域名并设 `MAIL_FROM`（见 `.env.example`，spec D109）。
+
 夜间任务（工作日，北京时间）：17:30 更新 A 股并结算 A 股跟踪、18:00 港股、19:00 生成简报，周日 03:00 抽检历史日线。
 管理页可以手动触发。每晚的顺序是：指数与日历 → 证券表 → 日线 → **完整性闸门** → 简称、财报与股本 → 因子 → 结算（spec D73）。
 闸门在财报与因子之前：缺日线的股票超过 A 股 max(3, 0.2%)、港股 max(5, 0.3%)，或今天没成交的股票远多于平时，

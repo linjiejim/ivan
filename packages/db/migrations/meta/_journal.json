@@ -71,6 +71,13 @@
       "when": 1791293420849,
       "tag": "0009_job_retry",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1793693453160,
+      "tag": "0010_trial_requests",
+      "breakpoints": true
     }
   ]
 }

@@ -37,6 +37,10 @@ export interface Config {
   backtestThreadMemoryMb: number;
   fetch: { concurrency: number; minIntervalMs: number };
   schedulerEnabled: boolean;
+  /** 试用申请（D109）：登录页能不能申请邀请码，申请提醒发给谁（空 = 只记在管理页） */
+  trial: { enabled: boolean; notifyTo: string };
+  /** 发信（D109）：经 Resend 的 HTTP 接口；没有 key 就不发信 */
+  mail: { resendApiKey: string; from: string };
 }
 
 let cached: Config | undefined;
@@ -81,6 +85,14 @@ export function loadConfig(): Config {
       minIntervalMs: int("FETCH_MIN_INTERVAL_MS", 50),
     },
     schedulerEnabled: (e.SCHEDULER_ENABLED ?? "true") !== "false",
+    trial: {
+      enabled: e.TRIAL_REQUESTS_ENABLED === "true",
+      notifyTo: e.TRIAL_NOTIFY_TO?.trim() ?? "",
+    },
+    mail: {
+      resendApiKey: e.RESEND_API_KEY?.trim() ?? "",
+      from: e.MAIL_FROM?.trim() || "Ivan <onboarding@resend.dev>",
+    },
   };
   return cached;
 }
