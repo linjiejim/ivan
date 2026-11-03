@@ -31,20 +31,39 @@ let app: ReturnType<typeof createApp>;
 let sent: Mail[] = [];
 let failMail = false;
 
+/** 模拟一个连进来的 socket：peer 是直连的对端；peer 为本机时 forwarded 是本机代理写的 X-Forwarded-For */
+const socketEnv = (peer: string) => ({
+  incoming: { socket: { remoteAddress: peer, remotePort: 40000, remoteFamily: "IPv4" } },
+});
+
 async function call(
   path: string,
-  init: { method?: string; body?: unknown; cookie?: string; ip?: string } = {},
+  init: {
+    method?: string;
+    body?: unknown;
+    cookie?: string;
+    ip?: string;
+    peer?: string;
+    forwarded?: string;
+  } = {},
 ) {
-  const res = await app.request(path, {
-    method: init.method ?? (init.body ? "POST" : "GET"),
-    headers: {
-      "content-type": "application/json",
-      origin: cfg.publicUrl,
-      "x-forwarded-for": init.ip ?? "203.0.113.1",
-      ...(init.cookie ? { cookie: init.cookie } : {}),
+  const peer = init.peer ?? "127.0.0.1";
+  const forwarded =
+    init.forwarded ?? (peer === "127.0.0.1" ? (init.ip ?? "203.0.113.1") : undefined);
+  const res = await app.request(
+    path,
+    {
+      method: init.method ?? (init.body ? "POST" : "GET"),
+      headers: {
+        "content-type": "application/json",
+        origin: cfg.publicUrl,
+        ...(forwarded ? { "x-forwarded-for": forwarded } : {}),
+        ...(init.cookie ? { cookie: init.cookie } : {}),
+      },
+      body: init.body ? JSON.stringify(init.body) : undefined,
     },
-    body: init.body ? JSON.stringify(init.body) : undefined,
-  });
+    socketEnv(peer),
+  );
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, json, cookie: res.headers.get("set-cookie")?.split(";")[0] ?? "" };
 }
@@ -157,6 +176,27 @@ describe("提交申请", () => {
       ip: "198.51.100.7",
     });
     expect(other.status).toBe(200);
+  });
+
+  it("直连时不信客户端自己写的 X-Forwarded-For，按 socket 地址限流", async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await call("/api/trial-requests", {
+        body: { email: `spoof${i}@example.com` },
+        peer: "198.51.100.20",
+        forwarded: `192.0.2.${i}`,
+      });
+      expect(r.status).toBe(i < 3 ? 200 : 429);
+    }
+  });
+
+  it("经本机代理时取代理追加的最后一段，客户端在前面伪造的不算", async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await call("/api/trial-requests", {
+        body: { email: `chain${i}@example.com` },
+        forwarded: `192.0.2.${i}, 198.51.100.30`,
+      });
+      expect(r.status).toBe(i < 3 ? 200 : 429);
+    }
   });
 
   it("提醒没发出去也照样收下，原因记在申请上", async () => {

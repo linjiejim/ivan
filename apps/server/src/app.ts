@@ -98,15 +98,22 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-/** 访客 IP：放在反向代理后面时取代理写的 X-Forwarded-For，直连时取 socket 地址 */
-function clientIp(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwarded) return forwarded;
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+/**
+ * 访客 IP（试用申请限流用）：默认取 socket 地址。只有连进来的是本机（同机的 Caddy / Nginx）时才信
+ * X-Forwarded-For，并取最后一段——那是本机代理亲眼看到的地址；前面几段是客户端自己写的，可以随便编。
+ */
+export function clientIp(c: Context): string {
+  let peer: string | undefined;
   try {
-    return getConnInfo(c).remote.address ?? "unknown";
+    peer = getConnInfo(c).remote.address;
   } catch {
-    return "unknown";
+    // 不是经 node-server 进来的请求（测试里的 app.request），没有 socket
   }
+  if (!peer) return "unknown";
+  if (!LOOPBACK.has(peer)) return peer;
+  return c.req.header("x-forwarded-for")?.split(",").at(-1)?.trim() || peer;
 }
 
 export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void) {

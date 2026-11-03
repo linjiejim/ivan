@@ -505,7 +505,13 @@ function TrialRequestsCard() {
   const data = q.data;
   if (!data || (!data.enabled && data.requests.length === 0)) return null;
   const pending = data.requests.filter((r) => r.status === "pending");
-  const handled = data.requests.filter((r) => r.status !== "pending").slice(0, 10);
+  // 刚处理过的（有结果要看：邮件没发出去时的复制链接）不受「最近 10 条」限制
+  const handled = data.requests.filter(
+    (r, i, all) =>
+      r.status !== "pending" &&
+      (results[r.id] !== undefined ||
+        all.slice(0, i).filter((x) => x.status !== "pending").length < 10),
+  );
   const subtitle = !data.enabled
     ? "登录页已关闭申请；下面是以前的记录"
     : data.notifies
