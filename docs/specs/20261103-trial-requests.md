@@ -46,3 +46,9 @@
 `trial-requests.test.ts` 覆盖验收 1–4（14 个用例），全量 948 个测试通过。Codex 评审一轮，两条都修了：
 限流原来无条件信 `X-Forwarded-For`，直连时能伪造绕过（改成只信本机代理、取最后一段）；
 发邀请后结果可能被「最近 10 条」截掉，邮件没发出去的提示跟着看不见（刚处理的不受截断）。
+
+### 2026-11-03 上线（main 95d1b45）
+
+CI 第一次跑时 `pit-runner.test.ts` 的并发读测试偶发失败（本机连跑 6 次都过，这次没碰 `packages/data`），重跑后通过并部署。
+部署前备份了应用库。发信域名 `linjiejim.com` 已在 Resend 验证（DKIM、SPF、DMARC），Ivan 用一把只能从这个域名发信的 key；
+`TRIAL_REQUESTS_ENABLED=true`，提醒发到管理员的 Gmail。线上提交一条测试申请，提醒邮件发出、没有报错。
