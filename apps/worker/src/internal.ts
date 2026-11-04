@@ -18,6 +18,7 @@ import {
   AnalyticsError,
   benchFirstDates,
   captureStatus,
+  catchUpState,
   committedAsOf,
   dataQuality,
   dataVersionState,
@@ -255,6 +256,8 @@ export function createInternalApp() {
         day: await marketDayStatus(m),
         // 正在写的版本、上一个版本的结果（D60）
         ...(await dataVersionState(wh, m)),
+        // 补数据的进度（D111）：截至日提交到了哪天、还有几只之前的日子没补上
+        ...(await catchUpState(wh, m)),
         // 点时数据的采集情况（D61）
         capture: await captureStatus(wh, m, todayOf()),
         // 最近一晚各来源服务了多少只、回退几次（D72）

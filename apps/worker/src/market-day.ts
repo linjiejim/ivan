@@ -3,7 +3,8 @@
  *
  * - traded：最新的已提交（ok）数据版本 as_of = 今天；
  * - closed：今天是周末，或今天这个市场的 etl 任务已完成且结果是 tradingDay: false；
- * - stale：今天这个市场有失败的 etl 任务且之后没有成功，或有排着队等自动重跑的 etl 任务（attempt > 0，D73）；
+ * - stale：今天这个市场有失败的 etl 任务且之后没有成功，或有排着队等自动重跑的 etl 任务（attempt > 0，D73），
+ *   或最后完成的 etl 任务还在补数据（截至日没到今天，D111）；
  * - pending：其余（还没跑、排着队或正在跑）。
  *
  * 「休市」只认 etl 任务明确返回的非交易日（或周末），不从交易日历里有没有今天推断：
@@ -38,6 +39,9 @@ export function classifyMarketDay(i: {
   if (jobsToday.some((j) => j.status === "done" && j.result?.tradingDay === false)) return "closed";
   // 排着队等自动重跑（D73）：简报、判词、横幅都说「没更新」，不说休市也不说正常
   if (jobsToday.some((j) => j.status === "queued" && (j.attempt ?? 0) > 0)) return "stale";
+  // 补数据中（D111）：任务完成了，但截至日只提交到之前齐全的那天
+  const lastDone = jobsToday.findLast((j) => j.status === "done");
+  if (lastDone?.result?.catchUp) return "stale";
   const lastFailed = jobsToday.findLast((j) => j.status === "failed");
   if (lastFailed) {
     const doneAfter = jobsToday.some(

@@ -35,6 +35,12 @@ describe("市场当日状态（D78）", () => {
       "pending",
     ],
     ["没有任务 → 进行中", day([]), "pending"],
+    // 补数据中（D111）：任务完成了，截至日只提交到之前齐全的那天
+    [
+      "补数据的任务完成 → 没更新",
+      day([job("done", 18, { tradingDay: true, catchUp: { asOf: "2026-09-30" } })]),
+      "stale",
+    ],
     ["正在跑 → 进行中", day([job("running", 17)]), "pending"],
     ["排着队 → 进行中", day([job("queued", 17)]), "pending"],
     // 排队等自动重跑（attempt > 0，D73）算没更新
