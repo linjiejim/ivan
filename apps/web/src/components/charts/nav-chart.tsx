@@ -4,7 +4,7 @@
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 import { pct } from "../../lib/format.ts";
-import { Segmented } from "../ui.tsx";
+import { Segmented, TOUCH_QUERY, useMediaQuery } from "../ui.tsx";
 import {
   axisStyle,
   EChart,
@@ -37,7 +37,7 @@ export function NavChart({
   benchLabel = "基准",
   strategyLabel = "策略",
   height = 280,
-  onAsk,
+  onAsk: onAskProp,
   defaultView = "nav",
 }: {
   points: NavPoint[];
@@ -50,6 +50,8 @@ export function NavChart({
   defaultView?: View;
 }) {
   const [view, setView] = useState<View>(defaultView);
+  // 触屏不开框选（D112）：框选占住了图上的拖动，手指从图上开始滑整页就滚不动；手机上问 AI 走对话页
+  const onAsk = useMediaQuery(TOUCH_QUERY) ? undefined : onAskProp;
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const themeV = useThemeVersion();
   const chartRef = useRef<EChartsInstance | null>(null);

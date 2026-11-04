@@ -47,6 +47,7 @@ import {
   IconButton,
   Info,
   InfoRows,
+  MoreActions,
   PageHeader,
   PageSkeleton,
   Skeleton,
@@ -248,7 +249,7 @@ function Trades({ runId }: { runId: string }) {
         <tbody>
           {q.data.trades.map((t) => (
             <tr key={t.seq} className="transition-colors hover:bg-surface-2/60">
-              <Td className="font-mono text-[12px] text-ink-2">{t.date}</Td>
+              <Td className="font-mono text-[12px] whitespace-nowrap text-ink-2">{t.date}</Td>
               <Td>
                 <span className="text-ink">{t.name ?? t.code}</span>
                 {t.name && (
@@ -509,43 +510,43 @@ export function RunPage() {
         r.status === "done" &&
         r.kind !== "sweep" && (
           <>
-            {verifiable && (
-              <>
-                <Button
-                  variant="ghost"
-                  icon={IconVerify}
-                  loading={verify.isPending}
-                  disabled={verifying}
-                  onClick={() => verify.mutate()}
-                >
-                  {r.verify?.status === "queued"
-                    ? "排队中"
-                    : r.verify?.status === "running"
-                      ? "复核中"
-                      : "复核数据"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  icon={IconReproduce}
-                  loading={reproduce.isPending}
-                  disabled={verifying}
-                  onClick={() => reproduce.mutate()}
-                >
-                  完整重跑
-                </Button>
-              </>
-            )}
-            {legacyExec && (
-              <Button
-                variant="ghost"
-                icon={IconRun}
-                onClick={() =>
-                  navigate(`/strategies/${r.strategyId}?backtest=${r.id}&exec=default`)
-                }
-              >
-                按新口径重新回测
-              </Button>
-            )}
+            <MoreActions
+              actions={[
+                ...(verifiable
+                  ? [
+                      {
+                        label:
+                          r.verify?.status === "queued"
+                            ? "排队中"
+                            : r.verify?.status === "running"
+                              ? "复核中"
+                              : "复核数据",
+                        icon: IconVerify,
+                        loading: verify.isPending,
+                        disabled: verifying,
+                        onClick: () => verify.mutate(),
+                      },
+                      {
+                        label: "完整重跑",
+                        icon: IconReproduce,
+                        loading: reproduce.isPending,
+                        disabled: verifying,
+                        onClick: () => reproduce.mutate(),
+                      },
+                    ]
+                  : []),
+                ...(legacyExec
+                  ? [
+                      {
+                        label: "按新口径重新回测",
+                        icon: IconRun,
+                        onClick: () =>
+                          navigate(`/strategies/${r.strategyId}?backtest=${r.id}&exec=default`),
+                      },
+                    ]
+                  : []),
+              ]}
+            />
             <Button
               variant="ai"
               icon={IconAI}

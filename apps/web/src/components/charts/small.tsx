@@ -56,15 +56,27 @@ export function Sparkline({
   );
 }
 
-/** 发散色：正（涨）红、负（跌）蓝，越深幅度越大；按 ±cap 截断 */
-function cellStyle(v: number, cap = 0.1): React.CSSProperties {
+/**
+ * 发散色：正（涨）红、负（跌）蓝，越深幅度越大；按 ±cap 截断。
+ * opaque：混进卡片底色而不是透明（固定列压在滚动的格子上面，不能透）
+ */
+function cellStyle(v: number, cap = 0.1, opaque = false): React.CSSProperties {
   if (!Number.isFinite(v)) return {};
   const a = Math.min(Math.abs(v) / cap, 1);
   const mix = Math.round(8 + a * 40);
   return {
-    background: `color-mix(in oklab, var(${v >= 0 ? "--up" : "--neg"}) ${mix}%, transparent)`,
+    background: `color-mix(in oklab, var(${v >= 0 ? "--up" : "--neg"}) ${mix}%, ${opaque ? "var(--surface)" : "transparent"})`,
   };
 }
+
+/**
+ * 窄屏横向滚动时固定的列（年份在左、全年在右）。阴影是卡片底色：盖住格子间 3px 的缝，
+ * 外侧再多盖 4px（滚动框的内边距），滚过去的格子不会从边上露出来。
+ */
+const STICKY_LEFT =
+  "sticky left-0 z-[1] shadow-[0_0_0_3px_var(--surface),-4px_0_0_3px_var(--surface)]";
+const STICKY_RIGHT =
+  "sticky right-0 z-[1] shadow-[0_0_0_3px_var(--surface),4px_0_0_3px_var(--surface)]";
 
 export function MonthlyTable({
   monthly,
@@ -76,56 +88,78 @@ export function MonthlyTable({
   const years = [...new Set(monthly.map((m) => m.month.slice(0, 4)))];
   const byKey = new Map(monthly.map((m) => [m.month, m]));
   return (
-    <div className="-mx-1 overflow-x-auto px-1">
-      <table className="tabular w-full min-w-[760px] border-separate border-spacing-[3px] text-xs">
-        <thead>
-          <tr className="text-muted">
-            <th className="px-1.5 py-1 text-left font-normal">年份</th>
-            {Array.from({ length: 12 }, (_, i) => (
-              <th key={i} className="px-1.5 py-1 text-right font-normal">
-                {i + 1}月
+    <div>
+      {/* 只有表格横向滚，图例留在原地 */}
+      <div className="-mx-1 overflow-x-auto px-1">
+        <table className="tabular w-full min-w-[760px] border-separate border-spacing-[3px] text-xs">
+          <thead>
+            <tr className="text-muted">
+              <th className={cx(STICKY_LEFT, "bg-surface px-1.5 py-1 text-left font-normal")}>
+                年份
               </th>
-            ))}
-            <th className="px-1.5 py-1 text-right font-medium text-ink-2">全年</th>
-            <th className="px-1.5 py-1 text-right font-normal">基准</th>
-          </tr>
-        </thead>
-        <tbody>
-          {years.map((y) => {
-            const yr = yearly.find((r) => r.year === y);
-            return (
-              <tr key={y}>
-                <td className="px-1.5 py-1.5 font-mono text-[11px] text-ink-2">{y}</td>
-                {Array.from({ length: 12 }, (_, i) => {
-                  const m = byKey.get(`${y}-${String(i + 1).padStart(2, "0")}`);
-                  return (
-                    <td
-                      key={i}
-                      className={cx(
-                        "rounded-[5px] px-1.5 py-1.5 text-right",
-                        m ? "text-ink" : "bg-surface-2/60",
-                      )}
-                      style={m ? cellStyle(m.ret) : undefined}
-                      title={m ? `基准 ${pct(m.bench)}` : undefined}
-                    >
-                      {m ? pct(m.ret, 1) : ""}
-                    </td>
-                  );
-                })}
-                <td
-                  className="rounded-[5px] px-1.5 py-1.5 text-right font-semibold text-ink"
-                  style={yr ? cellStyle(yr.ret, 0.4) : undefined}
-                >
-                  {yr ? pct(yr.ret, 1) : ""}
-                </td>
-                <td className="px-1.5 py-1.5 text-right text-muted">
-                  {yr ? pct(yr.bench, 1) : ""}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+              {Array.from({ length: 12 }, (_, i) => (
+                <th key={i} className="px-1.5 py-1 text-right font-normal">
+                  {i + 1}月
+                </th>
+              ))}
+              <th
+                className={cx(
+                  STICKY_RIGHT,
+                  "bg-surface px-1.5 py-1 text-right font-medium text-ink-2",
+                )}
+              >
+                全年
+              </th>
+              <th className="px-1.5 py-1 text-right font-normal">基准</th>
+            </tr>
+          </thead>
+          <tbody>
+            {years.map((y) => {
+              const yr = yearly.find((r) => r.year === y);
+              return (
+                <tr key={y}>
+                  <td
+                    className={cx(
+                      STICKY_LEFT,
+                      "bg-surface px-1.5 py-1.5 font-mono text-[11px] text-ink-2",
+                    )}
+                  >
+                    {y}
+                  </td>
+                  {Array.from({ length: 12 }, (_, i) => {
+                    const m = byKey.get(`${y}-${String(i + 1).padStart(2, "0")}`);
+                    return (
+                      <td
+                        key={i}
+                        className={cx(
+                          "rounded-[5px] px-1.5 py-1.5 text-right",
+                          m ? "text-ink" : "bg-surface-2/60",
+                        )}
+                        style={m ? cellStyle(m.ret) : undefined}
+                        title={m ? `基准 ${pct(m.bench)}` : undefined}
+                      >
+                        {m ? pct(m.ret, 1) : ""}
+                      </td>
+                    );
+                  })}
+                  <td
+                    className={cx(
+                      STICKY_RIGHT,
+                      "rounded-[5px] bg-surface px-1.5 py-1.5 text-right font-semibold text-ink",
+                    )}
+                    style={yr ? cellStyle(yr.ret, 0.4, true) : undefined}
+                  >
+                    {yr ? pct(yr.ret, 1) : ""}
+                  </td>
+                  <td className="px-1.5 py-1.5 text-right text-muted">
+                    {yr ? pct(yr.bench, 1) : ""}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       <div className="mt-2 flex items-center gap-2 text-2xs text-muted">
         <span className="inline-flex items-center gap-1">
           <span className="size-2.5 rounded-[3px] bg-up/45" />涨
@@ -133,7 +167,10 @@ export function MonthlyTable({
         <span className="inline-flex items-center gap-1">
           <span className="size-2.5 rounded-[3px] bg-(--neg)/45" />跌
         </span>
-        <span>颜色越深幅度越大；格子里是实际涨跌，悬停看同月基准。</span>
+        <span>
+          颜色越深幅度越大；格子里是实际涨跌
+          <span className="pointer-coarse:hidden">，悬停看同月基准</span>。
+        </span>
       </div>
     </div>
   );

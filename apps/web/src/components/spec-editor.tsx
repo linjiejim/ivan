@@ -729,7 +729,8 @@ export function SpecEditor({
       <div
         className={cx(
           "flex items-center justify-end gap-2 border-t border-line pt-4",
-          !onDone && "sticky bottom-0 bg-surface",
+          // 贴在屏幕底边时让开 iOS 的横条
+          !onDone && "sticky bottom-0 bg-surface pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
         )}
       >
         <span className="mr-auto text-xs text-muted">保存后先看差异，确认了才生成新版本</span>

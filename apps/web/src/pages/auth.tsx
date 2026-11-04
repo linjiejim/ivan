@@ -83,7 +83,7 @@ function PasswordInput({
         onClick={() => setShown(!shown)}
         aria-label={shown ? "隐藏密码" : "显示密码"}
         aria-pressed={shown}
-        className="absolute top-1/2 right-1.5 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-ink"
+        className="absolute top-1/2 right-1.5 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-ink pointer-coarse:after:absolute pointer-coarse:after:-inset-2"
       >
         <Ico size={16} />
       </button>
@@ -103,7 +103,7 @@ function FootLink({ to, children }: { to: string; children: ReactNode }) {
   return (
     <Link
       to={to}
-      className="group/foot inline-flex items-center gap-1 font-medium text-accent transition-colors hover:text-accent-strong"
+      className="group/foot relative inline-flex items-center gap-1 font-medium text-accent transition-colors hover:text-accent-strong pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3"
     >
       {children}
       <IconArrowRight

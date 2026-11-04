@@ -808,6 +808,9 @@ export function ToolChip({ name, state, error }: { name: string; state: string; 
         className={cx(
           "inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-2xs ring-1 ring-inset",
           failed ? "bg-warn-bg text-warn ring-warn-line" : "bg-surface-2/60 text-muted ring-line",
+          // 失败时点开看原因：触屏把点击区撑高
+          failed &&
+            "relative pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2.5",
           !failed && "cursor-default",
         )}
       >
