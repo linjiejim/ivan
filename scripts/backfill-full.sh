@@ -40,6 +40,9 @@ trap finish EXIT
 
 pm2 stop ivan-worker
 sleep 5
+# worker 停着，回填的 DuckDB 可以比 worker 用得多：BACKFILL_MEMORY_LIMIT=512MB bash scripts/backfill-full.sh
+# （不给就用 .env 的 DUCKDB_MEMORY_LIMIT；命令行的环境变量优先于 .env）
+[ -n "${BACKFILL_MEMORY_LIMIT:-}" ] && export DUCKDB_MEMORY_LIMIT="$BACKFILL_MEMORY_LIMIT"
 pnpm -s ivan backfill --market A && echo "== A 股回填完成"
 pnpm -s ivan backfill --market HK && echo "== 港股回填完成"
 pnpm -s ivan doctor
