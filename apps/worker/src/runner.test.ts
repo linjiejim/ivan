@@ -2,7 +2,7 @@
  * 行情仓写库期间不跑回测（D60）、单独排的结算也不和回测同时跑（D110）：认领规则的真值表，以及 computeBlocked 读 jobs 表的判断；
  * 自动重跑（D73）：没到时间的任务不认领、不挡回测，闸门没过时最多重跑 2 次。
  */
-import { IncompleteDataError, RetryableEtlError } from "@ivan/data";
+import { committedAsOf, IncompleteDataError, RetryableEtlError } from "@ivan/data";
 import {
   A_INDEX_SECIDS,
   emDailyRoute,
@@ -194,6 +194,41 @@ describe("自动重跑（D73）", () => {
       expect(j.notBefore! - Date.now()).toBeLessThanOrEqual(45 * 60_000);
       expect(j.payload).toMatchObject({ market: "A" });
     }
+  });
+
+  it("补数据中（D111）：截至日往前推了，任务完成（结算跟到那天），同样排 45 分钟后的重跑接着补", async () => {
+    const codes = Array.from({ length: 20 }, (_, i) => `${600000 + i}.SH`);
+    const base: Record<string, number> = { ...A_INDEX_SECIDS };
+    // 前 5 只东财说没有数据（被限流时常见的空结果），日线停在 10-05 之前
+    codes.slice(5).forEach((c, k) => (base[emSecidOf(c)] = 15 + k));
+    const http = new FakeHttp([{ match: /qt\.gtimg\.cn/, status: 500 }, emDailyRoute(base)]);
+    const t = await makeTestEnv({ http, today: "2026-10-09" });
+    cleanup = t.cleanup;
+    await seedSyntheticMarket(t.env.wh, {
+      market: "A",
+      start: "2026-09-21",
+      days: 14,
+      // 第 10 个交易日是 10-02（周五）：前 5 只停在那天
+      stocks: codes.map((code, k) => ({
+        code,
+        name: `股${k}`,
+        close: (i: number) => (k < 5 && i > 9 ? NaN : 10 + k),
+      })),
+    });
+    await t.env.wh.run(`UPDATE data_versions SET as_of = DATE '2026-09-30'`);
+    const ctx = fakeJobContext("etl", { market: "A" });
+    const r = await etlJob(ctx);
+    expect(r).toMatchObject({ tradingDay: true, catchUp: { asOf: "2026-10-02", behind: 5 } });
+    expect(await committedAsOf(t.env.wh, "A")).toBe("2026-10-02");
+    expect(ctx.logs.at(-1)).toMatch(/自动重试（第 1\/2 次）$/);
+    expect(
+      t.env.app.db
+        .select()
+        .from(jobs)
+        .where(eq(jobs.kind, "etl"))
+        .all()
+        .map((j) => [j.attempt, j.status]),
+    ).toEqual([[1, "queued"]]);
   });
 
   describe("数据源风控（D108）", () => {

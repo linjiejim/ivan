@@ -6,9 +6,13 @@ import { describe, expect, it } from "vitest";
 import {
   acceptMissingFromEnv,
   assessCompleteness,
+  catchUpAsOf,
+  catchUpProgress,
+  type Completeness,
   type CompletenessInput,
   type MissingReason,
   missingThreshold,
+  reliableNoTrade,
 } from "./completeness.ts";
 
 const codes = (n: number, prefix = 600000) =>
@@ -99,5 +103,105 @@ describe("assessCompleteness", () => {
     const r = assessCompleteness(input({ missingCodes: codes(300) }));
     expect(r.missing).toHaveLength(200);
     expect(r.missingReasons.chain_failed).toBe(300);
+  });
+});
+
+describe("补数据（D111）", () => {
+  const cal = ["2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-26", "2026-10-27"];
+  const base = {
+    market: "HK" as const,
+    expected: 2998,
+    critical: new Set<string>(),
+    accepted: new Set<string>(),
+    calendar: cal,
+    latest: "2026-10-27",
+  };
+  const hk = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `${String(from + i).padStart(5, "0")}.HK`);
+
+  it("缺失超阈值、其中之前的日子也没补上：标出 missingFailed 与 behind，原因里写明", () => {
+    const missing = hk(20).map((code) => ({ code, reason: "rate_limited" as const }));
+    const behind = new Map(hk(12).map((c) => [c, "2026-10-21"]));
+    const r = assessCompleteness({
+      ...input({}),
+      market: "HK",
+      expected: 2998,
+      missing,
+      behind,
+    });
+    expect(r).toMatchObject({ ok: false, missingFailed: true, behind: 12 });
+    expect(r.reasons[0]).toBe(
+      "港股有 20 只股票今天的日线没拿到（其中 12 只之前的日子也还没补上，20 只是数据源风控、没等到解封），已停止更新，以免被当成停牌",
+    );
+  });
+
+  it("catchUpAsOf：截至日 = 第「阈值 + 1」早的那只齐到的那天；只缺今天的不挡；不往回退", () => {
+    // 阈值 9：4 只停在 10-20，6 只停在 10-22，其余 20 只只缺今天
+    const stuckEarly = hk(4);
+    const stuckMid = hk(6, 100);
+    const todayOnly = hk(20, 200);
+    const missing = [...stuckEarly, ...stuckMid, ...todayOnly].map((code) => ({ code }));
+    const behind = new Map<string, string | null>([
+      ...stuckEarly.map((c) => [c, "2026-10-20"] as const),
+      ...stuckMid.map((c) => [c, "2026-10-22"] as const),
+    ]);
+    expect(catchUpAsOf({ ...base, missing, behind, committed: "2026-10-19" })).toBe("2026-10-22");
+    // 已经提交到 10-22：没有更晚的齐全日
+    expect(catchUpAsOf({ ...base, missing, behind, committed: "2026-10-22" })).toBeNull();
+    // 再多 6 只停在 10-20（共 10 只 ≥ 阈值 + 1）：只能到 10-20
+    const more = new Map([...behind, ...hk(6, 300).map((c) => [c, "2026-10-20"] as const)]);
+    const missing2 = [...missing, ...hk(6, 300).map((code) => ({ code }))];
+    expect(catchUpAsOf({ ...base, missing: missing2, behind: more, committed: "2026-10-19" })).toBe("2026-10-20");
+    // 今天记成没成交、但之前的日子没确认的（不算缺失）也挡截至日：再多 6 只只齐到 10-20
+    const unverified = new Map(hk(6, 500).map((c) => [c, "2026-10-20"] as const));
+    expect(catchUpAsOf({ ...base, missing, behind, unverified, committed: "2026-10-19" })).toBe("2026-10-20");
+    // 从没有过日线的当成哪天都没齐
+    const never = new Map<string, string | null>(hk(10, 400).map((c) => [c, null]));
+    expect(
+      catchUpAsOf({ ...base, missing: hk(10, 400).map((code) => ({ code })), behind: never, committed: null }),
+    ).toBeNull();
+    // 缺失没超阈值：不是补数据的事
+    expect(catchUpAsOf({ ...base, missing: hk(9).map((code) => ({ code })), behind, committed: null })).toBeNull();
+  });
+
+  it("catchUpProgress：第 done/total 天按交易日数", () => {
+    expect(catchUpProgress(cal, "2026-10-20", "2026-10-22", "2026-10-27", 30)).toEqual({
+      since: "2026-10-20",
+      asOf: "2026-10-22",
+      latest: "2026-10-27",
+      done: 2,
+      total: 5,
+      behind: 30,
+    });
+  });
+
+  it("无成交的基准只取缺失没超阈值的晚上：2026-11-03 港股的 451 不再被误判", () => {
+    const night = (noTrade: number, missing: number, expected = 2998): Partial<Completeness> => ({
+      noTrade,
+      expected,
+      missingReasons: missing ? { rate_limited: missing } : {},
+      missingCritical: [],
+      accepted: [],
+    });
+    // 10-22 起每晚都缺上千只（不活跃的股票记成了缺失，无成交只有 150–233）；之前正常的晚上 500、460……
+    const spiral = [
+      night(189, 985), night(174, 1032), night(168, 994), night(150, 1047), night(213, 931),
+      night(200, 996), night(170, 959), night(159, 1011), night(211, 931), night(233, 740),
+      night(215, 801), night(232, 682), night(325, 455), night(346, 110), night(438, 17),
+    ];
+    const normal = [night(500, 0), night(470, 2), night(455, 0), night(480, 1), night(430, 0)];
+    const all = [...spiral, ...normal];
+    expect(all.map((c) => reliableNoTrade("HK", c)).filter((n) => n !== null)).toEqual([500, 470, 455, 480, 430]);
+    // 旧的算法（全都算）中位数约 224，451 被判成报价没更新；只取可靠的晚上就过了
+    const r = assessCompleteness({
+      ...input({}),
+      market: "HK",
+      expected: 2998,
+      noTrade: 451,
+      noTradeHistory: all.map((c) => reliableNoTrade("HK", c)).filter((n): n is number => n !== null),
+    });
+    expect(r.noTradeFailed).toBeUndefined();
+    expect(r.ok).toBe(true);
+    // 早于 D73 的旧行没有 expected：照旧用
+    expect(reliableNoTrade("HK", { noTrade: 300 })).toBe(300);
   });
 });

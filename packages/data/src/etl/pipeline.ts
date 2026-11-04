@@ -21,10 +21,14 @@ import { backfillBars, fetchBars, recordHygiene, updateBars, writeBars } from ".
 import type { Issue } from "../compute/hygiene.ts";
 import {
   assessCompleteness,
+  type CatchUp,
+  catchUpAsOf,
+  catchUpProgress,
   type Completeness,
   type DatasetCompleteness,
   IncompleteDataError,
   RetryableEtlError,
+  reliableNoTrade,
   type SoftOutcome,
   type SoftStep,
   SOFT_STEP_LABEL,
@@ -374,6 +378,8 @@ export interface DailyResult {
   dataVersion?: number;
   /** 今晚的完整性（交易日才有） */
   completeness?: Completeness;
+  /** 补数据中（D111）：今天没齐，截至日提交到了之前齐全的那天 */
+  catchUp?: CatchUp;
 }
 
 /**
@@ -477,25 +483,61 @@ const datasetCompleteness = (r: PitSyncResult): DatasetCompleteness => ({
   ...(r.lateRows !== undefined ? { lateRows: r.lateRows } : {}),
 });
 
-/** 近 20 个版本（ok / incomplete）里记下的无成交数，最新的在前 */
+/**
+ * 近 20 晚（ok / incomplete 版本）记下的无成交数，最新的在前。同一晚重跑了几次只取最后一次；
+ * 缺失超过阈值的晚上不算（D111，reliableNoTrade：那些晚上不活跃的股票多半记成了缺失，无成交数偏低）。
+ */
 async function noTradeHistory(ctx: EtlContext, market: Market, ver: number): Promise<number[]> {
   const rows = await ctx.wh.all<{ c: string }>(
     `SELECT completeness AS c FROM data_versions
      WHERE market = $m AND id < $v AND status IN ('ok', 'incomplete') AND completeness IS NOT NULL
        AND coalesce(kind, '') <> 'check'
-     ORDER BY id DESC LIMIT 20`,
+     ORDER BY id DESC LIMIT 60`,
     { m: market, v: ver },
   );
   const out: number[] = [];
+  const nights = new Set<string>();
   for (const r of rows) {
+    let c: Partial<Completeness>;
     try {
-      const n = (JSON.parse(r.c) as Partial<Completeness>).noTrade;
-      if (typeof n === "number") out.push(n);
+      c = JSON.parse(r.c) as Partial<Completeness>;
     } catch {
-      // 读不懂的旧行跳过
+      continue; // 读不懂的旧行跳过
     }
+    if (c.date) {
+      if (nights.has(c.date)) continue;
+      nights.add(c.date);
+    }
+    const n = reliableNoTrade(market, c);
+    if (n !== null) out.push(n);
+    if (out.length >= 20) break;
   }
   return out;
+}
+
+/** 某个市场到 latest 为止的交易日（升序） */
+async function tradingDaysUpTo(ctx: EtlContext, market: Market, latest: DateStr): Promise<DateStr[]> {
+  const rows = await ctx.wh.all<{ d: string }>(
+    `SELECT DISTINCT date::VARCHAR AS d FROM trade_calendar WHERE market = $m AND date <= $l::DATE ORDER BY d`,
+    { m: market, l: latest },
+  );
+  return rows.map((r) => r.d);
+}
+
+/** 这一轮补数据从哪天开始（D111）：上一个提交的版本也在补数据时沿用它的起点，否则是当时已提交的截至日 */
+async function catchUpSince(ctx: EtlContext, market: Market, committed: DateStr | null): Promise<DateStr | null> {
+  const r = await ctx.wh.one<{ c: string | null }>(
+    `SELECT completeness AS c FROM data_versions
+     WHERE market = $m AND coalesce(status, 'ok') = 'ok' ORDER BY id DESC LIMIT 1`,
+    { m: market },
+  );
+  try {
+    const prev = r?.c ? (JSON.parse(r.c) as Partial<Completeness>).catchUp : undefined;
+    if (prev?.since !== undefined) return prev.since;
+  } catch {
+    // 读不懂就按当时的截至日
+  }
+  return committed;
 }
 
 async function dailySteps(
@@ -539,7 +581,11 @@ async function dailySteps(
   if (market === "HK") await soft("fx", () => updateFx(ctx, addDays(ctx.today, -20)));
   await soft("securities", () => refreshSecurities(ctx, market));
   const securities = await loadSecurities(ctx.wh, market, since);
+  // 开始写之前已提交的截至日（D60）：补数据时截至日只往前推、因子从这天起重算
+  const committedBefore = await committedAsOf(ctx.wh, market);
   const bars = await updateBars(ctx, market, securities, latest, prev ?? latest);
+  const critical = new Set(opts.critical ?? []);
+  const accepted = new Set(opts.acceptMissing ?? []);
 
   // 完整性闸门（D73）：在简称、财报与因子之前判断
   const completeness: Completeness = {
@@ -549,8 +595,9 @@ async function dailySteps(
       updated: bars.updated,
       noTrade: bars.noTrade,
       missing: bars.missing,
-      critical: new Set(opts.critical ?? []),
-      accepted: new Set(opts.acceptMissing ?? []),
+      behind: bars.behind,
+      critical,
+      accepted,
       noTradeHistory: await noTradeHistory(ctx, market, ver),
     }),
     date: ctx.today,
@@ -559,15 +606,48 @@ async function dailySteps(
   if (completeness.missingCritical.length) {
     ctx.log(`持仓或计划里的 ${completeness.missingCritical.length} 只没拿到今天的日线：${completeness.missingCritical.join(",")}`);
   }
+  let catchUp: CatchUp | undefined;
   if (!completeness.ok) {
     const msg = completeness.reasons.join("；");
-    await commitDataVersion(ctx, ver, {
-      status: "incomplete",
-      completeness,
-      note: msg.slice(0, 300),
-      sources: ctx.ledger?.toJSON(),
-    });
-    throw new IncompleteDataError(msg);
+    // 补数据（D111）：只是缺失超了阈值、其中有之前的日子也没补上的，就把截至日提交到之前齐全的那天，剩下的接着补；
+    // 无成交数也不对（报价可能没更新）时不提交
+    const calendar = await tradingDaysUpTo(ctx, market, latest);
+    const asOf =
+      completeness.missingFailed && !completeness.noTradeFailed && bars.behind.size
+        ? catchUpAsOf({
+            market,
+            expected: bars.expected,
+            missing: bars.missing,
+            behind: bars.behind,
+            unverified: bars.unverified,
+            critical,
+            accepted,
+            calendar,
+            latest,
+            committed: committedBefore,
+          })
+        : null;
+    if (!asOf) {
+      await commitDataVersion(ctx, ver, {
+        status: "incomplete",
+        completeness,
+        note: msg.slice(0, 300),
+        sources: ctx.ledger?.toJSON(),
+      });
+      throw new IncompleteDataError(msg);
+    }
+    catchUp = catchUpProgress(
+      calendar,
+      await catchUpSince(ctx, market, committedBefore),
+      asOf,
+      latest,
+      completeness.behind ?? bars.behind.size,
+    );
+    completeness.catchUp = catchUp;
+    ctx.log(
+      `${MARKET_LABEL[market]}补数据中：日线齐全到 ${asOf}（第 ${catchUp.done}/${catchUp.total} 天），` +
+        `还有 ${catchUp.behind} 只之前的日子没补上；这次截至日提交到 ${asOf}`,
+    );
   }
 
   if (market === "A") {
@@ -598,12 +678,27 @@ async function dailySteps(
   // 核心因子版本变了就全量重算，否则只重算近 15 天（覆盖晚到的股本变动与数据修订）。
   // 行情仓里的键沿用 factor_registry_version:<市场>，记的是核心版本（D83）：注册表第 3 版只加事件列，不触发重算
   const reg = await ctx.wh.meta(`factor_registry_version:${market}`);
-  const from = reg === String(FACTOR_CORE_VERSION) ? addDays(ctx.today, -15) : since;
+  // 停了好几晚（D111）：从上次提交的那天起重算，没通过闸门的晚上没算过因子
+  const recent =
+    committedBefore && committedBefore < addDays(ctx.today, -15) ? committedBefore : addDays(ctx.today, -15);
+  const from = reg === String(FACTOR_CORE_VERSION) ? recent : since;
   const fr = await computeFactors(ctx, market, from);
   // 事件因子是软步骤（S15b）：失败时保留已有的值，记进 completeness.soft，整晚照常提交
   if (fr.events) softOutcomes.push(fr.events);
-  await commitDataVersion(ctx, ver, { status: "ok", completeness, sources: ctx.ledger?.toJSON() });
-  return { market, tradingDay: true, latest, dataVersion: ver, completeness };
+  await commitDataVersion(ctx, ver, {
+    status: "ok",
+    completeness,
+    sources: ctx.ledger?.toJSON(),
+    ...(catchUp ? { maxAsOf: catchUp.asOf, note: `补数据中：截至日先提交到 ${catchUp.asOf}` } : {}),
+  });
+  return {
+    market,
+    tradingDay: true,
+    latest,
+    dataVersion: ver,
+    completeness,
+    ...(catchUp ? { catchUp } : {}),
+  };
 }
 
 /**

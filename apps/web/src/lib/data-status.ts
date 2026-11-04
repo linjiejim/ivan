@@ -222,3 +222,68 @@ export function eventsBackfillText(b: EventsStatus["backfill"] | undefined): str
       : "";
   return `后台补齐中${text ? `：${text}` : ""}${wait}`;
 }
+
+// ── 看板的市场横幅（D111） ──
+
+export interface MarketBanner {
+  /** catch_up 补数据中（自动恢复）；retry 等自动重试；failed 真的没更新成功 */
+  kind: "catch_up" | "retry" | "failed";
+  title: string;
+  /** 一句话（短） */
+  body: string;
+  /** 收进 ⓘ 的说明 */
+  info: string;
+  /** 显示「去管理页重跑」：只给管理员、只在真的失败时（补数据、等重试时重跑没用，风控时还会更糟） */
+  action: boolean;
+}
+
+/**
+ * 一个市场的横幅（纯函数）：没出问题为 null。界面宜少：标题加一句话，原因与影响收进 ⓘ；
+ * 补数据中（D111）和等自动重试都是会自己恢复的，用平和的口吻、不给操作；只有真的失败才给管理员一个「去管理页重跑」。
+ * 失败原因的原文只有管理员拿得到（普通用户的 error 是 null）。
+ */
+export function marketBanner(m: MarketStatus, isAdmin: boolean): MarketBanner | null {
+  const e = m.lastEtl;
+  const name = MARKET_TEXT[m.market] ?? m.market;
+  const failed = e?.status === "failed";
+  const retryAt = e?.status === "queued" && e.retryAt ? e.retryAt : null;
+  const asOf = m.asOf ?? "--";
+  const reason = isAdmin && e?.error ? `最近一次：${e.error.replace(/[。.]$/, "")}。` : "";
+  const later = retryAt
+    ? `${nowHmCN(new Date(retryAt))} 再补一次（第 ${e?.attempt ?? 1}/2 次）。`
+    : "";
+  const cu = m.catchUp && m.day !== "traded" ? m.catchUp : null;
+  const behind = cu?.behind ?? m.behind ?? 0;
+  if (cu || (behind > 0 && (failed || retryAt))) {
+    return {
+      kind: "catch_up",
+      title: `${name}补数据中${cu ? `（第 ${cu.done}/${cu.total} 天）` : ""}`,
+      body: `数据先更新到 ${asOf}，还有 ${behind} 只股票的日线在补。`,
+      info:
+        `数据源限制了请求频率，每晚先补最早缺的日子，补齐后自动恢复，不用手动重跑。` +
+        `这期间这个市场的跟踪按 ${asOf} 结算，简报会说数据没更新。` +
+        later +
+        reason,
+      action: false,
+    };
+  }
+  if (retryAt) {
+    return {
+      kind: "retry",
+      title: `${name}数据停在 ${asOf}`,
+      body: `今天的数据没更新完整，${nowHmCN(new Date(retryAt))} 自动重试（第 ${e?.attempt ?? 1}/2 次）。`,
+      info: `${reason}这期间这个市场的跟踪不结算，简报会说数据没更新。`,
+      action: false,
+    };
+  }
+  if (failed) {
+    return {
+      kind: "failed",
+      title: `${name}数据停在 ${asOf}`,
+      body: "最近一次更新没成功。",
+      info: `${reason}这个市场的跟踪没有结算，简报里的数字还是旧的。`,
+      action: isAdmin,
+    };
+  }
+  return null;
+}

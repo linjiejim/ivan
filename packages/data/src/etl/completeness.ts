@@ -7,6 +7,12 @@
  * - 无成交数 > max(2 × 近 20 个版本的中位数, 中位数 + 30) → 失败（防止报价没更新）；历史不足 5 个版本时不判；
  * - 缺失的股票是运行中跟踪的持仓或明日计划（critical）→ 不让整晚失败，记进 missingCritical，相关跟踪显示「数据未更新」；
  * - ETL_ACCEPT_MISSING 放行的代码不计数，记进 accepted。
+ *
+ * 补数据（D111）：缺失的股票里有些不只缺今天、之前的日子也还没补上（behind，日线停在昨天之前）。缺得多时整晚不通过，
+ * 但「数据齐全到哪一天」可以往前推：catchUpAsOf 找最晚的一天 D，使日线没齐到 D 的股票不超过阈值，夜间增量把截至日提交到 D，
+ * 剩下的接着补（逐股补按最早停住的先补），一晚晚收敛，不再整市场停在第一天。
+ * 无成交的基准（noTradeHistory）只取缺失没超阈值的晚上：缺得多的晚上不活跃的股票大多记成了缺失、无成交数偏低，
+ * 拿它们当「平时」会把补齐那晚的正常无成交数误判成报价没更新（2026-11-03 港股 451 > 448）。
  */
 import {
   type CanaryStatus,
@@ -36,6 +42,8 @@ export type MissingReason =
   | "chain_failed"
   | "quote_omitted"
   | "rate_limited"
+  /** 报价说今天有成交，逐股日 K 里却还没有今天（来源还没更新，D111）：是缺，不是停牌 */
+  | "kline_behind"
   | `rejected:${string}`;
 
 export interface SoftOutcome {
@@ -68,6 +76,11 @@ export interface CompletenessInput {
   /** 今天没成交（停牌）的股票数 */
   noTrade: number;
   missing: Array<{ code: string; reason: MissingReason }>;
+  /**
+   * 缺失的股票里日线停在昨天之前的（之前的日子也没补上，D111）：代码 → 日线齐全到哪一天（含记着没成交的日子；
+   * 从没有过日线为 null）。只缺今天的不在里面。
+   */
+  behind?: ReadonlyMap<string, DateStr | null>;
   /** 运行中跟踪的持仓与明日计划里的代码 */
   critical: Set<string>;
   /** ETL_ACCEPT_MISSING 放行的代码 */
@@ -89,12 +102,33 @@ export interface Completeness {
   accepted: string[];
   ok: boolean;
   reasons: string[];
+  /** 缺失数超过阈值（D111：只因为这个没通过时可以把截至日提交到之前齐全的那天） */
+  missingFailed?: boolean;
+  /** 无成交数远多于平时 */
+  noTradeFailed?: boolean;
+  /** 计入阈值的缺失里，之前的日子也没补上的只数（D111，管理页与横幅说「补数据中」） */
+  behind?: number;
+  /** 这一晚把截至日提交到了之前齐全的那天（D111） */
+  catchUp?: CatchUp;
   /** 这一晚（夜间增量写进数据版本时补上） */
   date?: DateStr;
   /** 辅助步骤的结果（失败沿用旧数据） */
   soft?: SoftOutcome[];
   /** 点时事件数据集（S15，只有 A 股；周检的版本也写，带 lateRows） */
   datasets?: Partial<Record<PitDatasetId, DatasetCompleteness>>;
+}
+
+/**
+ * 补数据进度（D111）：since 是开始补之前最后一次提交到的那天；asOf 是这一晚提交到的那天；
+ * done / total 是 (since, asOf] 与 (since, latest] 里的交易日数（「第 done/total 天」）；behind 是还没补齐的只数。
+ */
+export interface CatchUp {
+  since: DateStr | null;
+  asOf: DateStr;
+  latest: DateStr;
+  done: number;
+  total: number;
+  behind: number;
 }
 
 /** 闸门阈值：缺失超过这个数就让整晚失败 */
@@ -124,19 +158,26 @@ export function assessCompleteness(i: CompletenessInput): Completeness {
     else counted++;
   }
   const label = MARKET_LABEL[i.market];
-  if (counted > missingThreshold(i.market, i.expected)) {
-    const limited = i.missing.filter(
-      (m) => m.reason === "rate_limited" && !i.accepted.has(m.code) && !i.critical.has(m.code),
-    ).length;
+  const isCounted = (code: string) => !i.accepted.has(code) && !i.critical.has(code);
+  const behind = i.behind ? [...i.behind.keys()].filter(isCounted).length : 0;
+  const missingFailed = counted > missingThreshold(i.market, i.expected);
+  if (missingFailed) {
+    const limited = i.missing.filter((m) => m.reason === "rate_limited" && isCounted(m.code)).length;
+    const notes = [
+      behind ? `其中 ${behind} 只之前的日子也还没补上` : "",
+      limited ? `${behind ? "" : "其中 "}${limited} 只是数据源风控、没等到解封` : "",
+    ].filter(Boolean);
     reasons.push(
       `${label}有 ${counted} 只股票今天的日线没拿到` +
-        (limited ? `（其中 ${limited} 只是数据源风控、没等到解封）` : "") +
+        (notes.length ? `（${notes.join("，")}）` : "") +
         `，已停止更新，以免被当成停牌`,
     );
   }
+  let noTradeFailed = false;
   if (i.noTradeHistory.length >= 5) {
     const m = median(i.noTradeHistory);
     if (i.noTrade > Math.max(2 * m, m + 30)) {
+      noTradeFailed = true;
       reasons.push(
         `今天没成交的股票有 ${i.noTrade} 只，远多于平时（约 ${Math.round(m)} 只），报价可能没更新`,
       );
@@ -152,6 +193,85 @@ export function assessCompleteness(i: CompletenessInput): Completeness {
     accepted,
     ok: reasons.length === 0,
     reasons,
+    ...(missingFailed ? { missingFailed } : {}),
+    ...(noTradeFailed ? { noTradeFailed } : {}),
+    ...(behind ? { behind } : {}),
+  };
+}
+
+/**
+ * 一晚记下的无成交数能不能当「平时」（D111）：缺失（计入阈值的）没超过阈值的晚上才算。缺得多的晚上，
+ * 不活跃的股票大多记成了缺失（它们最容易落到逐股补、最容易被风控挡住），无成交数偏低。
+ */
+export function reliableNoTrade(market: Market, c: Partial<Completeness>): number | null {
+  if (typeof c.noTrade !== "number") return null;
+  // 早于 D73 记录缺失数的旧行：没法判断，照旧用
+  if (typeof c.expected !== "number") return c.noTrade;
+  const missing =
+    Object.values(c.missingReasons ?? {}).reduce((a, b) => a + b, 0) || (c.missing?.length ?? 0);
+  const counted = missing - (c.missingCritical?.length ?? 0) - (c.accepted?.length ?? 0);
+  return counted > missingThreshold(market, c.expected) ? null : c.noTrade;
+}
+
+/**
+ * 补数据时这一晚能把截至日提交到哪天（D111，纯函数）：calendar 是到 latest 为止的交易日（升序）。
+ * 找最晚的一天 D（早于 latest、晚于 committed），使日线没齐到 D 的股票（计入阈值的）不超过阈值；
+ * 只缺今天的股票齐到了昨天，不挡 D。没有这样的一天（或缺失本来就没超阈值）返回 null。
+ */
+export function catchUpAsOf(i: {
+  market: Market;
+  expected: number;
+  missing: ReadonlyArray<{ code: string }>;
+  /** 缺失的股票里之前的日子也没补上的：代码 → 齐全到哪天（null = 从没有过日线） */
+  behind: ReadonlyMap<string, DateStr | null>;
+  /**
+   * 今天算没成交、但之前有日子没能确认的（逐股日 K 最后一根之后没有报价佐证）：代码 → 齐全到哪天。
+   * 不计入今天的缺失（和以前一样），但截至日不能越过它们齐到的那天（D111）
+   */
+  unverified?: ReadonlyMap<string, DateStr>;
+  critical: ReadonlySet<string>;
+  accepted: ReadonlySet<string>;
+  calendar: readonly DateStr[];
+  latest: DateStr;
+  /** 当前已提交的截至日 */
+  committed: DateStr | null;
+}): DateStr | null {
+  const counted = i.missing.filter((m) => !i.accepted.has(m.code) && !i.critical.has(m.code));
+  const thr = missingThreshold(i.market, i.expected);
+  if (counted.length <= thr) return null;
+  const prev = i.calendar.filter((d) => d < i.latest).at(-1);
+  if (!prev) return null;
+  // 每只缺失的股票齐到哪天：只缺今天的齐到昨天；从没有过日线的当成哪天都没齐；之前有日子没确认的也算进来
+  const counts = (code: string) => !i.accepted.has(code) && !i.critical.has(code);
+  const through = [
+    ...counted.map((m) => (i.behind.has(m.code) ? (i.behind.get(m.code) ?? "") : prev)),
+    ...[...(i.unverified ?? new Map<string, DateStr>())]
+      .filter(([code]) => counts(code))
+      .map(([, d]) => d),
+  ].sort();
+  // 第 thr+1 早的那只齐到 k：D ≤ k 时，没齐到 D 的（through < D）最多 thr 只
+  const k = through[thr]!;
+  const d = i.calendar.filter((x) => x <= k && x < i.latest).at(-1);
+  if (!d || (i.committed !== null && d <= i.committed)) return null;
+  return d;
+}
+
+/** 补数据进度（D111）：since 之后到 asOf、到 latest 各有几个交易日 */
+export function catchUpProgress(
+  calendar: readonly DateStr[],
+  since: DateStr | null,
+  asOf: DateStr,
+  latest: DateStr,
+  behind: number,
+): CatchUp {
+  const after = (d: DateStr) => since === null || d > since;
+  return {
+    since,
+    asOf,
+    latest,
+    done: calendar.filter((d) => after(d) && d <= asOf).length,
+    total: calendar.filter((d) => after(d) && d <= latest).length,
+    behind,
   };
 }
 
