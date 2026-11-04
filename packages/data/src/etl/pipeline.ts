@@ -619,6 +619,7 @@ async function dailySteps(
             expected: bars.expected,
             missing: bars.missing,
             behind: bars.behind,
+            unverified: bars.unverified,
             critical,
             accepted,
             calendar,

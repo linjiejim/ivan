@@ -5,7 +5,7 @@
  */
 import { type DateStr, MARKET_LABEL } from "@ivan/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { committedAsOf } from "../query/backtest.ts";
+import { catchUpState, committedAsOf } from "../query/backtest.ts";
 import { FakeHttp, type FakeRoute } from "../testing/fake-http.ts";
 import { A_INDEX_SECIDS, emDailyRoute, emSecidOf } from "../testing/nightly.ts";
 import { seedSyntheticMarket, syntheticCalendar } from "../testing/seed.ts";
@@ -160,6 +160,13 @@ describe("updateBars：停牌续上与补数据（D111）", () => {
       [MOVED]: last,
     });
     expect(r.behind).toEqual(new Map([[BEHIND, last]]));
+    // 今天记成没成交、之前的日子没确认的：不算今天的缺失，但补数据时截至日不能越过它们
+    expect(r.unverified).toEqual(
+      new Map([
+        [LAGGED, last],
+        [MOVED, last],
+      ]),
+    );
   });
 
   it("逐股补的顺序：除权日的在前，其余按日线停得最早的在前，同一只只补一次", () => {
@@ -286,5 +293,32 @@ describe("港股复权轮换让路（D111）", () => {
     const first = http.calls.find((c) => /push2his/.test(c.url))!;
     expect(new URL(first.url).searchParams.get("secid")).toBe(`116.${LAG.slice(0, 5)}`);
     expect(logs.some((l) => l.includes(`${rotating.length} 只这次跳过`))).toBe(true);
+  });
+});
+
+describe("catchUpState（D111）：最近一次尝试还在补数据才带进度", () => {
+  const night = (status: string, c: object) =>
+    wh.run(
+      `INSERT INTO data_versions (id, market, as_of, kind, status, completeness)
+       VALUES (nextval('data_version_seq'), 'HK', NULL, 'daily', $s, $c)`,
+      { s: status, c: JSON.stringify(c) },
+    );
+  const progress = { since: "2026-10-21", asOf: "2026-10-27", latest: "2026-11-04", done: 4, total: 10, behind: 300 };
+  const backlog = { missingFailed: true, behind: 300 };
+
+  it("补数据时的提交、之后只因缺得多没通过：都带进度；之后无成交不对或出错：让真的失败显示出来", async () => {
+    wh = await Warehouse.open(":memory:");
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: null, behind: 0 });
+    await night("ok", { ...backlog, catchUp: progress });
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: progress, behind: 300 });
+    await night("incomplete", { missingFailed: true, behind: 280 });
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: progress, behind: 280 });
+    await night("incomplete", { missingFailed: true, noTradeFailed: true, behind: 5 });
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: null, behind: 0 });
+    await night("failed", {});
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: null, behind: 0 });
+    // 补齐了：完整的一晚
+    await night("ok", { ok: true });
+    expect(await catchUpState(wh, "HK")).toEqual({ catchUp: null, behind: 0 });
   });
 });

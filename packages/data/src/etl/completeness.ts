@@ -224,6 +224,11 @@ export function catchUpAsOf(i: {
   missing: ReadonlyArray<{ code: string }>;
   /** 缺失的股票里之前的日子也没补上的：代码 → 齐全到哪天（null = 从没有过日线） */
   behind: ReadonlyMap<string, DateStr | null>;
+  /**
+   * 今天算没成交、但之前有日子没能确认的（逐股日 K 最后一根之后没有报价佐证）：代码 → 齐全到哪天。
+   * 不计入今天的缺失（和以前一样），但截至日不能越过它们齐到的那天（D111）
+   */
+  unverified?: ReadonlyMap<string, DateStr>;
   critical: ReadonlySet<string>;
   accepted: ReadonlySet<string>;
   calendar: readonly DateStr[];
@@ -236,10 +241,14 @@ export function catchUpAsOf(i: {
   if (counted.length <= thr) return null;
   const prev = i.calendar.filter((d) => d < i.latest).at(-1);
   if (!prev) return null;
-  // 每只缺失的股票齐到哪天：只缺今天的齐到昨天；从没有过日线的当成哪天都没齐
-  const through = counted
-    .map((m) => (i.behind.has(m.code) ? (i.behind.get(m.code) ?? "") : prev))
-    .sort();
+  // 每只缺失的股票齐到哪天：只缺今天的齐到昨天；从没有过日线的当成哪天都没齐；之前有日子没确认的也算进来
+  const counts = (code: string) => !i.accepted.has(code) && !i.critical.has(code);
+  const through = [
+    ...counted.map((m) => (i.behind.has(m.code) ? (i.behind.get(m.code) ?? "") : prev)),
+    ...[...(i.unverified ?? new Map<string, DateStr>())]
+      .filter(([code]) => counts(code))
+      .map(([, d]) => d),
+  ].sort();
   // 第 thr+1 早的那只齐到 k：D ≤ k 时，没齐到 D 的（through < D）最多 thr 只
   const k = through[thr]!;
   const d = i.calendar.filter((x) => x <= k && x < i.latest).at(-1);

@@ -151,6 +151,9 @@ describe("补数据（D111）", () => {
     const more = new Map([...behind, ...hk(6, 300).map((c) => [c, "2026-10-20"] as const)]);
     const missing2 = [...missing, ...hk(6, 300).map((code) => ({ code }))];
     expect(catchUpAsOf({ ...base, missing: missing2, behind: more, committed: "2026-10-19" })).toBe("2026-10-20");
+    // 今天记成没成交、但之前的日子没确认的（不算缺失）也挡截至日：再多 6 只只齐到 10-20
+    const unverified = new Map(hk(6, 500).map((c) => [c, "2026-10-20"] as const));
+    expect(catchUpAsOf({ ...base, missing, behind, unverified, committed: "2026-10-19" })).toBe("2026-10-20");
     // 从没有过日线的当成哪天都没齐
     const never = new Map<string, string | null>(hk(10, 400).map((c) => [c, null]));
     expect(

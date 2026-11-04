@@ -543,6 +543,11 @@ export interface UpdateBarsResult {
   missing: Array<{ code: string; reason: MissingReason }>;
   /** 缺失的股票里日线停在昨天之前的：代码 → 齐全到哪天（D111，补数据时决定截至日能提交到哪天） */
   behind: Map<string, DateStr | null>;
+  /**
+   * 今天记成没成交、但之前有日子没能确认的（逐股日 K 最后一根之后没有报价佐证）：代码 → 齐全到哪天（D111）。
+   * 和以前一样不算今天的缺失，但补数据时截至日不能越过它们
+   */
+  unverified: Map<string, DateStr>;
   /** 最后一根 K 线早于昨天、但中间每天都记着没成交，这次直接走报价的股票数（D111） */
   resumed: number;
   /** 港股复权轮换刷新：刷新了几只、因为日 K 被风控跳过了几只（D111：轮换让路，不和补数据抢请求） */
@@ -957,15 +962,20 @@ export async function updateBars(
     await recordHygiene(ctx, caliberRejects);
     await writeBarStatus(ctx, statusRows);
   });
-  // 缺失的股票里之前的日子也没补上的（D111）：日线齐到哪天
+  // 缺失的、以及逐股补了但今天记成没成交的股票里，之前的日子也没齐的（D111）：日线齐到哪天
   const behind = new Map<string, DateStr | null>();
+  const unverified = new Map<string, DateStr>();
+  const missingCodes = new Set(missing.map((m) => m.code));
+  const noTradeGap = ordered.filter((s) => state.get(s.code)?.s === "no_trade").map((s) => s.code);
   for (const [code, d] of await completeThrough(
     ctx.wh,
     market,
-    missing.map((m) => m.code),
+    [...missingCodes, ...noTradeGap],
     prevTradeDate,
   )) {
-    if (d === null || d < prevTradeDate) behind.set(code, d);
+    if (d !== null && d >= prevTradeDate) continue;
+    if (missingCodes.has(code)) behind.set(code, d);
+    else if (d !== null) unverified.set(code, d);
   }
   const expected = active.length - neverFilled;
   ctx.log(
@@ -988,6 +998,7 @@ export async function updateBars(
     noTrade,
     missing,
     behind,
+    unverified,
     resumed,
     rotation,
   };
