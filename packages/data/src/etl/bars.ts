@@ -13,6 +13,9 @@
  *   同一（代码, 日期）后来重写且没再触发同一条规则时，之前版本的问题记为已解决（refetch）。
  * - 日线状态（D73）：增量写 bar_status——报价说今天没成交 → no_trade；整条链没拿到、被拒收、口径换算失败 → missing；
  *   之后写上了的删掉。
+ * - 补数据能收敛（D111）：最后一根 K 线之后每天都记着没成交的股票（停牌、零成交的港股小票）照样走报价；逐股补时窗口里没有的日子
+ *   记没成交（最后一根之后的要报价佐证）；逐股补的股票也要报价，报价说今天成交了而日 K 里没有今天 → 缺（kline_behind）；
+ *   逐股补按日线停得最早的先补；港股复权轮换排在最后、被风控就停。
  */
 import { addDays, type DateStr, type Market, marketOf } from "@ivan/core";
 import type { RefAction } from "../compute/adjust.ts";
@@ -26,7 +29,7 @@ import type { Quote } from "../sources/tencent.ts";
 import { type SourceBar, type SourceBars, type SourceCtx, srcCode } from "../sources/types.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import type { MissingReason } from "./completeness.ts";
-import { RateLimitBudgetError } from "./rate-limit.ts";
+import { RateLimitBudgetError, RateLimitWaitBudget } from "./rate-limit.ts";
 import {
   doneKeys,
   errMsg,
@@ -538,6 +541,100 @@ export interface UpdateBarsResult {
   noTrade: number;
   /** 今天缺日线的股票与原因（完整性闸门用，D73） */
   missing: Array<{ code: string; reason: MissingReason }>;
+  /** 缺失的股票里日线停在昨天之前的：代码 → 齐全到哪天（D111，补数据时决定截至日能提交到哪天） */
+  behind: Map<string, DateStr | null>;
+  /** 最后一根 K 线早于昨天、但中间每天都记着没成交，这次直接走报价的股票数（D111） */
+  resumed: number;
+  /** 港股复权轮换刷新：刷新了几只、因为日 K 被风控跳过了几只（D111：轮换让路，不和补数据抢请求） */
+  rotation: { done: number; skipped: number };
+}
+
+/** 报价时间里的日期：A 股 `20260928161451`、港股 `2026/09/28 16:08:34` → 2026-09-28；读不出为 null */
+function quoteDateOf(q: Quote): DateStr | null {
+  const t = q.time.replace(/\D/g, "").slice(0, 8);
+  return /^\d{8}$/.test(t) ? (`${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` as DateStr) : null;
+}
+
+/**
+ * 每只股票的日线齐全到哪天（D111）：不晚于 upTo 的最后一根 K 线，再往后接上连续记着没成交（bar_status no_trade）的交易日。
+ * 从没有过日线的为 null。
+ */
+export async function completeThrough(
+  wh: Warehouse,
+  market: Market,
+  codes: readonly string[],
+  upTo: DateStr,
+): Promise<Map<string, DateStr | null>> {
+  const out = new Map<string, DateStr | null>();
+  if (!codes.length) return out;
+  const lastBar = new Map<string, DateStr>();
+  for (let i = 0; i < codes.length; i += 1000) {
+    const rows = await wh.all<{ code: string; d: string }>(
+      `SELECT code, max(date)::VARCHAR AS d FROM bars_daily
+       WHERE code IN (${sqlCodeList(codes.slice(i, i + 1000))}) AND date <= $u::DATE GROUP BY code`,
+      { u: upTo },
+    );
+    for (const r of rows) lastBar.set(r.code, r.d);
+  }
+  const earliest = [...lastBar.values()].sort()[0];
+  const noTrade = new Map<string, Set<string>>();
+  const cal: DateStr[] = [];
+  if (earliest) {
+    for (const r of await wh.all<{ d: string }>(
+      `SELECT DISTINCT date::VARCHAR AS d FROM trade_calendar
+       WHERE market = $m AND date > $a::DATE AND date <= $u::DATE ORDER BY d`,
+      { m: market, a: earliest, u: upTo },
+    ))
+      cal.push(r.d);
+    for (let i = 0; i < codes.length; i += 1000) {
+      const rows = await wh.all<{ code: string; d: string }>(
+        `SELECT code, date::VARCHAR AS d FROM bar_status
+         WHERE status = 'no_trade' AND code IN (${sqlCodeList(codes.slice(i, i + 1000))})
+           AND date > $a::DATE AND date <= $u::DATE`,
+        { a: earliest, u: upTo },
+      );
+      for (const r of rows) {
+        let set = noTrade.get(r.code);
+        if (!set) noTrade.set(r.code, (set = new Set()));
+        set.add(r.d);
+      }
+    }
+  }
+  for (const code of codes) {
+    const l = lastBar.get(code);
+    if (!l) {
+      out.set(code, null);
+      continue;
+    }
+    let through = l;
+    const set = noTrade.get(code);
+    if (set) {
+      for (const d of cal) {
+        if (d <= l) continue;
+        if (!set.has(d)) break;
+        through = d;
+      }
+    }
+    out.set(code, through);
+  }
+  return out;
+}
+
+/**
+ * 逐股补的顺序（D111）：除权日的（报价说今天有成交，只有几只）在前；其余按日线停得最早的在前（从没有过日线的最前），
+ * 同一只只补一次。
+ */
+export function klineOrder<T extends { code: string }>(
+  exRights: readonly T[],
+  gap: readonly T[],
+  lastDate: (code: string) => DateStr | undefined,
+): T[] {
+  const sorted = [...gap].sort((a, b) => {
+    const da = lastDate(a.code) ?? "";
+    const db = lastDate(b.code) ?? "";
+    return da < db ? -1 : da > db ? 1 : 0;
+  });
+  return [...new Map([...exRights, ...sorted].map((s) => [s.code, s])).values()];
 }
 
 export async function updateBars(
@@ -553,6 +650,8 @@ export async function updateBars(
   const last = await lastBars(ctx, market);
   const quoteable: SecurityRow[] = [];
   const gap: SecurityRow[] = [];
+  /** 最后一根 K 线早于昨天的：中间每天都记着没成交的照样走报价，其余逐股补 */
+  const lagging: SecurityRow[] = [];
   let neverFilled = 0;
   /** 今天每只股票的结果：updated 有了日线；no_trade 没成交；missing 缺（带原因） */
   const state = new Map<
@@ -567,7 +666,22 @@ export async function updateBars(
       else gap.push(s);
     } else if (l.date >= latestTradeDate) state.set(s.code, { s: "updated" });
     else if (l.date === prevTradeDate) quoteable.push(s);
-    else gap.push(s);
+    else lagging.push(s);
+  }
+  // 停牌续上（D111）：最后一根 K 线之后到昨天，每个交易日都记着没成交（停牌、零成交的港股小票），日线其实齐到了昨天，
+  // 和「昨天有 K 线」一样走报价。原来它们每晚都要逐股补（港股三四百只、每只两次请求），一被风控就越积越多
+  const through = await completeThrough(
+    ctx.wh,
+    market,
+    lagging.map((s) => s.code),
+    prevTradeDate,
+  );
+  let resumed = 0;
+  for (const s of lagging) {
+    if ((through.get(s.code) ?? "") >= prevTradeDate) {
+      quoteable.push(s);
+      resumed++;
+    } else gap.push(s);
   }
 
   const env = await vetEnv(ctx, market);
@@ -576,29 +690,39 @@ export async function updateBars(
   const exRights: SecurityRow[] = [];
   /** 报价批次失败或漏掉、转去逐股补的代码：逐股也补不上时原因记 quote_omitted */
   const omittedCodes = new Set<string>();
+  /**
+   * 逐股补的股票的报价（D111）：今天有没有成交、报价时间的日期、前收。判断逐股日 K 里没有的日子是没成交还是来源还没更新：
+   * 今天成交了日 K 里却没有 → 缺；最后一根之后到昨天，报价的前收等于最后一根的收盘（或报价停在那天）→ 这些天没成交。
+   */
+  const gapQuote = new Map<string, { date: DateStr | null; traded: boolean; prevClose: number }>();
   const quoteDate = latestTradeDate.replaceAll("-", "");
+  const gapCodes = new Set(gap.map((s) => s.code));
+  // 逐股补的也一起要报价（同一批 60 只，多几次报价请求），只用来判断有没有成交，不从报价写日线
+  const targets = [...quoteable, ...gap];
   const batches: SecurityRow[][] = [];
-  for (let i = 0; i < quoteable.length; i += 60) batches.push(quoteable.slice(i, i + 60));
+  for (let i = 0; i < targets.length; i += 60) batches.push(targets.slice(i, i + 60));
   let quoteFallback = 0;
   const sctx = sourceCtx(ctx);
   const quoteChain = chainFor("quotes", market, ctx.log);
-  await mapLimit(batches, 2, async (batch) => {
+  await mapLimit(batches, 2, async (all) => {
+    const batch = all.filter((s) => !gapCodes.has(s.code));
     // 一批报价出错不让整晚失败：这批股票转去逐股补日线；报价里漏了的代码（腾讯偶尔漏）也一样
     let qs: Quote[];
     try {
       const r = await fetchWithChain(
         quoteChain,
-        `报价 ${batch.length} 只`,
+        `报价 ${all.length} 只`,
         (a) =>
           a.quotes!(
             sctx,
-            batch.map((s) => s.code),
+            all.map((s) => s.code),
           ),
         (v) => !v.length,
         ctx.http,
       );
       qs = r.value;
     } catch (e) {
+      if (!batch.length) return;
       ctx.log(`报价批次失败，改逐股补日线：${errMsg(e)}`);
       gap.push(...batch);
       for (const s of batch) omittedCodes.add(s.code);
@@ -614,6 +738,15 @@ export async function updateBars(
       quoteFallback += omitted.length;
     }
     for (const q of qs) {
+      if (gapCodes.has(q.code)) {
+        const date = quoteDateOf(q);
+        gapQuote.set(q.code, {
+          date,
+          traded: date === latestTradeDate && q.open > 0 && q.volume > 0,
+          prevClose: q.prevClose,
+        });
+        continue;
+      }
       const t = q.time.replace(/\D/g, "").slice(0, 8);
       // 当天没成交（停牌）：报价时间不是这一天或开盘价为 0，不写，记 no_trade
       if (t !== quoteDate || !(q.open > 0) || !(q.volume > 0)) {
@@ -681,47 +814,83 @@ export async function updateBars(
   /** 报价说今天有成交的（除权日）：逐股日 K 里没有今天就是缺，不是停牌 */
   const tradedToday = new Set(exRights.map((s) => s.code));
   const caliberRejects: HygieneRecord[] = [];
-  // 同一只股票只补一次（报价失败转来的股票可能也轮到了港股的复权刷新）
-  const kline = [...new Map([...exRights, ...gap, ...rotate].map((s) => [s.code, s])).values()];
-  await mapLimit(kline, 3, async (s) => {
+  /** 逐股日 K 窗口里没有、确认是没成交的日子（D111）：记 no_trade，以后这只股票能走报价 */
+  const historyNoTrade: Parameters<typeof writeBarStatus>[1] = [];
+  const calendar = [...env.calendar].filter((d) => d < latestTradeDate).sort();
+  const fetchOne = async (c: EtlContext, s: SecurityRow, rotation: boolean): Promise<void> => {
     const l = last.get(s.code);
     const from = l ? addDays(l.date, -60) : (s.list_date ?? addDays(latestTradeDate, -60));
     const lost = (reason: MissingReason, src: string | null) => {
       // 报价已经写上了今天（港股轮换刷新失败）就不算缺
       if (state.get(s.code)?.s !== "updated") state.set(s.code, { s: "missing", reason, src });
     };
+    const anchorRow = l
+      ? await c.wh.one<{ date: string; adj: number }>(
+          `SELECT date::VARCHAR AS date, adj FROM bars_daily WHERE code = $c AND date >= $f::DATE
+           ORDER BY date LIMIT 1`,
+          { c: s.code, f: from },
+        )
+      : undefined;
+    const fetched = await fetchBars(c, s.code, from, latestTradeDate, anchorRow);
+    viaKline++;
+    if (!fetched.rows.length) {
+      // 能连上的来源说没有（empty）：留给闸门当缺失
+      if (!rotation) lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
+      return;
+    }
+    const w = await writeBars(c, s.code, from, fetched);
+    if (!rotation) {
+      // 窗口里没有的日子（D111）：第一根与最后一根之间的是没成交（来源的历史是定稿的）；最后一根之后到昨天的，
+      // 要报价佐证这之后没再成交过（报价停在那天，或报价的前收就是那根的收盘）才记没成交，不然可能是来源还没更新
+      const rows = [...fetched.rows].sort((a, b) => (a[1] < b[1] ? -1 : 1));
+      const first = rows[0]![1];
+      const lastRow = rows.at(-1)!;
+      const have = new Set(w.accepted.map((r) => r[1]));
+      const rejected = new Set(w.issues.filter((x) => x.severity === "reject").map((x) => x.date));
+      const q = gapQuote.get(s.code);
+      // 报价时间停在之前的某天（A 股停在最后成交的时刻）：那天不晚于最后一根才算；报价时间是今天、今天没成交
+      // （港股零成交的小票报价时间也是今天）：看前收是不是最后一根的收盘
+      const trailingOk =
+        !!q &&
+        !q.traded &&
+        (q.date !== null && q.date !== latestTradeDate
+          ? q.date <= lastRow[1]
+          : Math.abs(q.prevClose - lastRow[5]) < 0.0005);
+      for (const d of calendar) {
+        if (d <= first || have.has(d) || rejected.has(d)) continue;
+        if (d > lastRow[1] && !trailingOk) break;
+        historyNoTrade.push({ code: s.code, date: d, status: "no_trade", reason: null, src: fetched.source });
+      }
+    }
+    if (w.accepted.some((r) => r[1] === latestTradeDate)) {
+      state.set(s.code, { s: "updated" });
+      return;
+    }
+    if (rotation) return;
+    const rej = w.issues.find((x) => x.severity === "reject" && x.date === latestTradeDate);
+    if (rej) lost(`rejected:${rej.rule}`, fetched.source);
+    else if (tradedToday.has(s.code)) lost("chain_failed", fetched.source);
+    // 报价说今天有成交、日 K 里还没有今天：来源还没更新，是缺不是停牌（D111）
+    else if (gapQuote.get(s.code)?.traded) lost("kline_behind", fetched.source);
+    else if (state.get(s.code)?.s !== "updated") {
+      state.set(s.code, { s: "no_trade", src: fetched.source });
+    }
+  };
+  // 除权日的（报价说今天有成交，只有几只）先补；补数据按日线停得最早的先补（D111）：被风控挡住时先把最老的缺口补上，
+  // 数据齐全的那天才能往前推
+  const ordered = klineOrder(exRights, gap, (code) => last.get(code)?.date);
+  await mapLimit(ordered, 3, async (s) => {
     try {
-      const anchorRow = l
-        ? await ctx.wh.one<{ date: string; adj: number }>(
-            `SELECT date::VARCHAR AS date, adj FROM bars_daily WHERE code = $c AND date >= $f::DATE
-             ORDER BY date LIMIT 1`,
-            { c: s.code, f: from },
-          )
-        : undefined;
-      const fetched = await fetchBars(ctx, s.code, from, latestTradeDate, anchorRow);
-      viaKline++;
-      if (!fetched.rows.length) {
-        // 能连上的来源说没有（empty）：留给闸门当缺失
-        lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
-        return;
-      }
-      const w = await writeBars(ctx, s.code, from, fetched);
-      if (w.accepted.some((r) => r[1] === latestTradeDate)) {
-        state.set(s.code, { s: "updated" });
-        return;
-      }
-      const rej = w.issues.find((x) => x.severity === "reject" && x.date === latestTradeDate);
-      if (rej) lost(`rejected:${rej.rule}`, fetched.source);
-      else if (tradedToday.has(s.code)) lost("chain_failed", fetched.source);
-      else if (state.get(s.code)?.s !== "updated") {
-        state.set(s.code, { s: "no_trade", src: fetched.source });
-      }
+      await fetchOne(ctx, s, false);
     } catch (e) {
       failed++;
       ctx.log(`日线增量失败 ${s.code}：${errMsg(e)}`);
+      const lost = (reason: MissingReason) => {
+        if (state.get(s.code)?.s !== "updated") state.set(s.code, { s: "missing", reason, src: null });
+      };
       if (e instanceof CaliberError) {
         // 口径换算不成的拒收（D72）：记一条数据问题，原因 rejected:caliber
-        lost("rejected:caliber", null);
+        lost("rejected:caliber");
         caliberRejects.push({
           code: s.code,
           src: null,
@@ -732,15 +901,44 @@ export async function updateBars(
         });
       } else if (e instanceof BlockedError) {
         // 整条链被风控、没等到解封（D108）：单独记原因，闸门与管理页能说清是风控
-        lost("rate_limited", null);
+        lost("rate_limited");
       } else {
-        lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
+        lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed");
       }
     }
   });
+  // 港股复权轮换（D111）：排在补数据之后；不等风控解封，日 K 一被风控就停，剩下的下一轮再刷（不算失败、不记缺失）
+  const queued = new Set(ordered.map((s) => s.code));
+  const rotation = { done: 0, skipped: 0 };
+  // 一个已经用完的等风控预算：被风控就不等，也不记「预算不够」那行（那是给补数据的）
+  const spent = new RateLimitWaitBudget(0);
+  spent.reserve(Number.MAX_SAFE_INTEGER);
+  const noWait: EtlContext = { ...ctx, rateLimitBudget: spent };
+  let stopRotation = false;
+  await mapLimit(
+    rotate.filter((s) => !queued.has(s.code)),
+    3,
+    async (s) => {
+      if (stopRotation) {
+        rotation.skipped++;
+        return;
+      }
+      try {
+        await fetchOne(noWait, s, true);
+        rotation.done++;
+      } catch (e) {
+        rotation.skipped++;
+        if (e instanceof BlockedError) stopRotation = true;
+        else ctx.log(`复权刷新失败 ${s.code}：${errMsg(e)}`);
+      }
+    },
+  );
+  if (rotation.skipped) {
+    ctx.log(`复权轮换刷新 ${rotation.done} 只，${rotation.skipped} 只这次跳过（日 K 被风控或出错），下一轮再刷`);
+  }
 
   // 日线状态（D73）：没成交 / 缺失记 bar_status；之后写上了的由 recordHygiene 删掉
-  const statusRows: Parameters<typeof writeBarStatus>[1] = [];
+  const statusRows: Parameters<typeof writeBarStatus>[1] = [...historyNoTrade];
   const missing: UpdateBarsResult["missing"] = [];
   let updated = 0;
   let noTrade = 0;
@@ -759,11 +957,24 @@ export async function updateBars(
     await recordHygiene(ctx, caliberRejects);
     await writeBarStatus(ctx, statusRows);
   });
+  // 缺失的股票里之前的日子也没补上的（D111）：日线齐到哪天
+  const behind = new Map<string, DateStr | null>();
+  for (const [code, d] of await completeThrough(
+    ctx.wh,
+    market,
+    missing.map((m) => m.code),
+    prevTradeDate,
+  )) {
+    if (d === null || d < prevTradeDate) behind.set(code, d);
+  }
   const expected = active.length - neverFilled;
   ctx.log(
-    `${market} 日线增量：报价 ${newRows.length} 只，逐股 ${viaKline} 只（其中除权 ${exRights.length}` +
+    `${market} 日线增量：报价 ${newRows.length} 只，逐股 ${viaKline - rotation.done} 只（其中除权 ${exRights.length}` +
       (quoteFallback ? `、报价没拿到 ${quoteFallback}` : "") +
+      (resumed ? `；停牌续上走报价 ${resumed}` : "") +
+      (rotation.done ? `；复权轮换 ${rotation.done}` : "") +
       `），失败 ${failed}；应更新 ${expected}，已有 ${updated}，没成交 ${noTrade}，缺 ${missing.length}` +
+      (behind.size ? `（其中 ${behind.size} 只之前的日子也没补上）` : "") +
       (neverFilled ? `；${neverFilled} 只从没回填过，跳过（要补请跑 backfill）` : ""),
   );
   return {
@@ -776,5 +987,8 @@ export async function updateBars(
     updated,
     noTrade,
     missing,
+    behind,
+    resumed,
+    rotation,
   };
 }

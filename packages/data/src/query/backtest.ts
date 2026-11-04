@@ -22,6 +22,7 @@ import {
   type TradingDayBasis,
 } from "@ivan/core";
 import { rebalanceDays } from "@ivan/engine";
+import type { CatchUp, Completeness } from "../etl/completeness.ts";
 import type { SourcesLedger } from "../sources/chain.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import { benchFirstDate, benchMismatchCaveat } from "./bench.ts";
@@ -67,6 +68,36 @@ export async function dataVersionState(
     openVersion: open ? { id: open.id, startedAt: open.started_at ?? null } : null,
     lastVersionStatus: last?.status ?? null,
   };
+}
+
+/**
+ * 补数据的状态（D111，横幅与管理页）：最近一个结束的夜间版本（ok / incomplete）只因缺失超阈值没通过时，
+ * 计入阈值的缺失中之前的日子也没补上的只数；
+ * 最新的已提交版本是补数据时提交的（截至日没到那一晚）就带上它的进度。最新的夜间版本是完整的一晚时都为空。
+ */
+export async function catchUpState(
+  wh: Warehouse,
+  market: string,
+): Promise<{ catchUp: CatchUp | null; behind: number }> {
+  const rows = await wh.all<{ status: string; c: string | null }>(
+    `SELECT coalesce(status, 'ok') AS status, completeness AS c FROM data_versions
+     WHERE market = $m AND coalesce(status, 'ok') IN ('ok', 'incomplete') AND coalesce(kind, '') <> 'check'
+     ORDER BY id DESC LIMIT 20`,
+    { m: market },
+  );
+  const parse = (c: string | null): Partial<Completeness> => {
+    try {
+      return c ? (JSON.parse(c) as Partial<Completeness>) : {};
+    } catch {
+      return {};
+    }
+  };
+  const lastNight = rows[0] ? parse(rows[0].c) : {};
+  const lastOk = rows.find((r) => r.status === "ok");
+  const catchUp = lastOk ? (parse(lastOk.c).catchUp ?? null) : null;
+  // 只有「缺失超阈值」这一条没过时才算在补数据；无成交数也不对时是真的出了问题
+  const backlog = lastNight.missingFailed && !lastNight.noTradeFailed ? (lastNight.behind ?? 0) : 0;
+  return { catchUp, behind: backlog };
 }
 
 /** 最近一晚的取数来源（管理页「今晚东财 N 只、腾讯 M 只（回退 K 次）」，D72） */
