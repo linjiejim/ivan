@@ -467,7 +467,7 @@ function ChatBody({
         {error && <Callout tone="warn">{error.message}</Callout>}
         <div ref={endRef} />
       </div>
-      <div className="border-t border-line bg-surface px-3 pt-2.5 pb-3">
+      <div className="border-t border-line bg-surface px-3 pt-2.5 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         {ui.page.label && (
           <div className="mb-2 inline-flex h-6 max-w-full items-center gap-1.5 rounded-md bg-surface-2 pr-1 pl-2 text-2xs text-ink-2">
             <IconContext size={12} className="shrink-0 text-muted" />
@@ -476,7 +476,7 @@ function ChatBody({
               onClick={() => ui.setPage({})}
               aria-label="清除上下文"
               title="清除上下文"
-              className="flex size-4 shrink-0 items-center justify-center rounded text-muted transition-colors hover:bg-surface-3 hover:text-ink"
+              className="relative flex size-4 shrink-0 items-center justify-center rounded text-muted transition-colors hover:bg-surface-3 hover:text-ink pointer-coarse:after:absolute pointer-coarse:after:-inset-3"
             >
               <IconClose size={10} weight="bold" />
             </button>
@@ -573,6 +573,8 @@ export function ChatPanel({
       className={cx(
         "flex h-full flex-col",
         full && "overflow-hidden rounded-2xl border border-line bg-surface shadow-[var(--edge)]",
+        // 手机上的对话页铺满：不要卡片边框和圆角
+        full && "max-sm:rounded-none max-sm:border-0 max-sm:shadow-none",
       )}
     >
       <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3">

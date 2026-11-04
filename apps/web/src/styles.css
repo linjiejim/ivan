@@ -178,6 +178,8 @@
   --z-modal: 50;
   --z-popover: 60;
   --z-grain: 80;
+  /* 页头高度（h-14 + 底边 1px + 刘海安全区）：手机上的全屏对话按它算高度 */
+  --header-h: calc(3.5rem + 1px + env(safe-area-inset-top));
   /* 动效：进场用 out 曲线；悬停 120ms、按压 160ms、浮层 200ms、内容进场 360ms */
   --ease-ink: cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -224,6 +226,7 @@
   --animate-pop: ivan-pop 200ms var(--ease-ink) both;
   --animate-fade: ivan-fade 200ms var(--ease-ink) both;
   --animate-modal: ivan-modal 240ms var(--ease-ink) both;
+  --animate-sheet: ivan-sheet 240ms var(--ease-ink) both;
   --animate-shimmer: ivan-shimmer 1.6s linear infinite;
   --animate-live: ivan-live 2.4s var(--ease-ink) infinite;
 }
@@ -249,6 +252,12 @@
   from {
     opacity: 0;
     transform: translateY(8px) scale(0.985);
+  }
+}
+/* 手机上的弹窗是贴底的弹层：从底边升上来 */
+@keyframes ivan-sheet {
+  from {
+    transform: translateY(100%);
   }
 }
 @keyframes ivan-shimmer {
@@ -288,6 +297,10 @@
   html {
     -webkit-text-size-adjust: 100%;
     text-rendering: optimizeLegibility;
+  }
+  /* 横屏的刘海、圆角让开（viewport-fit=cover）；竖屏两侧是 0 */
+  #root {
+    padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
   }
   body {
     background: var(--page);
@@ -341,6 +354,14 @@
   }
   input[type="number"] {
     font-variant-numeric: tabular-nums;
+  }
+  /* 触屏：输入框字号不到 16px 时 iOS 聚焦会放大整页；!important 才压得过 text-sm 这类工具类 */
+  @media (pointer: coarse) {
+    input,
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
   }
   /* 原生日期框的日历按钮跟随主题 */
   ::-webkit-calendar-picker-indicator {

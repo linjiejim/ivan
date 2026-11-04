@@ -13,7 +13,7 @@ import {
   type StrategyLine,
   valueAt,
 } from "../../lib/multi-series.ts";
-import { Segmented, useMediaQuery } from "../ui.tsx";
+import { Segmented, TOUCH_QUERY, useMediaQuery } from "../ui.tsx";
 import { BrushBar } from "./brush-bar.tsx";
 import {
   axisStyle,
@@ -50,13 +50,15 @@ const RANGES: Array<[MultiRange, string]> = [
 export function MultiNavChart({
   lines,
   height = 280,
-  onAsk,
+  onAsk: onAskProp,
 }: {
   lines: StrategyLine[];
   height?: number;
   onAsk?: (range: { from: string; to: string }) => void;
 }) {
   const [view, setView] = useState<MultiView>("nav");
+  // 触屏不开框选（D112）：框选占住了图上的拖动，手指从图上开始滑整页就滚不动；手机上问 AI 走对话页
+  const onAsk = useMediaQuery(TOUCH_QUERY) ? undefined : onAskProp;
   const [range, setRange] = useState<MultiRange>("all");
   const [brushed, setBrushed] = useState<{ from: string; to: string } | null>(null);
   const themeV = useThemeVersion();

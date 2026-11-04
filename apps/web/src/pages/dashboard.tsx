@@ -288,7 +288,8 @@ function TrackingsCard({
                       >
                         {t.strategyName}
                       </Link>
-                      <Tag>{MARKET_TEXT[t.market]}</Tag>
+                      {/* 窄的时候名字优先：市场在详情页里有，这里收起 */}
+                      <Tag className="@max-md:hidden">{MARKET_TEXT[t.market]}</Tag>
                       <TrackingVerdict
                         verdict={t.verdict}
                         health={t.health}
@@ -321,7 +322,7 @@ function TrackingsCard({
                   <span className="hidden sm:block">
                     <Sparkline values={t.spark} color={slotColor(slot) ?? "var(--faint)"} />
                   </span>
-                  <div className="w-24 text-right">
+                  <div className="w-20 text-right @md:w-24">
                     <div
                       className={cx(
                         "text-lg leading-6 font-semibold tracking-[-0.01em]",
@@ -442,7 +443,7 @@ function Chip({
       aria-pressed={active}
       onClick={onClick}
       className={cx(
-        "inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs whitespace-nowrap ring-1 transition-[background-color,color,box-shadow] duration-150 ring-inset",
+        "relative inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-xs whitespace-nowrap ring-1 transition-[background-color,color,box-shadow] duration-150 ring-inset pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2",
         active
           ? "bg-surface-2 font-medium text-ink ring-line-strong"
           : "text-ink-2 ring-line hover:text-ink hover:ring-line-strong",

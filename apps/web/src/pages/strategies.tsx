@@ -43,7 +43,7 @@ function StrategyCard({ s }: { s: StrategyView }) {
   return (
     <Link
       to={`/strategies/${s.id}`}
-      className="group/card relative flex flex-col rounded-xl border border-line bg-surface p-4 shadow-[var(--edge)] transition-[border-color,box-shadow,transform] duration-200 hover:border-line-strong hover:shadow-raise active:translate-y-px"
+      className="group/card relative flex min-w-0 flex-col rounded-xl border border-line bg-surface p-4 shadow-[var(--edge)] transition-[border-color,box-shadow,transform] duration-200 hover:border-line-strong hover:shadow-raise active:translate-y-px"
     >
       <div className="flex items-center gap-2">
         <span className="min-w-0 truncate font-semibold text-ink">{s.name}</span>
@@ -96,9 +96,10 @@ export function StrategiesPage() {
         }
         actions={
           <>
+            {/* 手机上一行只放两个新建按钮；信号集在账户菜单里也有 */}
             <Link
               to="/signals"
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink max-sm:hidden"
             >
               <IconSignals size={16} className="text-muted" />
               信号集

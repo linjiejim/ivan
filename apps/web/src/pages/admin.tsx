@@ -983,7 +983,7 @@ export function AdminPage() {
             <tbody>
               {usage.data.map((d) => (
                 <tr key={d.day} className="transition-colors hover:bg-surface-2/60">
-                  <Td className="font-mono text-[12px] text-ink-2">{d.day}</Td>
+                  <Td className="font-mono text-[12px] whitespace-nowrap text-ink-2">{d.day}</Td>
                   <Td align="right">{d.chatMessages}</Td>
                   <Td align="right">{d.backtests}</Td>
                   <Td align="right">{d.analyses ?? 0}</Td>

@@ -12,7 +12,7 @@ export function ChatPage() {
   const { threadId } = useParams();
   usePageTitle("问 AI");
   return (
-    <div className="mx-auto h-[calc(100dvh-10.5rem)] min-h-[420px] max-w-3xl">
+    <div className="mx-auto h-[calc(100dvh-10.5rem)] min-h-[420px] max-w-3xl max-sm:h-[calc(100dvh-var(--header-h))] max-sm:min-h-80">
       <Suspense fallback={<Spinner />}>
         <ChatPanel full key={threadId ?? "current"} initialThread={threadId} />
       </Suspense>

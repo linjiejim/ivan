@@ -91,7 +91,7 @@ function Quota({ label, used, total }: { label: string; used: number; total: num
   const near = ratio >= 0.8;
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span className="w-7 text-muted">{label}</span>
+      <span className="w-14 shrink-0 text-muted">{label}</span>
       <span className="relative h-1 flex-1">
         <span
           className={cx("absolute inset-y-0 left-0 rounded-full", near ? "bg-warn" : "bg-ink/35")}
@@ -251,7 +251,8 @@ export function Layout() {
 
   const showAskButton = !onChatPage && !(wide && isHome);
   return (
-    <div className="flex h-full">
+    // 窄屏（< 1024px，没有对话侧栏）整页随文档滚动：iOS 地址栏能收起、点状态栏回顶部；宽屏主区域自己滚（D112）
+    <div className="flex min-h-full lg:h-full">
       <a
         href="#main"
         className="fixed top-2 left-2 z-(--z-popover) -translate-y-16 rounded-lg bg-primary px-3 py-2 text-sm text-primary-ink shadow-pop transition-transform focus:translate-y-0"
@@ -259,7 +260,7 @@ export function Layout() {
         跳到正文
       </a>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-(--z-header) border-b border-line bg-page/85 backdrop-blur-md backdrop-saturate-150">
+        <header className="sticky top-0 z-(--z-header) border-b border-line bg-page/85 pt-[env(safe-area-inset-top)] backdrop-blur-md backdrop-saturate-150">
           <div className="mx-auto flex h-14 max-w-6xl items-center gap-3 px-4 sm:px-6">
             <NavLink
               to="/"
@@ -297,14 +298,23 @@ export function Layout() {
             </div>
           </div>
         </header>
-        <main id="main" className="min-w-0 flex-1 overflow-y-auto">
+        <main id="main" className="min-w-0 flex-1 max-lg:overflow-x-clip lg:overflow-y-auto">
           <div
             key={location.pathname}
-            className="@container mx-auto max-w-6xl animate-enter px-4 pt-6 pb-10 sm:px-6"
+            className={cx(
+              "@container mx-auto max-w-6xl animate-enter px-4 pt-6 pb-10 sm:px-6",
+              // 手机上的对话页铺满页头以下的整屏
+              onChatPage && "max-sm:p-0",
+            )}
           >
             <Outlet />
           </div>
-          <footer className="mx-auto flex max-w-6xl items-center gap-2 px-4 pb-8 text-2xs text-muted sm:px-6">
+          <footer
+            className={cx(
+              "mx-auto flex max-w-6xl items-center gap-2 px-4 pb-[calc(2rem+env(safe-area-inset-bottom))] text-2xs text-muted sm:px-6",
+              onChatPage && "max-sm:hidden",
+            )}
+          >
             <LogoGlyph className="size-3.5 text-faint" />
             仅供研究，不构成投资建议；数据来自第三方公开接口，可能有误差与延迟。
           </footer>

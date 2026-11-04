@@ -38,6 +38,7 @@ import {
   IconClose,
   IconError,
   IconInfo,
+  IconMore,
   IconSelect,
   IconSpinner,
   IconWarn,
@@ -45,7 +46,7 @@ import {
 
 /** 组件自带的 class 可以被调用方覆盖：冲突的工具类以后写的为准（tailwind-merge） */
 const merge = extendTailwindMerge({
-  extend: { theme: { animate: ["enter", "pop", "fade", "modal", "shimmer", "live"] } },
+  extend: { theme: { animate: ["enter", "pop", "fade", "modal", "sheet", "shimmer", "live"] } },
 });
 
 export function cx(...a: Parameters<typeof clsx>) {
@@ -66,6 +67,15 @@ export function useMediaQuery(query: string): boolean {
 
 /** 宽屏（≥1024px）才常驻对话栏；窄屏对话走全屏页 */
 export const WIDE_QUERY = "(min-width: 1024px)";
+
+/** 主要的指针是手指（手机、平板）：和宽度无关 */
+export const TOUCH_QUERY = "(pointer: coarse)";
+
+/*
+ * 触屏的点击区（D112）：小控件照样画得小，但手指按得到。`pointer: coarse` 时用一层透明伪元素把可点范围
+ * 撑到约 40–44px，不改布局，鼠标下没有这层。用的元素要 `relative`。
+ */
+const HIT = "pointer-coarse:after:absolute pointer-coarse:after:content-['']";
 
 /**
  * 浮层定位：挂到 body 上、fixed 定位，不会被卡片的 overflow 裁掉；下方放不下就翻到上方。
@@ -200,7 +210,7 @@ export function MenuItem({
       role="menuitem"
       {...rest}
       className={cx(
-        "flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-sm text-ink transition-colors duration-100 hover:bg-surface-2 active:bg-surface-3",
+        "flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-sm text-ink transition-colors duration-100 hover:bg-surface-2 active:bg-surface-3 pointer-coarse:h-11",
         className,
       )}
     >
@@ -225,7 +235,7 @@ export function MenuLink({
     <Link
       role="menuitem"
       to={to}
-      className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-sm text-ink transition-colors duration-100 hover:bg-surface-2 active:bg-surface-3"
+      className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-sm text-ink transition-colors duration-100 hover:bg-surface-2 active:bg-surface-3 pointer-coarse:h-11"
     >
       {Ico && <Ico className="shrink-0 text-muted" size={16} />}
       <span className="min-w-0 flex-1 truncate">{children}</span>
@@ -276,7 +286,9 @@ export function Info({
         aria-expanded={open}
         aria-describedby={open ? tipId : undefined}
         className={cx(
-          "inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full align-[-3px] text-faint transition-colors hover:text-ink-2",
+          "relative inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full align-[-3px] text-faint transition-colors hover:text-ink-2",
+          HIT,
+          "pointer-coarse:after:-inset-3",
           open && "text-ink-2",
           className,
         )}
@@ -367,7 +379,11 @@ export function Button({
       aria-busy={loading || undefined}
       className={cx(
         BUTTON_BASE,
-        size === "sm" ? "h-7 gap-1 px-2.5 text-xs" : "h-9 gap-1.5 px-3.5 text-sm",
+        HIT,
+        "pointer-coarse:after:inset-x-0",
+        size === "sm"
+          ? "h-7 gap-1 px-2.5 text-xs pointer-coarse:after:-inset-y-2"
+          : "h-9 gap-1.5 px-3.5 text-sm pointer-coarse:after:-inset-y-1",
         BUTTON_VARIANT[variant],
         className,
       )}
@@ -403,14 +419,86 @@ export function IconButton({
       title={label}
       {...rest}
       className={cx(
-        "inline-flex shrink-0 items-center justify-center rounded-lg text-ink-2 transition-[background-color,color,transform] duration-150 hover:bg-surface-2 hover:text-ink active:translate-y-px disabled:pointer-events-none disabled:opacity-40",
-        size === "sm" ? "size-7" : "size-8",
+        "relative inline-flex shrink-0 items-center justify-center rounded-lg text-ink-2 transition-[background-color,color,transform] duration-150 hover:bg-surface-2 hover:text-ink active:translate-y-px disabled:pointer-events-none disabled:opacity-40",
+        HIT,
+        size === "sm"
+          ? "size-7 pointer-coarse:after:-inset-2"
+          : "size-8 pointer-coarse:after:-inset-1.5",
         active && "bg-surface-2 text-ink",
         className,
       )}
     >
       <Ico size={size === "sm" ? 15 : 17} />
     </button>
+  );
+}
+
+export type MoreAction = {
+  label: string;
+  icon?: Icon;
+  onClick: () => void;
+  loading?: boolean;
+  disabled?: boolean;
+};
+
+/**
+ * 页头里的次要动作：宽的时候平铺成 ghost 按钮；手机上（< 640px）收进行尾的「⋯」菜单，
+ * 一行只留主要动作（D112）。放在 `PageHeader` 的 actions 里，和主要动作并列。
+ */
+export function MoreActions({ actions }: { actions: MoreAction[] }) {
+  if (!actions.length) return null;
+  return (
+    <>
+      <span className="contents max-sm:hidden">
+        {actions.map((a, i) => (
+          <Button
+            key={i}
+            variant="ghost"
+            icon={a.icon}
+            loading={a.loading}
+            disabled={a.disabled}
+            onClick={a.onClick}
+          >
+            {a.label}
+          </Button>
+        ))}
+      </span>
+      <span className="order-last sm:hidden">
+        <Popover
+          width={220}
+          align="end"
+          label="更多操作"
+          trigger={({ ref, open, toggle }) => (
+            <IconButton
+              ref={ref}
+              icon={IconMore}
+              label="更多操作"
+              active={open}
+              aria-haspopup="menu"
+              aria-expanded={open}
+              onClick={toggle}
+            />
+          )}
+        >
+          {(close) =>
+            actions.map((a, i) => (
+              <MenuItem
+                key={i}
+                icon={a.loading ? IconSpinner : a.icon}
+                disabled={a.disabled || a.loading}
+                className="disabled:pointer-events-none disabled:opacity-45"
+                onClick={() => {
+                  close();
+                  a.onClick();
+                }}
+              >
+                {a.label}
+              </MenuItem>
+            ))
+          }
+        </Popover>
+      </span>
+    </>
   );
 }
 
@@ -438,7 +526,9 @@ export function CopyButton({
         setDone(true);
       }}
       className={cx(
-        "inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors",
+        "relative inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors",
+        HIT,
+        "pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2",
         done ? "text-down" : "text-accent hover:bg-accent-wash",
         className,
       )}
@@ -450,8 +540,11 @@ export function CopyButton({
 }
 
 /** 文字链接（花青）：「完整报告 ›」这类去别处看的入口 */
-const TEXT_LINK =
-  "group/link inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-medium text-accent transition-colors hover:text-accent-strong";
+const TEXT_LINK = cx(
+  "group/link relative inline-flex items-center gap-0.5 whitespace-nowrap text-xs font-medium text-accent transition-colors hover:text-accent-strong",
+  HIT,
+  "pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3",
+);
 
 /**
  * 文字链接。站内跳转用 `to`；下载文件（如运行卡）用 `href` + `download`，不带箭头、前面可放图标；
@@ -540,7 +633,8 @@ export function Card({
       )}
     >
       {(title || action) && (
-        <header className="flex min-h-12 items-center justify-between gap-3 px-4 pt-3">
+        // 放不下时动作换到标题下面一行，而不是把标题挤成一列（窄屏）
+        <header className="flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 pt-3">
           <div className="min-w-0">
             {title && (
               <h2
@@ -587,7 +681,11 @@ export function PageHeader({
         {back && (
           <Link
             to={back.to}
-            className="group/back mb-2 inline-flex items-center gap-1 text-xs text-muted transition-colors hover:text-ink"
+            className={cx(
+              "group/back relative mb-2 inline-flex items-center gap-1 text-xs text-muted transition-colors hover:text-ink",
+              HIT,
+              "pointer-coarse:after:-inset-x-2 pointer-coarse:after:-inset-y-3",
+            )}
           >
             <IconChevronLeft
               size={12}
@@ -713,7 +811,7 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
       {...rest}
       className={cx(
         FIELD_BASE,
-        "h-9 px-3",
+        "h-9 px-3 pointer-coarse:h-11",
         // 调用方给了宽度就用调用方的，否则撑满
         !/(^|\s)w-/.test(className ?? "") && "w-full",
         className,
@@ -732,7 +830,10 @@ export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLText
 export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <span className={cx("relative inline-flex", className)}>
-      <select {...rest} className={cx(FIELD_BASE, "h-9 w-full appearance-none pr-8 pl-3")}>
+      <select
+        {...rest}
+        className={cx(FIELD_BASE, "h-9 w-full appearance-none pr-8 pl-3 pointer-coarse:h-11")}
+      >
         {children}
       </select>
       <IconSelect
@@ -781,7 +882,7 @@ export function Checkbox({
   return (
     <label
       className={cx(
-        "inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-sm text-ink select-none",
+        "inline-flex cursor-pointer items-center gap-2 whitespace-nowrap text-sm text-ink select-none pointer-coarse:min-h-10",
         className,
       )}
     >
@@ -1074,7 +1175,7 @@ export function Stat({
       >
         <Figure text={value} />
       </div>
-      {note && <div className="mt-1 truncate text-xs text-muted">{note}</div>}
+      {note && <div className="mt-1 line-clamp-2 text-xs text-muted">{note}</div>}
     </div>
   );
 }
@@ -1093,9 +1194,46 @@ export function Tabs<T extends string>({
   items: Array<{ value: T; label: ReactNode; icon?: Icon; count?: number }>;
   className?: string;
 }) {
+  // 窄屏放不下时横向滚：选中的那个滚进视野，被裁掉的一侧淡出（看得出后面还有）
+  const list = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+  useLayoutEffect(() => {
+    const el = list.current;
+    if (!el) return;
+    const measure = () =>
+      setEdges({
+        left: el.scrollLeft > 1,
+        right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
+      });
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
+    };
+  }, [items.length]);
+  useLayoutEffect(() => {
+    const el = list.current;
+    const tab = el?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!el || !tab || el.scrollWidth <= el.clientWidth) return;
+    const pad = 32;
+    if (tab.offsetLeft - pad < el.scrollLeft) el.scrollLeft = tab.offsetLeft - pad;
+    else if (tab.offsetLeft + tab.offsetWidth + pad > el.scrollLeft + el.clientWidth)
+      el.scrollLeft = tab.offsetLeft + tab.offsetWidth + pad - el.clientWidth;
+  }, [value]);
+  const fade = 28;
+  const mask =
+    edges.left || edges.right
+      ? `linear-gradient(to right, ${edges.left ? `transparent, black ${fade}px` : "black"}, ${
+          edges.right ? `black calc(100% - ${fade}px), transparent` : "black"
+        })`
+      : undefined;
   return (
     <div
+      ref={list}
       role="tablist"
+      style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
       className={cx(
         "flex gap-1 overflow-x-auto border-b border-line [scrollbar-width:none]",
         className,
@@ -1164,7 +1302,9 @@ export function Segmented<T extends string>({
             aria-checked={on}
             onClick={() => onChange(v)}
             className={cx(
-              "h-6 rounded-md px-2.5 text-xs whitespace-nowrap transition-[background-color,color,box-shadow] duration-150",
+              "relative h-6 rounded-md px-2.5 text-xs whitespace-nowrap transition-[background-color,color,box-shadow] duration-150 pointer-coarse:h-8 pointer-coarse:px-3",
+              HIT,
+              "pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-1.5",
               on ? "bg-surface font-medium text-ink shadow-raise" : "text-muted hover:text-ink",
             )}
           >
@@ -1213,9 +1353,10 @@ export function Modal({
     };
   }, [open]);
   if (!open) return null;
+  // 手机上（< 640px）是贴底的弹层：全宽、上圆角、底部留出安全区，按钮平分一行（D112）
   return createPortal(
     <div
-      className="fixed inset-0 flex items-center justify-center p-4"
+      className="fixed inset-0 flex items-end justify-center sm:items-center sm:p-4"
       style={{ zIndex: "var(--z-modal)" }}
     >
       <div
@@ -1230,8 +1371,9 @@ export function Modal({
         aria-labelledby={titleId}
         tabIndex={-1}
         className={cx(
-          "relative flex max-h-[88vh] w-full animate-modal flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-modal outline-none",
-          wide ? "max-w-3xl" : "max-w-lg",
+          "relative flex max-h-[92dvh] w-full animate-sheet flex-col overflow-hidden rounded-t-2xl border border-b-0 border-line bg-surface shadow-modal outline-none",
+          "sm:max-h-[88vh] sm:animate-modal sm:rounded-2xl sm:border-b",
+          wide ? "sm:max-w-3xl" : "sm:max-w-lg",
         )}
       >
         <header className="flex items-center gap-2.5 border-b border-line py-3 pr-3 pl-5">
@@ -1241,9 +1383,16 @@ export function Modal({
           </h3>
           <IconButton icon={IconClose} label="关闭" size="sm" onClick={onClose} />
         </header>
-        <div className="min-h-0 overflow-y-auto px-5 py-4">{children}</div>
+        <div
+          className={cx(
+            "min-h-0 overflow-y-auto px-5 py-4",
+            !footer && "max-sm:pb-[calc(1rem+env(safe-area-inset-bottom))]",
+          )}
+        >
+          {children}
+        </div>
         {footer && (
-          <footer className="flex justify-end gap-2 border-t border-line bg-page/50 px-5 py-3">
+          <footer className="flex justify-end gap-2 border-t border-line bg-page/50 px-5 py-3 max-sm:pb-[calc(0.75rem+env(safe-area-inset-bottom))] max-sm:*:flex-1">
             {footer}
           </footer>
         )}
@@ -1320,7 +1469,8 @@ export function DataTable({
   className?: string;
 }) {
   return (
-    <div className={cx("-mx-1 overflow-x-auto px-1", className)}>
+    // relative：表头里的 sr-only（绝对定位）留在滚动框里，不把整页撑出横向滚动
+    <div className={cx("relative -mx-1 overflow-x-auto px-1", className)}>
       <table className="tabular w-full border-collapse text-sm" style={{ minWidth }}>
         {children}
       </table>

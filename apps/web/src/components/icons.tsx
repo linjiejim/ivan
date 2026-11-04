@@ -61,6 +61,7 @@ export {
   EyeIcon as IconShow, // 显示密码
   EyeSlashIcon as IconHide, // 隐藏密码
   PaperclipIcon as IconContext, // 对话带上的页面上下文
+  DotsThreeIcon as IconMore, // 更多操作（手机上收起的次要动作）
   // 状态
   InfoIcon as IconInfo,
   WarningIcon as IconWarn,

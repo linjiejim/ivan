@@ -366,7 +366,10 @@ export function TrackingPage() {
                       <Th>股票</Th>
                       <Th align="right">仓位</Th>
                       <Th align="right">浮动盈亏</Th>
-                      <Th align="right">买入日</Th>
+                      {/* 窄的时候收起买入日：证据里写着决策日与成交日 */}
+                      <Th align="right" className="@max-md:hidden">
+                        买入日
+                      </Th>
                       <Th className="w-8">
                         <span className="sr-only">证据</span>
                       </Th>
@@ -377,7 +380,9 @@ export function TrackingPage() {
                       <tr key={p.code} className="transition-colors hover:bg-surface-2/60">
                         <Td>
                           <span className="text-ink">{p.name}</span>
-                          <span className="ml-1.5 font-mono text-[11px] text-muted">{p.code}</span>
+                          <span className="ml-1.5 font-mono text-[11px] text-muted @max-md:ml-0 @max-md:block @max-md:leading-4">
+                            {p.code}
+                          </span>
                         </Td>
                         <Td align="right" className="text-ink-2">
                           {pct(p.weight, 1, false)}
@@ -385,7 +390,10 @@ export function TrackingPage() {
                         <Td align="right" className={cx("font-medium", tone(p.ret))}>
                           {pct(p.ret)}
                         </Td>
-                        <Td align="right" className="font-mono text-[12px] text-muted">
+                        <Td
+                          align="right"
+                          className="font-mono text-[12px] whitespace-nowrap text-muted @max-md:hidden"
+                        >
                           {p.entryDate}
                         </Td>
                         <Td className="py-0">
