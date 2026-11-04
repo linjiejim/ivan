@@ -169,6 +169,28 @@ describe("updateBars：停牌续上与补数据（D111）", () => {
     );
   });
 
+  it("日 K 两家都说没有、报价停在最后一根那天或更早：长期停牌，记没成交；报价是今天的照旧记缺失", async () => {
+    const [GONE, EMPTY_TODAY] = [CODES[0]!, CODES[1]!];
+    const last = CAL[idx(PREV) - 3]!;
+    await market({ [GONE]: last, [EMPTY_TODAY]: last });
+    const quotes = CODES.map((c) => (c === GONE ? quoteLine(c, at(last), false) : quoteLine(c, at(TODAY), c !== EMPTY_TODAY)));
+    const empty = [GONE, EMPTY_TODAY].map((c) => ({
+      match: new RegExp(`secid=${emSecidOf(c).replace(".", "\\.")}&`),
+      reply: { rc: 0, data: null },
+    }));
+    const http = new FakeHttp([...empty, ...routes(quotes, () => false)]);
+    const r = await updateBars(
+      { wh, http, today: TODAY, log: () => {}, ver: 9 },
+      "A",
+      await loadSecurities(wh, "A"),
+      TODAY,
+      PREV,
+    );
+    expect(r.missing).toEqual([{ code: EMPTY_TODAY, reason: "chain_failed" }]);
+    expect((await statusOf(GONE)).map((x) => x.d)).toEqual(CAL.slice(idx(last) + 1));
+    expect((await completeThrough(wh, "A", [GONE], PREV)).get(GONE)).toBe(PREV);
+  });
+
   it("逐股补的顺序：除权日的在前，其余按日线停得最早的在前，同一只只补一次", () => {
     const last: Record<string, DateStr> = { a: "2026-10-07", b: "2026-10-01", c: "2026-10-05" };
     const s = (code: string) => ({ code });

@@ -839,8 +839,19 @@ export async function updateBars(
     const fetched = await fetchBars(c, s.code, from, latestTradeDate, anchorRow);
     viaKline++;
     if (!fetched.rows.length) {
+      if (rotation) return;
+      // 日 K 两家都说没有、报价时间停在最后一根 K 线那天或更早（长期停牌，来源把日 K 拿掉了）：这些天都没成交（D111）。
+      // 不然每晚都记缺失、永远过不了闸门；报价时间是今天或拿不到报价的照旧留给闸门当缺失
+      const q = gapQuote.get(s.code);
+      if (l && q && !q.traded && q.date !== null && q.date !== latestTradeDate && q.date <= l.date) {
+        for (const d of calendar) {
+          if (d > l.date) historyNoTrade.push({ code: s.code, date: d, status: "no_trade", reason: null, src: "txq" });
+        }
+        state.set(s.code, { s: "no_trade", src: "txq" });
+        return;
+      }
       // 能连上的来源说没有（empty）：留给闸门当缺失
-      if (!rotation) lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
+      lost(omittedCodes.has(s.code) ? "quote_omitted" : "chain_failed", null);
       return;
     }
     const w = await writeBars(c, s.code, from, fetched);
