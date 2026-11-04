@@ -8,6 +8,7 @@ import {
   captureLines,
   eventDatasetLine,
   eventsBackfillText,
+  marketBanner,
   openVersionText,
   provenanceText,
   qualitySentence,
@@ -285,5 +286,100 @@ describe("两融与筹码数据（S15）", () => {
     expect(eventsBackfillText(b)).toBe("后台补齐中：两融 812 / 3,330 天 · 解禁 15 / 15 年");
     expect(eventsBackfillText({ ...b, status: "idle" })).toBeNull();
     expect(eventsBackfillText(undefined)).toBeNull();
+  });
+});
+
+describe("marketBanner（D111）", () => {
+  const retryAt = Date.parse("2026-11-04T18:45:00+08:00");
+  const failed = { status: "failed", finishedAt: 1, error: "港股有 985 只股票今天的日线没拿到。" };
+
+  it("补数据中：平和的标题带进度，一句话，原因收进 ⓘ（只有管理员看得到原文），不给操作", () => {
+    const m = market({
+      market: "HK",
+      asOf: "2026-10-27",
+      day: "stale",
+      lastEtl: { status: "queued", finishedAt: null, error: failed.error, attempt: 1, retryAt },
+      catchUp: {
+        since: "2026-10-21",
+        asOf: "2026-10-27",
+        latest: "2026-11-04",
+        done: 4,
+        total: 10,
+        behind: 312,
+      },
+      behind: 312,
+    });
+    expect(marketBanner(m, false)).toEqual({
+      kind: "catch_up",
+      title: "港股补数据中（第 4/10 天）",
+      body: "数据先更新到 2026-10-27，还有 312 只股票的日线在补。",
+      info:
+        "数据源限制了请求频率，每晚先补最早缺的日子，补齐后自动恢复，不用手动重跑。" +
+        "这期间这个市场的跟踪按 2026-10-27 结算，简报会说数据没更新。18:45 再补一次（第 1/2 次）。",
+      action: false,
+    });
+    expect(marketBanner(m, true)!.info).toContain("最近一次：港股有 985 只股票今天的日线没拿到。");
+    expect(marketBanner(m, true)!.action).toBe(false);
+  });
+
+  it("还没提交出进度、但最近一晚是缺得多的补数据：也说补数据中，不说失败", () => {
+    const m = market({ market: "HK", asOf: "2026-10-21", lastEtl: failed, behind: 900 });
+    expect(marketBanner(m, true)).toMatchObject({
+      kind: "catch_up",
+      title: "港股补数据中",
+      body: "数据先更新到 2026-10-21，还有 900 只股票的日线在补。",
+      action: false,
+    });
+  });
+
+  it("等自动重试与真的失败：失败才给管理员「去管理页重跑」，普通用户只看到一句话", () => {
+    const retry = market({
+      lastEtl: { status: "queued", finishedAt: null, error: "x", attempt: 2, retryAt },
+    });
+    expect(marketBanner(retry, true)).toMatchObject({
+      kind: "retry",
+      title: "A 股数据停在 2026-10-08",
+      body: "今天的数据没更新完整，18:45 自动重试（第 2/2 次）。",
+      action: false,
+    });
+    const f = market({
+      lastEtl: {
+        ...failed,
+        error: "今天没成交的股票有 451 只，远多于平时（约 224 只），报价可能没更新",
+      },
+    });
+    expect(marketBanner(f, true)).toMatchObject({
+      kind: "failed",
+      body: "最近一次更新没成功。",
+      action: true,
+    });
+    expect(marketBanner(f, true)!.info).toContain("报价可能没更新");
+    // 普通用户：拿不到原因（error 是 null），没有操作
+    const plain = market({ lastEtl: { ...failed, error: null } });
+    expect(marketBanner(plain, false)).toEqual({
+      kind: "failed",
+      title: "A 股数据停在 2026-10-08",
+      body: "最近一次更新没成功。",
+      info: "这个市场的跟踪没有结算，简报里的数字还是旧的。",
+      action: false,
+    });
+    expect(marketBanner(market({}), true)).toBeNull();
+    // 已经补齐到今天：进度不再显示
+    expect(
+      marketBanner(
+        market({
+          day: "traded",
+          catchUp: {
+            since: null,
+            asOf: "2026-10-08",
+            latest: "2026-10-08",
+            done: 1,
+            total: 1,
+            behind: 0,
+          },
+        }),
+        true,
+      ),
+    ).toBeNull();
   });
 });

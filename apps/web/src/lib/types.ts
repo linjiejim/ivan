@@ -266,6 +266,19 @@ export interface DataStatus {
     openVersion?: { id: number; startedAt: number | null } | null;
     /** 上一个结束的版本：ok | incomplete | failed | skipped */
     lastVersionStatus?: string | null;
+    /**
+     * 补数据（D111）：catchUp 是最新的已提交版本补数据时记下的进度（截至日提交到了 asOf，第 done/total 天）；
+     * behind 是最近一晚计入阈值的缺失里之前的日子也没补上的只数。都没有时是完整的一晚。
+     */
+    catchUp?: {
+      since: string | null;
+      asOf: string;
+      latest: string;
+      done: number;
+      total: number;
+      behind: number;
+    } | null;
+    behind?: number;
     /** 点时数据的采集情况（D61） */
     capture?: DataCapture;
     /** 最近一晚的取数来源（D72） */

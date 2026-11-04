@@ -31,6 +31,19 @@ export interface DataStatus {
     openVersion?: { id: number; startedAt: number | null } | null;
     /** 上一个结束的版本：ok | incomplete | failed | skipped */
     lastVersionStatus?: string | null;
+    /**
+     * 补数据（D111）：catchUp 是最新的已提交版本补数据时记下的进度（截至日提交到了 asOf，第 done/total 天）；
+     * behind 是最近一晚计入阈值的缺失里之前的日子也没补上的只数。都没有时是完整的一晚。
+     */
+    catchUp?: {
+      since: string | null;
+      asOf: string;
+      latest: string;
+      done: number;
+      total: number;
+      behind: number;
+    } | null;
+    behind?: number;
     /** 各基准（index_bars 的 sym）的首个数据日，一行都没有为 null（D75）：提交回测前校验 */
     benchFirstDates?: Record<string, string | null>;
     /** 港股通名单（D77，只有港股）：取并集的属性与首次记录日；一行都没有为 null */
@@ -248,6 +261,9 @@ export function dashboardDataStatus(d: DataStatus, admin: boolean): DataStatus {
           }
         : null,
       ...(m.day ? { day: m.day } : {}),
+      // 补数据的进度只有日期与只数（D111）：横幅给所有人看「补数据中」，不带失败原因
+      ...(m.catchUp ? { catchUp: m.catchUp } : {}),
+      ...(m.behind ? { behind: m.behind } : {}),
     })),
     maintenance: d.maintenance ? (admin ? d.maintenance : "行情仓维护中") : null,
     computePaused: d.computePaused
