@@ -978,6 +978,11 @@ export async function updateBars(
     else if (d !== null) unverified.set(code, d);
   }
   const expected = active.length - neverFilled;
+  // 缺的是哪几只（D111）：排查「整条链都说没有」的股票（比如来源已经下架、证券表还当它在市）不用停 worker 去翻数据版本
+  if (missing.length) {
+    const shown = missing.slice(0, 30).map((m) => `${m.code}(${m.reason})`);
+    ctx.log(`${market} 缺日线：${shown.join("、")}${missing.length > 30 ? ` 等 ${missing.length} 只` : ""}`);
+  }
   ctx.log(
     `${market} 日线增量：报价 ${newRows.length} 只，逐股 ${viaKline - rotation.done} 只（其中除权 ${exRights.length}` +
       (quoteFallback ? `、报价没拿到 ${quoteFallback}` : "") +
