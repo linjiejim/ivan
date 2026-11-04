@@ -197,6 +197,7 @@ export {
   type FetchSourcesSummary,
   lastFetchSources,
   latestDataVersion,
+  panelTooLargeText,
 } from "./query/backtest.ts";
 export {
   type BlockRowView,

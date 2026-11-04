@@ -97,7 +97,12 @@ export async function rebuildInput(
       oosMonths: p.oosMonths,
       exec: resolveExec(p.exec),
     },
-    { signals: loadSignals(run.userId, spec), priorVersionsOnPeriod: p.priorVersions ?? 0 },
+    {
+      signals: loadSignals(run.userId, spec),
+      priorVersionsOnPeriod: p.priorVersions ?? 0,
+      // 价格面板的上限（D110）：超了这次回测报「行情太多」，不把整机内存吃光
+      maxPanelBytes: env().cfg.backtestPanelMb * 2 ** 20,
+    },
   );
 }
 
