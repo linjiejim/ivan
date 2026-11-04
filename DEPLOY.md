@@ -8,16 +8,16 @@
 
 ## 一览
 
-| 项       | 建议                                                                                                          |
-| -------- | ------------------------------------------------------------------------------------------------------------- |
-| 机器     | Linux x64，2 核、4 GB 内存的 VPS 够用（空闲内存约 1.2 GB 也能跑，见「worker 内存预算」）；磁盘留 15 GB 以上   |
-| 运行时   | Node 22（nvm）、pnpm 10、PM2；较老的发行版另见「较老的发行版：原生模块」                                      |
-| 代码     | 仓库克隆所在的目录（下文记作 `$APP_DIR`；`ecosystem.config.cjs` 用自身所在目录作工作目录）                    |
-| 数据     | `.env` 的 `DATA_DIR`（`app.sqlite` 应用库、`market.duckdb` 行情仓）——**建议放在仓库外**，拉代码、重置都碰不到 |
-| 配置     | `$APP_DIR/.env`（不进 git；密钥在服务器上生成）                                                               |
-| 进程     | PM2 `ivan-server`（`PORT`，设 `HOST=127.0.0.1` 只让反向代理访问）+ `ivan-worker`（`WORKER_PORT`，内部接口）   |
-| 反向代理 | 域名 → `127.0.0.1:$PORT`                                                                                      |
-| 日志     | `$APP_DIR/logs/*.log`（建议用 logrotate 每天轮转）                                                            |
+| 项       | 建议                                                                                                                          |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 机器     | Linux x64，2 核、4 GB 内存的 VPS 够用（和别的服务共用、晚高峰只剩约 0.7 GB 也能跑，见「worker 内存预算」）；磁盘留 15 GB 以上 |
+| 运行时   | Node 22（nvm）、pnpm 10、PM2；较老的发行版另见「较老的发行版：原生模块」                                                      |
+| 代码     | 仓库克隆所在的目录（下文记作 `$APP_DIR`；`ecosystem.config.cjs` 用自身所在目录作工作目录）                                    |
+| 数据     | `.env` 的 `DATA_DIR`（`app.sqlite` 应用库、`market.duckdb` 行情仓）——**建议放在仓库外**，拉代码、重置都碰不到                 |
+| 配置     | `$APP_DIR/.env`（不进 git；密钥在服务器上生成）                                                                               |
+| 进程     | PM2 `ivan-server`（`PORT`，设 `HOST=127.0.0.1` 只让反向代理访问）+ `ivan-worker`（`WORKER_PORT`，内部接口）                   |
+| 反向代理 | 域名 → `127.0.0.1:$PORT`                                                                                                      |
+| 日志     | `$APP_DIR/logs/*.log`（建议用 logrotate 每天轮转）                                                                            |
 
 全量行情仓（A 股 + 港股，2013 年起）约 5–6 GB；升级前脚本会在旁边拷一份备份，所以磁盘要留出两倍以上。
 
@@ -41,7 +41,7 @@
    - `DATA_DIR=/某个仓库外的目录/data`；
    - `BETTER_AUTH_SECRET`、`INTERNAL_SECRET`：在服务器上用 `openssl rand -base64 32` 生成；
    - `LLM_API_KEY`：从本机经管道传过去，不要出现在命令行历史里；
-   - 内存预算的三项（`DUCKDB_MEMORY_LIMIT`、`BACKTEST_POOL_SIZE`、`BACKTEST_THREAD_MEMORY_MB`），见下一节。
+   - 内存预算的几项（`DUCKDB_MEMORY_LIMIT`、`BACKTEST_PANEL_MB`、`BACKTEST_POOL_SIZE`、`BACKTEST_THREAD_MEMORY_MB`），见下一节。
 
 4. **行情仓**：按 [README](README.md)「首次回填行情仓」回填（worker 停着时跑），或者先把本机回填好的 `market.duckdb`
    传到 `DATA_DIR`（马上能用），再按下文「维护」做全量回填。
@@ -69,18 +69,52 @@
 
 ## worker 内存预算
 
-worker 一个进程里放着 DuckDB、主线程和回测线程，pm2 超过 `max_memory_restart`（`ecosystem.config.cjs` 里是 900M）就重启它，
-夜间结算会被打断。按这条式子配：
+worker 一个进程里放着 DuckDB、主线程、回测线程和回测用的价格面板。内存用到哪里都由配置封顶，按机器**晚高峰的可用内存**配
+（`free -m` 的 available，其它服务都在跑的时候），不是按空闲时：
+
+| 部分     | 上限                                             | 说明                                                                                                       |
+| -------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| DuckDB   | `DUCKDB_MEMORY_LIMIT`                            | 查询、缓存都在里面，超了报 Out of Memory（这次查询失败，不影响进程）；打开库（含重放 WAL）时就生效         |
+| 价格面板 | `BACKTEST_PANEL_MB`                              | 一次回测入选过的股票 × 交易日的 TypedArray，转交给回测线程、不受线程堆上限约束；超了这次回测报「行情太多」 |
+| 回测线程 | `BACKTEST_POOL_SIZE × BACKTEST_THREAD_MEMORY_MB` | 线程堆里只有结果对象；超了线程被终止、这次回测报错，线程自动重建                                           |
+| 其余     | 约 150 MB                                        | 主线程、DuckDB 自身开销                                                                                    |
 
 ```
-DUCKDB_MEMORY_LIMIT + BACKTEST_POOL_SIZE × BACKTEST_THREAD_MEMORY_MB + 约 250 MB ≤ max_memory_restart − 100 MB
+DUCKDB_MEMORY_LIMIT + BACKTEST_PANEL_MB + BACKTEST_POOL_SIZE × BACKTEST_THREAD_MEMORY_MB + 约 150 MB
+  ≤ max_memory_restart（ecosystem.config.cjs 里是 900M）− 50 MB
 ```
 
-约 250 MB 是主线程、转交给回测线程的价格面板（ArrayBuffer，不受线程堆上限约束）和 DuckDB 自身开销。
-例如空闲内存只有约 1.2 GB 的机器：`DUCKDB_MEMORY_LIMIT=384MB`、`BACKTEST_POOL_SIZE=1`、`BACKTEST_THREAD_MEMORY_MB=160`，
-384 + 1 × 160 + 250 = 794 ≤ 800。回测线程的堆里只有结果对象，160 MB 够用；超了线程会被终止、这次回测报错，线程自动重建，
-不影响后面的任务。单次回测超过 `BACKTEST_TIMEOUT_MS`（默认 120 秒）也一样终止重建。
-上线后实测峰值 RSS（同时跑一个结算与一次全 A 股回测），超了**先降 `DUCKDB_MEMORY_LIMIT`**。
+机器上也要放得下：跑大回测时 worker 比空闲时多用 `DUCKDB_MEMORY_LIMIT + BACKTEST_PANEL_MB + 线程堆`（参考配置约 600 MB），
+晚高峰（worker 空闲时量）的 available 至少要比这多 200 MB；不够就先降这几项，别指望 swap——
+swap 用满之前整机就会卡死，内核来不及杀进程（2026-11-03 演示站整机卡死 40 分钟，D110）。
+pm2 每 30 秒才量一次内存，`max_memory_restart` 只兜慢慢涨上去的情况，挡不住几秒内的尖峰——尖峰靠上面这几个上限。
+单次回测超过 `BACKTEST_TIMEOUT_MS`（默认 120 秒）终止重建线程。
+
+**参考配置：2 核、3.6 GB、和十来个别的服务共用的机器**（演示站。11-03 晚高峰 available 只有 650–770 MB，
+当时 worker 空闲也占着约 570 MB；有了空闲回收，worker 空闲约 290 MB，晚高峰 available 约 0.95 GB）：
+
+```
+DUCKDB_MEMORY_LIMIT=256MB
+DUCKDB_THREADS=2
+BACKTEST_POOL_SIZE=1
+BACKTEST_THREAD_MEMORY_MB=160
+BACKTEST_PANEL_MB=256
+```
+
+256 + 256 + 1 × 160 + 150 = 822 ≤ 850；大回测比空闲多用约 600 MB，950 − 600 ≥ 200。实测（Linux，合成行情仓，2201 只股票入选 × 约 2200 个交易日，面板约 240 MB，按流动性成交）：
+一次全 A 股主板 9 年月度换仓的回测峰值 RSS 约 810 MB，`DUCKDB_MEMORY_LIMIT=384MB` 时约 940 MB；
+跑完空闲 30 秒后 worker 把 DuckDB 的缓存和回测线程还回去，回到约 290 MB（D110）。
+
+- **空闲回收**：两条道都空下来 30 秒后，worker 做一次 CHECKPOINT、临时调低 DuckDB 内存上限逐出缓存、换掉跑过任务的回测线程。
+  所以夜间更新之后 worker 不会一直占着接近上限的内存。
+- **回测与结算、更新不同时跑**：夜间更新、抽检、事件因子补算、单独排的结算在排队或在跑时，回测排队（界面显示「行情正在更新，回测会在更新完成后开始」），
+  峰值不会叠加（D60、D110）。
+- **退出**：收到 SIGINT / SIGTERM 后几百毫秒内退出（打断在跑的查询、终止回测线程、CHECKPOINT 后关库），8 秒兜底强退，
+  赶在 pm2 的 `kill_timeout`（10 秒）之前；被打断的任务记「worker 重启」。
+- 回填（`scripts/backfill-full.sh`）时 worker 停着，可以给 DuckDB 多一些：`BACKFILL_MEMORY_LIMIT=512MB bash scripts/backfill-full.sh`。
+
+上线后看一次峰值 RSS（`pm2 monit`，或 `grep VmHWM /proc/<worker 的 pid>/status`），超了**先降 `DUCKDB_MEMORY_LIMIT`**，
+再降 `BACKTEST_PANEL_MB`（会有更多大回测被拒绝）。
 
 ## 较老的发行版：原生模块
 
