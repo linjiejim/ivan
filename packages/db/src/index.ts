@@ -11,7 +11,12 @@ import { fileURLToPath } from "node:url";
 import * as schema from "./schema.ts";
 
 export * from "./schema.ts";
-export { COMPUTE_PAUSED_TEXT, computeBlocked, WAREHOUSE_WRITERS } from "./jobs-gate.ts";
+export {
+  COMPUTE_EXCLUSIVE,
+  COMPUTE_PAUSED_TEXT,
+  computeBlocked,
+  WAREHOUSE_WRITERS,
+} from "./jobs-gate.ts";
 export { schema };
 export { newId, packJson, unpackJson } from "./util.ts";
 export * from "./ledger.ts";

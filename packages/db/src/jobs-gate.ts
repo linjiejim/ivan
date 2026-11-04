@@ -1,6 +1,7 @@
 /**
  * 行情仓写库期间暂停回测（D60）：etl 道里有夜间更新（etl）、每周抽检（check）或事件因子列补算（event_cols，S15b）排队或在跑时，
- * compute 道（回测、扫描、复核）不认领新任务。worker 的 runner 用它决定认不认领，
+ * compute 道（回测、扫描、复核）不认领新任务；单独排的结算（settle）也一样（D110：结算给每个跟踪组装一次面板、跑一次模拟，
+ * 和回测同时跑内存翻倍）。worker 的 runner 用它决定认不认领，
  * server 用它告诉用户「行情正在更新，回测会在更新完成后开始」。两边读的是同一张 jobs 表。
  */
 import type Database from "better-sqlite3";
@@ -9,14 +10,20 @@ import type Database from "better-sqlite3";
 export const WAREHOUSE_WRITERS: ReadonlySet<string> = new Set(["etl", "check", "event_cols"]);
 
 /**
- * 排队或在跑的第一个写库任务（null = 没有，compute 道可以认领）。
+ * 和回测互斥的任务（D110）：写行情仓的任务，加上单独排的结算（管理页手动触发；夜间结算本来就在 etl 任务里跑）。
+ * 简报、事件数据回填（events）只发请求、写小表，不挡回测。
+ */
+export const COMPUTE_EXCLUSIVE: ReadonlySet<string> = new Set([...WAREHOUSE_WRITERS, "settle"]);
+
+/**
+ * 排队或在跑的第一个和回测互斥的任务（COMPUTE_EXCLUSIVE；null = 没有，compute 道可以认领）。
  * 排着队等自动重跑、还没到时间的（not_before 在未来，D73）不算：等重跑的 45 分钟里回测照常。
  */
 export function computeBlocked(
   sqlite: Database.Database,
   now: number = Date.now(),
 ): { kind: string; since: number } | null {
-  const kinds = [...WAREHOUSE_WRITERS].map((k) => `'${k}'`).join(",");
+  const kinds = [...COMPUTE_EXCLUSIVE].map((k) => `'${k}'`).join(",");
   const row = sqlite
     .prepare(
       `SELECT kind, coalesce(started_at, created_at) AS since FROM jobs

@@ -6,8 +6,9 @@ import { serve } from "@hono/node-server";
 import { Cron } from "croner";
 import { initEnv } from "./env.ts";
 import { createInternalApp } from "./internal.ts";
-import { enqueue, recoverStale, runLoop, stopRunner } from "./runner.ts";
-import { startPool } from "./sim-pool.ts";
+import { enqueue, recoverStale, runLoop, runningJobs, stopRunner } from "./runner.ts";
+import { createShutdown } from "./shutdown.ts";
+import { startPool, stopPool } from "./sim-pool.ts";
 
 const e = await initEnv({
   migrate: process.env.WAREHOUSE_MIGRATE_ON_BOOT === "1" ? "auto" : "light",
@@ -27,25 +28,33 @@ const server = serve(
 );
 
 // 维护状态（行情仓还没升级）不排任务：升级完 scripts/migrate.sh 会重启 worker
+const crons: Cron[] = [];
 if (e.cfg.schedulerEnabled && !e.wh.maintenance) {
   const tz = { timezone: "Asia/Shanghai" };
   // spec §8：17:30 A 股、18:00 港股（交易日判断在 daily() 里），19:00 简报
-  new Cron("30 17 * * 1-5", tz, () => void enqueue("etl", { market: "A" }));
-  new Cron("0 18 * * 1-5", tz, () => void enqueue("etl", { market: "HK" }));
-  new Cron("0 19 * * 1-5", tz, () => void enqueue("brief", {}));
-  new Cron("0 3 * * 0", tz, () => void enqueue("check", {}));
+  crons.push(
+    new Cron("30 17 * * 1-5", tz, () => void enqueue("etl", { market: "A" })),
+    new Cron("0 18 * * 1-5", tz, () => void enqueue("etl", { market: "HK" })),
+    new Cron("0 19 * * 1-5", tz, () => void enqueue("brief", {})),
+    new Cron("0 3 * * 0", tz, () => void enqueue("check", {})),
+  );
   console.log("调度已开启（北京时间工作日 17:30 A 股 / 18:00 港股 / 19:00 简报；周日 03:00 抽检）");
 }
 
-const shutdown = () => {
-  console.log("ivan-worker 正在退出…");
-  stopRunner();
-  server.close();
-  e.wh.close();
-  e.app.sqlite.close();
-  process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+// 退出要赶在 pm2 的 kill_timeout（10 秒）之前，并把 WAL 并回主文件（D110，见 shutdown.ts）
+const shutdown = createShutdown({
+  stopRunner,
+  stopScheduler: () => crons.forEach((c) => c.stop()),
+  closeServer: () => server.close(),
+  stopPool: () => stopPool(1000),
+  interruptWarehouse: () => e.wh.interrupt(),
+  runningJobs,
+  closeWarehouse: () => e.wh.closeGracefully(),
+  closeAppDb: () => e.app.sqlite.close(),
+  exit: (code) => process.exit(code),
+  log: (m) => console.log(m),
+});
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 await runLoop(e.cfg.backtestPoolSize);
