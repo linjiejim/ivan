@@ -10,6 +10,7 @@
  */
 import { Worker } from "node:worker_threads";
 import type { SimInput, SimResult, ValidationResult } from "@ivan/core";
+import { InterruptedError } from "@ivan/data";
 import { runSimTasks, type SimOutput, type SimTaskOptions } from "./sim-tasks.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,6 +39,8 @@ interface Slot {
   busy: boolean;
   /** 线程在空闲时死了（error / exit）：下次取用前先重建，不往死线程上发任务 */
   dead: boolean;
+  /** 这个线程跑过任务（空闲回收只换跑过的） */
+  used?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -47,6 +50,8 @@ let slots: Slot[] = [];
 let waiting: Array<() => void> = [];
 let seq = 0;
 let disabled = false;
+/** stopPool 之后（worker 退出中）：不再接任务、不重建线程，进行中的调用报「worker 重启」 */
+let stopping = false;
 let timeoutMs = DEFAULT_TIMEOUT_MS;
 let spawn: () => ThreadLike = () => {
   throw new Error("回测线程池还没启动");
@@ -70,6 +75,7 @@ export function startPool(size: number, opts: PoolOptions = {}): void {
   slots = [];
   waiting = [];
   disabled = false;
+  stopping = false;
   timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOldGenMb = opts.maxOldGenMb ?? DEFAULT_MAX_OLD_GEN_MB;
   spawn =
@@ -102,6 +108,8 @@ export function startPool(size: number, opts: PoolOptions = {}): void {
 /** 取一个空闲槽位；线程池已退回主线程（或槽位都没了）时返回 null。 */
 async function acquire(): Promise<Slot | null> {
   for (;;) {
+    // 退出中不能退回主线程跑（主线程要尽快退出）
+    if (stopping) throw new InterruptedError();
     if (disabled || !slots.length) return null;
     const free = slots.find((s) => !s.busy);
     if (free) {
@@ -133,6 +141,7 @@ function respawn(slot: Slot): boolean {
   try {
     slot.thread = spawnFor(slot);
     slot.dead = false;
+    slot.used = false;
     return true;
   } catch (e) {
     console.warn(`回测线程重建失败，这个槽位改在主线程跑：${e instanceof Error ? e.message : e}`);
@@ -157,6 +166,7 @@ export async function runSimulation(
   if (!slot) return runSimTasks(input, opts);
   const id = ++seq;
   const thread = slot.thread;
+  slot.used = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const listeners: Array<[string, Listener]> = [];
   try {
@@ -170,6 +180,7 @@ export async function runSimulation(
       const fail = (msg: string) => {
         if (settled) return;
         settled = true;
+        if (stopping) return reject(new InterruptedError());
         respawn(slot);
         reject(new Error(msg));
       };
@@ -209,4 +220,35 @@ export async function runSimulation(
     slot.busy = false;
     waiting.shift()?.();
   }
+}
+
+/**
+ * 退出时（D110）：终止所有回测线程，进行中的调用报「worker 重启」，排队取线程的也一样；之后不再接任务。
+ * 最多等 timeoutMs 毫秒线程退出（terminate 一般几十毫秒）。
+ */
+export async function stopPool(timeoutMs = 2000): Promise<void> {
+  stopping = true;
+  const threads = slots.map((s) => s.thread);
+  slots = [];
+  const woken = waiting;
+  waiting = [];
+  for (const w of woken) w();
+  await Promise.race([
+    Promise.all(threads.map((t) => t.terminate().catch(() => 0))),
+    new Promise((r) => setTimeout(r, timeoutMs).unref?.()),
+  ]);
+}
+
+/**
+ * 空闲回收（D110）：把跑过任务的空闲线程换成新的。转交过去的价格面板（几百 MB 的 TypedArray）要等那个线程下次 GC 才释放，
+ * 闲着的线程可能一直不 GC；换掉线程就立刻还回去。返回换了几个。
+ */
+export function recycleIdleThreads(): number {
+  if (stopping) return 0;
+  let n = 0;
+  for (const s of [...slots]) {
+    if (s.busy || s.dead || !s.used) continue;
+    if (respawn(s)) n++;
+  }
+  return n;
 }

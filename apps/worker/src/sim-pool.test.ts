@@ -5,7 +5,13 @@ import { EventEmitter } from "node:events";
 import { type SimInput, type SimResult, StrategySpecSchema } from "@ivan/core";
 import { ENGINE_VERSION } from "@ivan/engine";
 import { describe, expect, it } from "vitest";
-import { runSimulation, startPool, type ThreadLike } from "./sim-pool.ts";
+import {
+  recycleIdleThreads,
+  runSimulation,
+  startPool,
+  stopPool,
+  type ThreadLike,
+} from "./sim-pool.ts";
 
 type Mode = "ok" | "crash" | "exit" | "hang" | "slow";
 
@@ -194,5 +200,48 @@ describe("回测线程池", () => {
     const out = await runSimulation(realInput(), { tasks: ["validation"], seed: 1 });
     expect(out.result.engineVersion).toBe(ENGINE_VERSION);
     expect(out).not.toHaveProperty("validation");
+  });
+
+  it("退出（stopPool，D110）：在跑的与排队的都报「worker 重启」，不重建线程、不退回主线程跑", async () => {
+    const made: FakeThread[] = [];
+    // 真线程被 terminate 时会发 exit（退出码 1）：模拟这一点
+    class Terminating extends FakeThread {
+      override async terminate(): Promise<number> {
+        setTimeout(() => this.emit("exit", 1), 1);
+        return super.terminate();
+      }
+    }
+    startPool(1, {
+      spawn: () => {
+        const t = new Terminating("hang");
+        made.push(t);
+        return t;
+      },
+      timeoutMs: 60_000,
+    });
+    const running = runSimulation(input());
+    const queued = runSimulation(realInput());
+    const both = Promise.allSettled([running, queued]);
+    await new Promise((r) => setTimeout(r, 5));
+    await stopPool(500);
+    const [a, b] = await both;
+    expect(a).toMatchObject({ status: "rejected", reason: { message: "worker 重启" } });
+    expect(b).toMatchObject({ status: "rejected", reason: { message: "worker 重启" } });
+    await expect(runSimulation(realInput())).rejects.toThrow("worker 重启");
+    expect(made).toHaveLength(1);
+    expect(made[0]!.terminated).toBe(true);
+  });
+
+  it("空闲回收（D110）：只换跑过任务的空闲线程，换下的线程被终止，新线程照常接任务", async () => {
+    const f = factory(["ok", "ok"]);
+    startPool(1, { spawn: f.spawn, timeoutMs: 1000 });
+    expect(recycleIdleThreads()).toBe(0);
+    await runSimulation(input());
+    expect(recycleIdleThreads()).toBe(1);
+    expect(f.made).toHaveLength(2);
+    expect(f.made[0]!.terminated).toBe(true);
+    expect(recycleIdleThreads()).toBe(0);
+    await runSimulation(input());
+    expect(f.made[1]!.posted).toBe(1);
   });
 });

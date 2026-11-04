@@ -23,6 +23,7 @@ import {
   type BuiltInput,
   buildSimInput,
   HASH_VERSION,
+  InterruptedError,
   hashSimInput,
   SCHEMA_VERSION,
 } from "@ivan/data";
@@ -97,7 +98,12 @@ export async function rebuildInput(
       oosMonths: p.oosMonths,
       exec: resolveExec(p.exec),
     },
-    { signals: loadSignals(run.userId, spec), priorVersionsOnPeriod: p.priorVersions ?? 0 },
+    {
+      signals: loadSignals(run.userId, spec),
+      priorVersionsOnPeriod: p.priorVersions ?? 0,
+      // 价格面板的上限（D110）：超了这次回测报「行情太多」，不把整机内存吃光
+      maxPanelBytes: env().cfg.backtestPanelMb * 2 ** 20,
+    },
   );
 }
 
@@ -450,6 +456,8 @@ export async function sweepJob(ctx: JobContext): Promise<Record<string, unknown>
         results.push({ label: v.label, runId: childId, excessCagr: r.metrics.excessCagr });
       } catch (e) {
         failRun(childId, e);
+        // worker 退出中（D110）：不接着跑剩下的取值、不把扫描记成完成
+        if (e instanceof InterruptedError) throw e;
         results.push({ label: v.label, runId: childId, excessCagr: null, error: String(e) });
       }
     }

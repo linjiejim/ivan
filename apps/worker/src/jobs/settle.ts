@@ -34,6 +34,7 @@ import {
   explainSelection,
   HASH_VERSION,
   hashSimInput,
+  InterruptedError,
   lastTradingDay,
   latestDataVersion,
   type SelectionExplain,
@@ -644,6 +645,8 @@ export async function settleMarket(
       await settleOne(t, latest, ctx, missing);
       settled++;
     } catch (e) {
+      // worker 退出中（D110）：不把剩下的跟踪都记成「结算失败」，整个任务按被打断收尾
+      if (e instanceof InterruptedError) throw e;
       failed++;
       const message = e instanceof Error ? e.message : String(e);
       ctx.log(`跟踪 ${t.id} 结算失败：${message}`);

@@ -1,5 +1,5 @@
 /**
- * 行情仓写库期间不跑回测（D60）：认领规则的真值表，以及 computeBlocked 读 jobs 表的判断；
+ * 行情仓写库期间不跑回测（D60）、单独排的结算也不和回测同时跑（D110）：认领规则的真值表，以及 computeBlocked 读 jobs 表的判断；
  * 自动重跑（D73）：没到时间的任务不认领、不挡回测，闸门没过时最多重跑 2 次。
  */
 import { IncompleteDataError, RetryableEtlError } from "@ivan/data";
@@ -14,7 +14,7 @@ import { jobs, newId } from "@ivan/db";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { etlJob } from "./jobs/etl.ts";
-import { claim, computeBlocked, shouldWait } from "./runner.ts";
+import { claim, computeBlocked, scheduleIdleTrim, shouldWait } from "./runner.ts";
 import { fakeJobContext, makeTestEnv } from "./testing/harness.ts";
 
 const idle = { maintenance: false, blocked: false, computeRunning: 0 };
@@ -27,9 +27,12 @@ describe("shouldWait", () => {
     ["etl", "etl", idle, false],
     ["etl", "etl", { ...idle, computeRunning: 2 }, true],
     ["etl", "check", { ...idle, computeRunning: 1 }, true],
-    // 结算、简报不写行情仓，不用等回测
-    ["etl", "settle", { ...idle, computeRunning: 1 }, false],
+    // 结算不写行情仓，但要组装面板、跑模拟：和回测同时跑内存翻倍，也等（D110）
+    ["etl", "settle", { ...idle, computeRunning: 1 }, true],
+    ["etl", "settle", idle, false],
+    // 简报、事件数据回填只发请求、写小表，不用等回测
     ["etl", "brief", { ...idle, computeRunning: 1 }, false],
+    ["etl", "events", { ...idle, computeRunning: 1 }, false],
     ["etl", null, { ...idle, computeRunning: 1 }, false],
     // 维护状态：两条道都不认领
     ["compute", null, { ...idle, maintenance: true }, true],
@@ -46,7 +49,7 @@ afterEach(async () => {
 });
 
 describe("computeBlocked", () => {
-  it("etl / check 排队或在跑时挡住 compute 道（回测、扫描、复核都在这条道上）；简报排队不挡", async () => {
+  it("etl / check 排队或在跑时挡住 compute 道（回测、扫描、复核都在这条道上）；简报、事件回填排队不挡", async () => {
     const t = await makeTestEnv();
     cleanup = t.cleanup;
     const { db, sqlite } = t.env.app;
@@ -57,7 +60,8 @@ describe("computeBlocked", () => {
         .run();
     expect(computeBlocked(sqlite)).toBeNull();
     add("brief", "queued", 1000);
-    add("settle", "running", 1100, 1150);
+    add("events", "running", 1050, 1060);
+    add("settle", "done", 1100, 1150);
     add("etl", "done", 900);
     add("check", "failed", 950);
     expect(computeBlocked(sqlite)).toBeNull();
@@ -66,6 +70,44 @@ describe("computeBlocked", () => {
     add("check", "running", 1500, 1600);
     // 最早的写库任务；在跑的从开始时间算
     expect(computeBlocked(sqlite)).toEqual({ kind: "check", since: 1600 });
+  });
+
+  it("单独排的结算排队或在跑时也挡住 compute 道（D110）", async () => {
+    const t = await makeTestEnv();
+    cleanup = t.cleanup;
+    const { db, sqlite } = t.env.app;
+    db.insert(jobs)
+      .values({
+        id: "j_s",
+        kind: "settle",
+        payload: { market: "A" },
+        status: "queued",
+        createdAt: 1000,
+      })
+      .run();
+    db.insert(jobs)
+      .values({ id: "j_bt", kind: "backtest", payload: {}, status: "queued", createdAt: 1100 })
+      .run();
+    expect(computeBlocked(sqlite)).toEqual({ kind: "settle", since: 1000 });
+    // 回测在排队等结算，不认领；结算认领（没有回测在跑）
+    expect(claim("compute")).toBeUndefined();
+    expect(claim("etl")?.id).toBe("j_s");
+    expect(computeBlocked(sqlite)).toEqual({ kind: "settle", since: expect.any(Number) });
+    expect(claim("compute")).toBeUndefined();
+    sqlite.prepare(`UPDATE jobs SET status = 'done' WHERE id = 'j_s'`).run();
+    expect(claim("compute")?.id).toBe("j_bt");
+  });
+});
+
+describe("空闲回收（D110）", () => {
+  it("两条道都空着：到点调用行情仓的 trimMemory；再次排期会顶掉上一次", async () => {
+    const t = await makeTestEnv();
+    cleanup = t.cleanup;
+    const trim = vi.spyOn(t.env.wh, "trimMemory");
+    scheduleIdleTrim(20);
+    scheduleIdleTrim(20);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(trim).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -88,9 +130,9 @@ describe("自动重跑（D73）", () => {
       .run();
     db.insert(jobs)
       .values({
-        id: "j_settle",
-        kind: "settle",
-        payload: { market: "HK" },
+        id: "j_brief",
+        kind: "brief",
+        payload: {},
         status: "queued",
         createdAt: now - 1000,
       })
@@ -100,8 +142,8 @@ describe("自动重跑（D73）", () => {
       .run();
     expect(computeBlocked(sqlite, now)).toBeNull();
     expect(claim("compute", now)?.id).toBe("j_bt");
-    // 更早排队的重跑没到时间：先认领后面的结算
-    expect(claim("etl", now)?.id).toBe("j_settle");
+    // 更早排队的重跑没到时间：先认领后面的简报
+    expect(claim("etl", now)?.id).toBe("j_brief");
     expect(claim("etl", now)).toBeUndefined();
     // 到时间了：挡回测，也能被认领
     const later = now + 45 * 60_000;

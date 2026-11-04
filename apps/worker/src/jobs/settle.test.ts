@@ -76,6 +76,20 @@ async function nextNight() {
   );
 }
 
+describe("退出中打断（D110）", () => {
+  it("结算到一半 worker 退出：往外抛「worker 重启」，不把跟踪记成结算失败", async () => {
+    const ctx = fakeJobContext("settle", { market: "A" });
+    const progress = ctx.progress;
+    ctx.progress = (f, note) => {
+      // 第一个跟踪开始结算之前，worker 收到退出信号
+      t.env.wh.interrupt();
+      progress(f, note);
+    };
+    await expect(settleMarket("A", ctx)).rejects.toThrow("worker 重启");
+    expect(summary()?.lastError).toBeUndefined();
+  });
+});
+
 describe("结算指纹与漂移归因", () => {
   it("每晚存下指纹；多一个交易日（跨过休市的周五）重放一致 → none", async () => {
     await settle();

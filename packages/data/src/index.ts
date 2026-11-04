@@ -7,6 +7,8 @@ export * as exchanges from "./sources/exchanges.ts";
 export * as csindex from "./sources/csindex.ts";
 export * as chinamoney from "./sources/chinamoney.ts";
 export {
+  INTERRUPTED_TEXT,
+  InterruptedError,
   MAINTENANCE_V3,
   MAINTENANCE_V5,
   Warehouse,
@@ -197,6 +199,7 @@ export {
   type FetchSourcesSummary,
   lastFetchSources,
   latestDataVersion,
+  panelTooLargeText,
 } from "./query/backtest.ts";
 export {
   type BlockRowView,

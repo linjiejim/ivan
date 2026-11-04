@@ -21,8 +21,9 @@ module.exports = {
       script: "apps/worker/src/main.ts",
       error_file: "logs/worker.error.log",
       out_file: "logs/worker.out.log",
-      // 回测与 ETL 的内存尖峰只影响自己；按小内存机器（约 1.2 GB 空闲）给个上限，内存预算见 DEPLOY.md
+      // pm2 每 30 秒才量一次：这条线只兜慢慢涨上去的内存，尖峰靠 DuckDB、价格面板、回测线程各自的上限（DEPLOY.md「worker 内存预算」）
       max_memory_restart: "900M",
+      // worker 收到信号后几百毫秒内退出（打断查询、终止回测线程、CHECKPOINT 后关库），8 秒兜底强退（apps/worker/src/shutdown.ts）
       kill_timeout: 10000,
     },
     {

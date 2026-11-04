@@ -2,7 +2,12 @@
  * 行情仓（DuckDB 文件）。worker 进程是唯一持有者；大表不建主键索引（列存 + zonemap 足够，
  * 也避免 ART 索引在 512MB 内存上限下吃内存），幂等靠「先删后写」。
  */
-import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
+import {
+  DuckDBInstance,
+  type DuckDBConnection,
+  type DuckDBValue,
+  JSDuckDBValueConverter,
+} from "@duckdb/node-api";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
@@ -43,26 +48,55 @@ function normalize(v: unknown): unknown {
 export class Warehouse {
   private writeChain: Promise<unknown> = Promise.resolve();
   private columnTypes = new Map<string, Array<{ name: string; type: string }>>();
+  /** streamColumns 正在用的连接（退出时一起打断） */
+  private streams = new Set<DuckDBConnection>();
   /** 非空 = 维护状态：行情仓还没升级，worker 不排任务、不认领、读行情仓的接口返回 503 */
   maintenance: string | null = null;
+
+  /** 正在执行的读写（run / all / columns / streamColumns）；trimMemory 只在没有时动内存上限 */
+  private active = 0;
+  /** trimMemory 进行中：读写先等它结束，不在临时调低的内存上限下执行 */
+  private trimming: Promise<unknown> | null = null;
+  /** interrupt() 之后（worker 退出中）：新的读写直接拒绝，被打断的报 INTERRUPTED_TEXT */
+  private interrupted = false;
 
   private constructor(
     readonly path: string,
     private readonly instance: DuckDBInstance,
     readonly conn: DuckDBConnection,
+    /** 打开时的内存上限（DuckDB 的写法，如 384MB）；trimMemory 降下去之后恢复成它 */
+    readonly memoryLimit: string,
   ) {}
+
+  /** 读写的外壳：等进行中的 trimMemory，记进 active */
+  private async tracked<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.trimming) await this.trimming;
+    if (this.interrupted) throw new InterruptedError();
+    this.active++;
+    try {
+      return await fn();
+    } catch (e) {
+      // 退出时打断的查询：报和「上次没跑完」一样的原因，不把 DuckDB 的 INTERRUPT 错误写给用户
+      if (this.interrupted) throw new InterruptedError({ cause: e });
+      throw e;
+    } finally {
+      this.active--;
+    }
+  }
 
   static async open(path: string, opts: WarehouseOptions = {}): Promise<Warehouse> {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    const memoryLimit = opts.memoryLimit ?? "512MB";
+    // 内存上限、线程数在打开时就给（不是打开后再 SET）：打开时重放 WAL、升级表结构也在上限之内
     const options: Record<string, string> = {
-      memory_limit: opts.memoryLimit ?? "512MB",
+      memory_limit: memoryLimit,
       threads: String(opts.threads ?? 2),
       preserve_insertion_order: "false",
     };
     if (opts.readOnly) options.access_mode = "READ_ONLY";
     const instance = await DuckDBInstance.create(path, options);
     const conn = await instance.connect();
-    const wh = new Warehouse(path, instance, conn);
+    const wh = new Warehouse(path, instance, conn, memoryLimit);
     if (!opts.readOnly) await wh.migrate(opts.migrate ?? "auto");
     return wh;
   }
@@ -126,11 +160,11 @@ export class Warehouse {
   }
 
   async run(sql: string, params?: Params): Promise<void> {
-    await this.conn.run(sql, params);
+    await this.tracked(() => this.conn.run(sql, params));
   }
 
   async all<T = Row>(sql: string, params?: Params): Promise<T[]> {
-    const reader = await this.conn.runAndReadAll(sql, params);
+    const reader = await this.tracked(() => this.conn.runAndReadAll(sql, params));
     const rows = reader.getRowObjectsJS();
     return rows.map((r) => {
       const o: Row = {};
@@ -150,11 +184,53 @@ export class Warehouse {
 
   /** 列式读取：每列一个数组，适合把一只股票的日线装进 TypedArray。 */
   async columns(sql: string, params?: Params): Promise<Record<string, unknown[]>> {
-    const reader = await this.conn.runAndReadAll(sql, params);
+    const reader = await this.tracked(() => this.conn.runAndReadAll(sql, params));
     const cols = reader.getColumnsObjectJS();
     const out: Record<string, unknown[]> = {};
     for (const [k, arr] of Object.entries(cols)) out[k] = arr.map(normalize);
     return out;
+  }
+
+  /**
+   * 流式列读取：结果按数据块（约 2048 行）交给 onChunk，每块是「列名 → 数组」，返回总行数。
+   * 大结果（回测的价格面板，几百万行）只能走这里：columns() 先让 DuckDB 把整份结果物化在内存上限里（满了报 Out of Memory），
+   * 再在主线程转成整表的 JS 数组，几百万行时堆能涨到 1 GB 以上、整机内存被挤爆（2026-11-03 事故，D110）。
+   * 用一个单独的连接：同一个连接上的其它查询会打断没读完的流；读的是已提交的数据，和主连接看到的一样。
+   */
+  async streamColumns(
+    sql: string,
+    params: Params | undefined,
+    onChunk: (cols: Record<string, unknown[]>, rows: number) => void,
+  ): Promise<number> {
+    return this.tracked(() => this.streamOn(sql, params, onChunk));
+  }
+
+  private async streamOn(
+    sql: string,
+    params: Params | undefined,
+    onChunk: (cols: Record<string, unknown[]>, rows: number) => void,
+  ): Promise<number> {
+    const conn = await this.instance.connect();
+    this.streams.add(conn);
+    try {
+      const result = await conn.stream(sql, params);
+      const names = result.columnNames();
+      let total = 0;
+      for (;;) {
+        const chunk = await result.fetchChunk();
+        if (!chunk || chunk.rowCount === 0) break;
+        const cols: Record<string, unknown[]> = {};
+        names.forEach((n, i) => {
+          cols[n] = chunk.convertColumnValues(i, JSDuckDBValueConverter).map(normalize);
+        });
+        onChunk(cols, chunk.rowCount);
+        total += chunk.rowCount;
+      }
+      return total;
+    } finally {
+      this.streams.delete(conn);
+      conn.closeSync();
+    }
   }
 
   /** 串行化写操作：ETL 里并发的抓取任务共用一个连接写库。 */
@@ -259,11 +335,74 @@ export class Warehouse {
     await this.run("CHECKPOINT");
   }
 
+  /**
+   * 空闲时把 DuckDB 占着的内存还回去（D110）：先 CHECKPOINT（WAL 并回主文件，进程被杀后下次打开不用重放；
+   * 有别的事务在跑时会失败，忽略），再把内存上限临时降到 floor、马上恢复——降上限会逐出缓存的数据块。
+   * DuckDB 不会自己归还缓存：夜间更新之后 worker 能一直占着接近上限的内存。
+   * 有读写在执行时不动（返回 false）；进行中新来的读写先等它结束。
+   */
+  async trimMemory(floor = "32MB"): Promise<boolean> {
+    if (this.active > 0 || this.trimming) return false;
+    if (!MEMORY_SIZE_RE.test(floor) || !MEMORY_SIZE_RE.test(this.memoryLimit)) return false;
+    const work = (async () => {
+      await this.conn.run("CHECKPOINT").catch(() => undefined);
+      try {
+        await this.conn.run(`SET memory_limit = '${floor}'`);
+      } catch {
+        // 降不下去（还有数据块钉着）也要恢复原上限
+      }
+      await this.conn.run(`SET memory_limit = '${this.memoryLimit}'`);
+    })();
+    // 等着的读写只等它结束、不跟着它失败
+    this.trimming = work.catch(() => undefined);
+    try {
+      await work;
+      return true;
+    } finally {
+      this.trimming = null;
+    }
+  }
+
+  /** 退出时用：打断所有连接上正在执行的查询，之后的读写直接拒绝（都报 INTERRUPTED_TEXT） */
+  interrupt(): void {
+    this.interrupted = true;
+    this.conn.interrupt();
+    for (const c of this.streams) c.interrupt();
+  }
+
+  /**
+   * 退出时：CHECKPOINT（把 WAL 并回主文件，下次打开不用重放、不用在启动时多占内存）再关。
+   * 先 interrupt() 打断在跑的查询；CHECKPOINT 可能要几秒，调用方自己限时（超时就直接退出，WAL 下次打开照常重放）。
+   */
+  async closeGracefully(): Promise<void> {
+    await this.conn.run("CHECKPOINT").catch(() => undefined);
+    this.close();
+  }
+
   close(): void {
+    for (const c of this.streams) c.closeSync();
+    this.streams.clear();
     this.conn.closeSync();
     this.instance.closeSync();
   }
 }
+
+/** worker 退出时被打断的查询报的原因（和启动时 recoverStale 写的一样） */
+export const INTERRUPTED_TEXT = "worker 重启";
+
+/**
+ * worker 退出中被打断（D110）：查询被 interrupt、回测线程被终止。逐项吞错接着跑的循环（参数扫描、逐个跟踪结算）
+ * 见到它要往外抛，不能把剩下的每一项都记成失败、再把整个任务记成完成。
+ */
+export class InterruptedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super(INTERRUPTED_TEXT, options);
+    this.name = "InterruptedError";
+  }
+}
+
+/** DuckDB 内存大小的写法（如 384MB、1.5GB、512MiB）：拼进 SET 之前校验 */
+const MEMORY_SIZE_RE = /^\d+(\.\d+)?\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i;
 
 /** SQL 里内联日期列表前做校验（DuckDB 的列表参数需要显式类型，内联更简单）。 */
 export function sqlDateList(dates: readonly string[]): string {

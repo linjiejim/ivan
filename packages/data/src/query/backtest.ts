@@ -136,6 +136,23 @@ export interface BuildOptions {
    * 是不是周度策略的决策日；过去的重放与回测不受影响（前缀指纹按「执行日 ≤ cut」算，不含补的这天）。
    */
   appendNextDay?: boolean;
+  /**
+   * 价格面板最多占多少字节（D110，BACKTEST_PANEL_MB）：超了就停止读、报「行情太多」，不让一次回测把整机内存吃光。
+   * 不给 = 不限（结算、选股解释等窗口短的调用）。
+   */
+  maxPanelBytes?: number;
+}
+
+/** 价格面板超过上限（D110）：给用户看的原因，回测按失败收尾 */
+export function panelTooLargeText(codes: number, days: number, limitMb: number): string {
+  return `这次回测要装进内存的行情太多（${codes} 只股票、${days} 个交易日，超过 ${limitMb} MB 的上限），缩短回测区间、降低换仓频率或缩小股票池后再试`;
+}
+
+/** 一只股票的价格序列占多少字节（转交给回测线程的那些 TypedArray） */
+function seriesBytes(s: PriceSeries): number {
+  let n = 0;
+  for (const a of [s.open, s.high, s.low, s.close, s.adj, s.st, s.adv, s.sigma]) if (a) n += a.byteLength;
+  return n;
 }
 
 export interface BuiltInput {
@@ -150,6 +167,79 @@ export interface BuiltInput {
   /** 事件因子（S15b）：写进运行卡 data.events；策略不用事件因子时为 undefined */
   events?: RunCardEvents;
   stats: { decisionDates: number; codes: number; priceRows: number; ms: number };
+}
+
+/** 价格面板查询的一行（一只股票的行按日期排好后交给 panelSeries） */
+interface PanelRow {
+  code: string;
+  d: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  adj: number;
+  st: boolean;
+  t20: number | null;
+  v60: number | null;
+}
+
+/** 一只股票的行（按日期排好）→ 对齐到日历的价格序列；从它在日历上第一次出现的那天起 */
+function panelSeries(
+  rows: readonly PanelRow[],
+  calendar: readonly DateStr[],
+  calIdx: ReadonlyMap<string, number>,
+  liquidity: boolean,
+): PriceSeries {
+  // 这只股票在日历上的起点
+  let from = calIdx.get(rows[0]!.d) ?? 0;
+  for (const r of rows) {
+    const ci = calIdx.get(r.d);
+    if (ci !== undefined) {
+      from = Math.min(from, ci);
+      break;
+    }
+  }
+  const len = calendar.length - from;
+  const f = () => new Float64Array(len).fill(NaN);
+  const s: PriceSeries = {
+    code: rows[0]!.code,
+    from,
+    open: f(),
+    high: f(),
+    low: f(),
+    close: f(),
+    adj: new Float64Array(len).fill(NaN),
+    st: new Uint8Array(len),
+  };
+  // 日均成交额（元）与日波动（D64）：第 x 格是第 x 天的值，引擎只用决策日及以前的
+  if (liquidity) {
+    s.adv = new Float32Array(len).fill(NaN);
+    s.sigma = new Float32Array(len).fill(NaN);
+  }
+  for (const r of rows) {
+    const ci = calIdx.get(r.d);
+    if (ci === undefined || ci < from) continue;
+    const x = ci - from;
+    s.open[x] = r.open;
+    s.high[x] = r.high;
+    s.low[x] = r.low;
+    s.close[x] = r.close;
+    s.adj[x] = r.adj;
+    s.st[x] = r.st ? 1 : 0;
+    if (s.adv && s.sigma) {
+      s.adv[x] = r.t20 === null || r.t20 === undefined ? NaN : r.t20 * 1e8;
+      s.sigma[x] = r.v60 === null || r.v60 === undefined ? NaN : r.v60 / 100 / Math.sqrt(250);
+    }
+  }
+  // 缺行情的日子因子沿用前值（停牌期间除权的极少数情况由下一根 K 线的因子体现）
+  let lastAdj = NaN;
+  for (let x = 0; x < len; x++) {
+    if (Number.isFinite(s.adj[x]!)) lastAdj = s.adj[x]!;
+    else if (Number.isFinite(lastAdj)) s.adj[x] = lastAdj;
+  }
+  const firstAdj = s.adj.find((v) => Number.isFinite(v)) ?? 1;
+  for (let x = 0; x < len && !Number.isFinite(s.adj[x]!); x++) s.adj[x] = firstAdj;
+  return s;
 }
 
 export async function buildSimInput(
@@ -219,79 +309,58 @@ export async function buildSimInput(
   if (codeList.length) {
     const calIdx = new Map(calendar.map((d, i) => [d, i]));
     const liquidity = needsLiquidity(resolveExec(params.exec));
-    const cols = await wh.columns(
+    // 逐块流式读（D110）：JS 里一次只留一只股票的行。整表读成数组（几百万行）会让主线程涨到 1 GB 以上
+    let group: PanelRow[] = [];
+    let panelBytes = 0;
+    const flush = () => {
+      if (!group.length) return;
+      const s = panelSeries(group, calendar, calIdx, liquidity);
+      group = [];
+      panelBytes += seriesBytes(s);
+      if (opts.maxPanelBytes !== undefined && panelBytes > opts.maxPanelBytes) {
+        prices.clear();
+        throw new Error(
+          panelTooLargeText(codeList.length, calendar.length, Math.round(opts.maxPanelBytes / 2 ** 20)),
+        );
+      }
+      prices.set(s.code, s);
+    };
+    // 因子表先按同样的股票与区间筛好再连接：不筛时连接要把整张因子表（上千万行）装进 DuckDB 的内存上限，
+    // 384MB 下就会报 Out of Memory（2026-11-03 两次回测失败）。筛的条件和日线一样，连接结果不变
+    const inCodes = sqlCodeList(codeList);
+    priceRows = await wh.streamColumns(
       `SELECT b.code, b.date::VARCHAR AS d, b.open, b.high, b.low, b.close, b.adj,
               coalesce(f.flag_st, false) AS st${liquidity ? ", f.turnover_20d AS t20, f.volatility_60d AS v60" : ""}
        FROM bars_daily b
-       LEFT JOIN factors_daily f ON f.code = b.code AND f.date = b.date
-       WHERE b.code IN (${sqlCodeList(codeList)})
+       LEFT JOIN (
+         SELECT code, date, flag_st${liquidity ? ", turnover_20d, volatility_60d" : ""} FROM factors_daily
+         WHERE code IN (${inCodes}) AND date >= $a::DATE AND date <= $b::DATE
+       ) f ON f.code = b.code AND f.date = b.date
+       WHERE b.code IN (${inCodes})
          AND b.date >= $a::DATE AND b.date <= $b::DATE
        ORDER BY b.code, b.date`,
       // 补出来的「下一个交易日」只是计划日期，不读那天的行情（可能是还没提交的数据）
       { a: calendar[0]!, b: lastDay < calendar.at(-1)! ? lastDay : calendar.at(-1)! },
+      (cols, n) => {
+        for (let k = 0; k < n; k++) {
+          const code = cols.code![k] as string;
+          if (group.length && group[0]!.code !== code) flush();
+          group.push({
+            code,
+            d: cols.d![k] as string,
+            open: cols.open![k] as number,
+            high: cols.high![k] as number,
+            low: cols.low![k] as number,
+            close: cols.close![k] as number,
+            adj: cols.adj![k] as number,
+            st: !!cols.st![k],
+            t20: liquidity ? (cols.t20![k] as number | null) : null,
+            v60: liquidity ? (cols.v60![k] as number | null) : null,
+          });
+        }
+      },
     );
-    const code = cols.code as string[];
-    const d = cols.d as string[];
-    priceRows = code.length;
-    let i = 0;
-    while (i < code.length) {
-      const c = code[i]!;
-      let j = i;
-      while (j < code.length && code[j] === c) j++;
-      // 这只股票在日历上的起点
-      let from = calIdx.get(d[i]!) ?? 0;
-      for (let k = i; k < j; k++) {
-        const ci = calIdx.get(d[k]!);
-        if (ci !== undefined) {
-          from = Math.min(from, ci);
-          break;
-        }
-      }
-      const len = calendar.length - from;
-      const f = () => new Float64Array(len).fill(NaN);
-      const s: PriceSeries = {
-        code: c,
-        from,
-        open: f(),
-        high: f(),
-        low: f(),
-        close: f(),
-        adj: new Float64Array(len).fill(NaN),
-        st: new Uint8Array(len),
-      };
-      // 日均成交额（元）与日波动（D64）：第 x 格是第 x 天的值，引擎只用决策日及以前的
-      if (liquidity) {
-        s.adv = new Float32Array(len).fill(NaN);
-        s.sigma = new Float32Array(len).fill(NaN);
-      }
-      for (let k = i; k < j; k++) {
-        const ci = calIdx.get(d[k]!);
-        if (ci === undefined || ci < from) continue;
-        const x = ci - from;
-        s.open[x] = cols.open![k] as number;
-        s.high[x] = cols.high![k] as number;
-        s.low[x] = cols.low![k] as number;
-        s.close[x] = cols.close![k] as number;
-        s.adj[x] = cols.adj![k] as number;
-        s.st[x] = cols.st![k] ? 1 : 0;
-        if (s.adv && s.sigma) {
-          const t20 = cols.t20![k] as number | null;
-          const v60 = cols.v60![k] as number | null;
-          s.adv[x] = t20 === null || t20 === undefined ? NaN : t20 * 1e8;
-          s.sigma[x] = v60 === null || v60 === undefined ? NaN : v60 / 100 / Math.sqrt(250);
-        }
-      }
-      // 缺行情的日子因子沿用前值（停牌期间除权的极少数情况由下一根 K 线的因子体现）
-      let lastAdj = NaN;
-      for (let x = 0; x < len; x++) {
-        if (Number.isFinite(s.adj[x]!)) lastAdj = s.adj[x]!;
-        else if (Number.isFinite(lastAdj)) s.adj[x] = lastAdj;
-      }
-      const firstAdj = s.adj.find((v) => Number.isFinite(v)) ?? 1;
-      for (let x = 0; x < len && !Number.isFinite(s.adj[x]!); x++) s.adj[x] = firstAdj;
-      prices.set(c, s);
-      i = j;
-    }
+    flush();
     const secs = await wh.all<{
       code: string;
       name: string;

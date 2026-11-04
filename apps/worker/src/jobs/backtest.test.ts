@@ -338,6 +338,22 @@ describe("worker 重启", () => {
     expect(runOf(a).verify).toEqual({ status: "failed", kind: "input", error: "worker 重启" });
     expect(runOf(b).verify).toEqual({ status: "running", kind: "input" });
   });
+
+  it("退出中打断的参数扫描（D110）：不接着跑剩下的取值，扫描记失败「worker 重启」而不是完成", async () => {
+    const { runId: parentId } = seedRun(t.env.app, { kind: "sweep" });
+    const variants = [10, 20, 30].map((top) => ({
+      label: `/rank/top = ${top}`,
+      spec: { ...spec, rank: { ...spec.rank!, top } },
+    }));
+    t.env.wh.interrupt();
+    await expect(sweepJob(fakeJobContext("sweep", { runId: parentId, variants }))).rejects.toThrow(
+      "worker 重启",
+    );
+    expect(runOf(parentId)).toMatchObject({ status: "failed", error: "worker 重启" });
+    const children = t.env.app.db.select().from(runs).where(eq(runs.parentId, parentId)).all();
+    expect(children).toHaveLength(1);
+    expect(children[0]).toMatchObject({ status: "failed", error: "worker 重启" });
+  });
 });
 
 describe("完整重跑（kind = reproduce）", () => {

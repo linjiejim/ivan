@@ -35,6 +35,8 @@ export interface Config {
   backtestTimeoutMs: number;
   /** 回测线程的堆上限（MB，resourceLimits.maxOldGenerationSizeMb）；转交的价格面板不算在里面 */
   backtestThreadMemoryMb: number;
+  /** 一次回测的价格面板最多多少 MB（D110）：转交给线程的 TypedArray，不受线程堆上限约束，单独设上限 */
+  backtestPanelMb: number;
   fetch: { concurrency: number; minIntervalMs: number };
   schedulerEnabled: boolean;
   /** 试用申请（D109）：登录页能不能申请邀请码，申请提醒发给谁（空 = 只记在管理页） */
@@ -80,6 +82,7 @@ export function loadConfig(): Config {
     backtestPoolSize: int("BACKTEST_POOL_SIZE", 1),
     backtestTimeoutMs: int("BACKTEST_TIMEOUT_MS", 120_000),
     backtestThreadMemoryMb: int("BACKTEST_THREAD_MEMORY_MB", 256),
+    backtestPanelMb: int("BACKTEST_PANEL_MB", 320),
     fetch: {
       concurrency: int("FETCH_CONCURRENCY", 4),
       minIntervalMs: int("FETCH_MIN_INTERVAL_MS", 50),

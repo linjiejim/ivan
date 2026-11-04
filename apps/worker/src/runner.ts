@@ -5,11 +5,16 @@
  * 进度写回 jobs 表，server 读它推给前端。
  *
  * 行情仓写库期间不跑回测（D60）：etl / check / event_cols 排队或在跑时 compute 道不认领；etl 道轮到它们时
- * 先等正在跑的 compute 任务结束（compute 道这时已经不再认领，不会饿死）。行情仓在维护状态（还没升级）时两条道都不认领。
+ * 先等正在跑的 compute 任务结束（compute 道这时已经不再认领，不会饿死）。单独排的结算（settle）也一样（D110，
+ * COMPUTE_EXCLUSIVE）。行情仓在维护状态（还没升级）时两条道都不认领。
+ *
+ * 空闲回收（D110）：两条道都空下来 30 秒后，把 DuckDB 的缓存还给系统（wh.trimMemory，顺带 CHECKPOINT），
+ * 并换掉跑过任务的回测线程（转交过去的价格面板随旧线程释放）。
+ * 退出（stopRunner）之后不再认领；被退出打断而失败的任务记「worker 重启」（和下次启动的 recoverStale 一样）。
  *
  * 自动重跑（D73）：任务可以带 not_before（毫秒），没到时间不认领、也不挡回测；attempt 记第几次重跑。
  */
-import { computeBlocked, type jobs, WAREHOUSE_WRITERS } from "@ivan/db";
+import { COMPUTE_EXCLUSIVE, computeBlocked, type jobs, WAREHOUSE_WRITERS } from "@ivan/db";
 import { env } from "./env.ts";
 import { backtestJob, sweepJob } from "./jobs/backtest.ts";
 import { briefJob } from "./jobs/brief.ts";
@@ -19,6 +24,7 @@ import { eventColsJob } from "./jobs/event-cols.ts";
 import { eventsJob } from "./jobs/events.ts";
 import { settleJob } from "./jobs/settle.ts";
 import { verifyJob } from "./jobs/verify.ts";
+import { recycleIdleThreads } from "./sim-pool.ts";
 
 type JobRow = typeof jobs.$inferSelect;
 
@@ -48,13 +54,42 @@ const running = { compute: 0, etl: 0 };
 let wakeUp: (() => void) | null = null;
 let stopped = false;
 
+/** 两条道都空下来多久之后回收 DuckDB 的缓存（毫秒）；连着提交几次回测时不每次都清 */
+export const IDLE_TRIM_DELAY_MS = 30_000;
+let trimTimer: ReturnType<typeof setTimeout> | null = null;
+
 export function wake(): void {
   wakeUp?.();
 }
 
 export function stopRunner(): void {
   stopped = true;
+  if (trimTimer) clearTimeout(trimTimer);
+  trimTimer = null;
   wake();
+}
+
+/** 正在跑的任务数（两条道合计；退出时等它们收尾） */
+export function runningJobs(): number {
+  return running.compute + running.etl;
+}
+
+/** 两条道都空了：过一会儿还空着就回收 DuckDB 的缓存（D110）。导出给测试 */
+export function scheduleIdleTrim(delayMs: number = IDLE_TRIM_DELAY_MS): void {
+  if (trimTimer) clearTimeout(trimTimer);
+  trimTimer = setTimeout(() => {
+    trimTimer = null;
+    if (stopped || runningJobs() > 0) return;
+    const warn = (e: unknown) =>
+      console.warn(`空闲回收失败：${e instanceof Error ? e.message : String(e)}`);
+    try {
+      recycleIdleThreads();
+      env().wh.trimMemory().catch(warn);
+    } catch (e) {
+      warn(e);
+    }
+  }, delayMs);
+  trimTimer.unref?.();
 }
 
 /** 启动时把上次没跑完的任务标成失败（D3：worker 重启不自动重跑） */
@@ -115,8 +150,8 @@ type Lane = "compute" | "etl";
 /**
  * 这条道现在该不该等（纯函数，单测覆盖）：
  * - 维护状态：两条道都等；
- * - compute：有写库任务排队或在跑就等；
- * - etl：下一个要认领的是写库任务、且还有 compute 任务在跑就等。
+ * - compute：有和回测互斥的任务（写库任务、单独排的结算）排队或在跑就等；
+ * - etl：下一个要认领的是这类任务、且还有 compute 任务在跑就等。
  */
 export function shouldWait(
   lane: Lane,
@@ -125,7 +160,7 @@ export function shouldWait(
 ): boolean {
   if (state.maintenance) return true;
   if (lane === "compute") return state.blocked;
-  return nextKind !== null && WAREHOUSE_WRITERS.has(nextKind) && state.computeRunning > 0;
+  return nextKind !== null && COMPUTE_EXCLUSIVE.has(nextKind) && state.computeRunning > 0;
 }
 
 function laneKinds(lane: Lane): string {
@@ -208,8 +243,10 @@ async function execute(job: JobRow): Promise<void> {
       .run(JSON.stringify(result), Date.now(), job.id);
     console.log(`[${job.kind} ${job.id}] 完成，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[${job.kind} ${job.id}] 失败：${msg}`);
+    const raw = e instanceof Error ? e.message : String(e);
+    // 退出时打断的（查询被 interrupt、线程被终止）：和下次启动的 recoverStale 一样记「worker 重启」，不记打断时冒出来的错
+    const msg = stopped ? "worker 重启" : raw;
+    console.error(`[${job.kind} ${job.id}] 失败：${msg === raw ? msg : `${msg}（${raw}）`}`);
     sqlite
       .prepare(`UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`)
       .run(msg.slice(0, 1000), Date.now(), job.id);
@@ -227,8 +264,11 @@ export async function runLoop(poolSize: number): Promise<void> {
         if (!HANDLERS[job.kind]) continue;
         started = true;
         running[lane]++;
+        if (trimTimer) clearTimeout(trimTimer);
+        trimTimer = null;
         void execute(job).finally(() => {
           running[lane]--;
+          if (runningJobs() === 0 && !stopped) scheduleIdleTrim();
           wake();
         });
       }
