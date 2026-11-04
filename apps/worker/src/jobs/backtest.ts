@@ -23,6 +23,7 @@ import {
   type BuiltInput,
   buildSimInput,
   HASH_VERSION,
+  InterruptedError,
   hashSimInput,
   SCHEMA_VERSION,
 } from "@ivan/data";
@@ -455,6 +456,8 @@ export async function sweepJob(ctx: JobContext): Promise<Record<string, unknown>
         results.push({ label: v.label, runId: childId, excessCagr: r.metrics.excessCagr });
       } catch (e) {
         failRun(childId, e);
+        // worker 退出中（D110）：不接着跑剩下的取值、不把扫描记成完成
+        if (e instanceof InterruptedError) throw e;
         results.push({ label: v.label, runId: childId, excessCagr: null, error: String(e) });
       }
     }

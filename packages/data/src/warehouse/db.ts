@@ -71,13 +71,13 @@ export class Warehouse {
   /** 读写的外壳：等进行中的 trimMemory，记进 active */
   private async tracked<T>(fn: () => Promise<T>): Promise<T> {
     while (this.trimming) await this.trimming;
-    if (this.interrupted) throw new Error(INTERRUPTED_TEXT);
+    if (this.interrupted) throw new InterruptedError();
     this.active++;
     try {
       return await fn();
     } catch (e) {
       // 退出时打断的查询：报和「上次没跑完」一样的原因，不把 DuckDB 的 INTERRUPT 错误写给用户
-      if (this.interrupted) throw new Error(INTERRUPTED_TEXT, { cause: e });
+      if (this.interrupted) throw new InterruptedError({ cause: e });
       throw e;
     } finally {
       this.active--;
@@ -353,7 +353,8 @@ export class Warehouse {
       }
       await this.conn.run(`SET memory_limit = '${this.memoryLimit}'`);
     })();
-    this.trimming = work;
+    // 等着的读写只等它结束、不跟着它失败
+    this.trimming = work.catch(() => undefined);
     try {
       await work;
       return true;
@@ -388,6 +389,17 @@ export class Warehouse {
 
 /** worker 退出时被打断的查询报的原因（和启动时 recoverStale 写的一样） */
 export const INTERRUPTED_TEXT = "worker 重启";
+
+/**
+ * worker 退出中被打断（D110）：查询被 interrupt、回测线程被终止。逐项吞错接着跑的循环（参数扫描、逐个跟踪结算）
+ * 见到它要往外抛，不能把剩下的每一项都记成失败、再把整个任务记成完成。
+ */
+export class InterruptedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super(INTERRUPTED_TEXT, options);
+    this.name = "InterruptedError";
+  }
+}
 
 /** DuckDB 内存大小的写法（如 384MB、1.5GB、512MiB）：拼进 SET 之前校验 */
 const MEMORY_SIZE_RE = /^\d+(\.\d+)?\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i;

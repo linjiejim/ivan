@@ -10,6 +10,7 @@
  */
 import { Worker } from "node:worker_threads";
 import type { SimInput, SimResult, ValidationResult } from "@ivan/core";
+import { InterruptedError } from "@ivan/data";
 import { runSimTasks, type SimOutput, type SimTaskOptions } from "./sim-tasks.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,8 +44,6 @@ interface Slot {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-/** 退出时被终止的回测报的原因（和启动时 recoverStale 写的一样） */
-const STOPPED_TEXT = "worker 重启";
 const DEFAULT_MAX_OLD_GEN_MB = 256;
 
 let slots: Slot[] = [];
@@ -110,7 +109,7 @@ export function startPool(size: number, opts: PoolOptions = {}): void {
 async function acquire(): Promise<Slot | null> {
   for (;;) {
     // 退出中不能退回主线程跑（主线程要尽快退出）
-    if (stopping) throw new Error(STOPPED_TEXT);
+    if (stopping) throw new InterruptedError();
     if (disabled || !slots.length) return null;
     const free = slots.find((s) => !s.busy);
     if (free) {
@@ -181,7 +180,7 @@ export async function runSimulation(
       const fail = (msg: string) => {
         if (settled) return;
         settled = true;
-        if (stopping) return reject(new Error(STOPPED_TEXT));
+        if (stopping) return reject(new InterruptedError());
         respawn(slot);
         reject(new Error(msg));
       };
