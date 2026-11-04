@@ -5,6 +5,8 @@
  * 闸门没过、或开市了但指数日 K 还没有今天（可重跑的失败）时 45 分钟后自动再排一次，最多 2 次。
  * 排着队等重跑期间市场当日状态是「没更新」（market-day.ts）。数据源风控（D108）：等解封有预算，用完了被拦的股票记成缺失、
  * 日历指数被拦时整晚抛可重跑的错，两种都走这条自动重跑，排着队时不挡回测。重跑成功而当天的简报已经写过时再排一次简报（加一版）。
+ * 补数据（D111）：今天没齐、但截至日能提交到之前齐全的那天时，任务照常完成（结算跟到那天），同样 45 分钟后再排一次接着补；
+ * 排着队等的时候市场当日状态是「没更新」，横幅说「补数据中」。
  * A 股夜间更新成功后，如果事件数据的历史已补齐、而事件因子列的补算标记和当前签名或版本对不上（部署了新口径），排上按年补算（S15b）。
  */
 import { MARKET_LABEL, type Market, nowHmCN, todayCN } from "@ivan/core";
@@ -36,6 +38,17 @@ function briefDoneToday(): boolean {
     .some((j) => j.finishedAt !== null && todayCN(new Date(j.finishedAt)) === today);
 }
 
+/** 45 分钟后自动重跑（最多 ETL_MAX_RETRIES 次） */
+function scheduleRetry(market: Market, ctx: JobContext): void {
+  const attempt = ctx.job.attempt ?? 0;
+  if (attempt >= ETL_MAX_RETRIES) return;
+  const notBefore = Date.now() + ETL_RETRY_DELAY_MS;
+  enqueue("etl", { market, retryOf: ctx.job.id }, null, { notBefore, attempt: attempt + 1 });
+  ctx.log(
+    `${MARKET_LABEL[market]}${nowHmCN(new Date(notBefore))} 自动重试（第 ${attempt + 1}/${ETL_MAX_RETRIES} 次）`,
+  );
+}
+
 export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> {
   const market = (ctx.job.payload.market === "HK" ? "HK" : "A") as Market;
   const attempt = ctx.job.attempt ?? 0;
@@ -49,15 +62,11 @@ export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> 
       acceptMissing: acceptMissingFromEnv(),
     });
   } catch (e) {
-    if (retryable(e) && attempt < ETL_MAX_RETRIES) {
-      const notBefore = Date.now() + ETL_RETRY_DELAY_MS;
-      enqueue("etl", { market, retryOf: ctx.job.id }, null, { notBefore, attempt: attempt + 1 });
-      ctx.log(
-        `${MARKET_LABEL[market]}${nowHmCN(new Date(notBefore))} 自动重试（第 ${attempt + 1}/${ETL_MAX_RETRIES} 次）`,
-      );
-    }
+    if (retryable(e)) scheduleRetry(market, ctx);
     throw e;
   }
+  // 补数据中（D111）：截至日已经往前推了，今晚再排一次接着补
+  if (r.catchUp) scheduleRetry(market, ctx);
   if (!r.tradingDay)
     return {
       market,
@@ -77,6 +86,7 @@ export async function etlJob(ctx: JobContext): Promise<Record<string, unknown>> 
     latest: r.latest,
     dataVersion: r.dataVersion,
     missingCritical: r.completeness?.missingCritical ?? [],
+    ...(r.catchUp ? { catchUp: r.catchUp } : {}),
     ...(attempt > 0 ? { attempt } : {}),
     ...(briefAgain ? { briefAgain: true } : {}),
     ...(eventCols ? { eventCols } : {}),

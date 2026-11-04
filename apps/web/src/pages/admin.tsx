@@ -50,6 +50,7 @@ import {
   issueRuleText,
   openVersionText,
   qualitySentence,
+  marketBanner,
   retryBannerText,
   softAlerts,
   sourcesLines,
@@ -730,7 +731,11 @@ export function AdminPage() {
               <div key={m.market} className="rounded-lg bg-surface-2/70 px-4 py-3">
                 <div className="flex items-center gap-2 text-xs text-muted">
                   {MARKET_TEXT[m.market]}
-                  {m.lastEtl?.status === "failed" ? (
+                  {marketBanner(m, true)?.kind === "catch_up" ? (
+                    <Badge tone="neutral">
+                      补数据中{m.catchUp ? `（第 ${m.catchUp.done}/${m.catchUp.total} 天）` : ""}
+                    </Badge>
+                  ) : m.lastEtl?.status === "failed" ? (
                     <Badge tone="warn">最近一次更新失败</Badge>
                   ) : m.lastEtl?.retryAt ? (
                     <Badge tone="warn">等自动重试</Badge>

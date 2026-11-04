@@ -22,6 +22,7 @@ import {
   type TradingDayBasis,
 } from "@ivan/core";
 import { rebalanceDays } from "@ivan/engine";
+import type { CatchUp, Completeness } from "../etl/completeness.ts";
 import type { SourcesLedger } from "../sources/chain.ts";
 import { sqlCodeList, type Warehouse } from "../warehouse/db.ts";
 import { benchFirstDate, benchMismatchCaveat } from "./bench.ts";
@@ -67,6 +68,39 @@ export async function dataVersionState(
     openVersion: open ? { id: open.id, startedAt: open.started_at ?? null } : null,
     lastVersionStatus: last?.status ?? null,
   };
+}
+
+/**
+ * 补数据的状态（D111，横幅与管理页）：最近一个结束的夜间版本（ok / incomplete / failed）还在补数据时
+ * （它就是补数据时的提交，或只因缺失超阈值、有之前的日子没补上而没通过），带上计入阈值的缺失中之前的日子也没补上的只数，
+ * 以及最新的已提交版本记下的进度（是补数据时提交的才有）。最近一次是完整的一晚或别的失败时都为空。
+ */
+export async function catchUpState(
+  wh: Warehouse,
+  market: string,
+): Promise<{ catchUp: CatchUp | null; behind: number }> {
+  const rows = await wh.all<{ status: string; c: string | null }>(
+    `SELECT coalesce(status, 'ok') AS status, completeness AS c FROM data_versions
+     WHERE market = $m AND coalesce(status, 'ok') IN ('ok', 'incomplete', 'failed') AND coalesce(kind, '') <> 'check'
+     ORDER BY id DESC LIMIT 20`,
+    { m: market },
+  );
+  const parse = (c: string | null): Partial<Completeness> => {
+    try {
+      return c ? (JSON.parse(c) as Partial<Completeness>) : {};
+    } catch {
+      return {};
+    }
+  };
+  // 最近一次尝试还在补数据才算：它就是补数据时的提交，或只因「缺失超阈值、有之前的日子没补上」没通过。
+  // 之后出了别的问题（无成交数不对、出错）时，让真的失败显示出来，不拿之前的进度盖住
+  const last = rows[0];
+  const c = last ? parse(last.c) : {};
+  const backlog = c.missingFailed && !c.noTradeFailed ? (c.behind ?? 0) : 0;
+  const still = (last?.status === "ok" && !!c.catchUp) || (last?.status === "incomplete" && backlog > 0);
+  if (!still) return { catchUp: null, behind: 0 };
+  const lastOk = rows.find((r) => r.status === "ok");
+  return { catchUp: lastOk ? (parse(lastOk.c).catchUp ?? null) : null, behind: backlog };
 }
 
 /** 最近一晚的取数来源（管理页「今晚东财 N 只、腾讯 M 只（回退 K 次）」，D72） */
