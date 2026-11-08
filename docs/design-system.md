@@ -8,6 +8,8 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 [`components/icons.tsx`](../apps/web/src/components/icons.tsx)，品牌在
 [`components/brand.tsx`](../apps/web/src/components/brand.tsx)。这份文档说明「为什么」和「什么时候用哪个」。
 
+**和 jim-uiux 的关系**：交互规则跟 jim-uiux 1.3.0（https://design.linjiejim.com）一致：原则、文案、弹层、表单、反馈。皮肤「墨」、组件和本文的数值是 Ivan 自己的。和 jim-uiux 不同、有意保留的三处：红色是「涨」，报错用 `warn`（§3）；细注 11px，低于 jim-uiux 的 12px 底线，只用在次要位置（§4）；窄屏表格先收次要列、再横滑，不变成摘要列表（§8 `DataTable`）。
+
 **设计判断**：数据产品的改版（保留信息架构，重做视觉），面向自己做研究的 A 股 / 港股投资者，
 语言是「研究仪器 + 水墨」：Tailwind v4 的 CSS 变量 token + Geist / Geist Mono + Phosphor 图标 + 克制的动效。
 三个刻度：变化度 3（可预期的网格）、动效 4（只做状态变化和进场）、密度 6（日常数据应用）。
