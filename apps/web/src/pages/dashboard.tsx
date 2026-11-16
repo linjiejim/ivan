@@ -581,7 +581,7 @@ function PlanCard({
               <div className="mb-2 flex items-center gap-2 text-xs">
                 <SeriesDot color={slotColor(slots.get(s.trackingId))} />
                 <span className="truncate font-medium text-ink">{s.strategyName}</span>
-                <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">
+                <span className="ml-auto shrink-0 font-mono text-2xs text-muted">
                   {s.orders[0]?.planDate} 开盘
                 </span>
               </div>
@@ -652,7 +652,7 @@ function RecentRunsCard({ runs }: { runs: RunSummary[] }) {
                   <div className="truncate text-sm text-ink transition-colors group-hover/run:text-accent">
                     {r.strategyName ?? "回测"}
                   </div>
-                  <div className="mt-0.5 truncate font-mono text-[11px] text-muted">
+                  <div className="mt-0.5 truncate font-mono text-2xs text-muted">
                     {r.kind === "sweep"
                       ? `参数扫描：${r.label ?? ""}`
                       : `${r.params.start} ~ ${r.params.end}`}

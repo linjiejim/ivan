@@ -121,7 +121,7 @@ export function MonthlyTable({
                   <td
                     className={cx(
                       STICKY_LEFT,
-                      "bg-surface px-1.5 py-1.5 font-mono text-[11px] text-ink-2",
+                      "bg-surface px-1.5 py-1.5 font-mono text-2xs text-ink-2",
                     )}
                   >
                     {y}
@@ -194,7 +194,7 @@ export function PnlBars({
         >
           <span className="truncate text-ink-2" title={r.label}>
             {r.label}
-            {r.sub && <span className="ml-1.5 font-mono text-[10.5px] text-muted">{r.sub}</span>}
+            {r.sub && <span className="ml-1.5 font-mono text-2xs text-muted">{r.sub}</span>}
           </span>
           <span className="relative h-2">
             <span

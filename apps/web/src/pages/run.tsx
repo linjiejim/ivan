@@ -249,12 +249,10 @@ function Trades({ runId }: { runId: string }) {
         <tbody>
           {q.data.trades.map((t) => (
             <tr key={t.seq} className="transition-colors hover:bg-surface-2/60">
-              <Td className="font-mono text-[12px] whitespace-nowrap text-ink-2">{t.date}</Td>
+              <Td className="font-mono text-xs whitespace-nowrap text-ink-2">{t.date}</Td>
               <Td>
                 <span className="text-ink">{t.name ?? t.code}</span>
-                {t.name && (
-                  <span className="ml-1.5 font-mono text-[11px] text-muted">{t.code}</span>
-                )}
+                {t.name && <span className="ml-1.5 font-mono text-2xs text-muted">{t.code}</span>}
               </Td>
               <Td>
                 <Badge tone={t.side === "buy" ? "up" : "down"}>
@@ -482,7 +480,7 @@ export function RunPage() {
       }
       meta={
         <>
-          <span className="font-mono text-[12px]">
+          <span className="font-mono text-xs">
             {r.params.start} ~ {r.params.end}
           </span>
           <span className="inline-flex items-center gap-1">
@@ -1070,7 +1068,7 @@ function Details({ run: r }: { run: RunDetail }) {
                     <tr key={label}>
                       <Td>
                         <span className="text-ink">{label}</span>
-                        <span className="ml-2 font-mono text-[11px] text-muted">
+                        <span className="ml-2 font-mono text-2xs text-muted">
                           {seg.start} ~ {seg.end}
                         </span>
                       </Td>

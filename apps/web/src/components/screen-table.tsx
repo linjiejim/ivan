@@ -39,13 +39,13 @@ export function ScreenTable({ result, spec }: { result: ScreenResult; spec?: Str
       <tbody>
         {result.rows.map((r) => (
           <tr key={r.code} className="transition-colors hover:bg-surface-2/60">
-            <Td className="font-mono text-[11px] text-muted">{r.rank}</Td>
+            <Td className="font-mono text-2xs text-muted">{r.rank}</Td>
             <Td className="whitespace-nowrap">
               <span className="font-medium text-ink">{r.name ?? r.code}</span>
-              <span className="ml-1.5 font-mono text-[11px] text-muted">{r.code}</span>
+              <span className="ml-1.5 font-mono text-2xs text-muted">{r.code}</span>
             </Td>
             <Td className="whitespace-nowrap text-ink-2">{String(r.factors.industry ?? NA)}</Td>
-            <Td align="right" className="font-mono text-[12px] text-ink">
+            <Td align="right" className="font-mono text-xs text-ink">
               {r.score.toFixed(3)}
             </Td>
             {cols.map((c) => (

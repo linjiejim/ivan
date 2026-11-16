@@ -380,7 +380,7 @@ export function TrackingPage() {
                       <tr key={p.code} className="transition-colors hover:bg-surface-2/60">
                         <Td>
                           <span className="text-ink">{p.name}</span>
-                          <span className="ml-1.5 font-mono text-[11px] text-muted @max-md:ml-0 @max-md:block @max-md:leading-4">
+                          <span className="ml-1.5 font-mono text-2xs text-muted @max-md:ml-0 @max-md:block @max-md:leading-4">
                             {p.code}
                           </span>
                         </Td>
@@ -392,7 +392,7 @@ export function TrackingPage() {
                         </Td>
                         <Td
                           align="right"
-                          className="font-mono text-[12px] whitespace-nowrap text-muted @max-md:hidden"
+                          className="font-mono text-xs whitespace-nowrap text-muted @max-md:hidden"
                         >
                           {p.entryDate}
                         </Td>

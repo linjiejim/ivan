@@ -276,10 +276,7 @@ function Timeline({ trackingId }: { trackingId: string }) {
                   {ledgerKindText(e.kind, e.edition)}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate text-ink-2">{e.summary}</span>
-                <span
-                  className="shrink-0 font-mono text-[11px] text-faint"
-                  title={`第 ${e.seq} 条`}
-                >
+                <span className="shrink-0 font-mono text-2xs text-faint" title={`第 ${e.seq} 条`}>
                   {e.hash8}
                 </span>
               </li>
