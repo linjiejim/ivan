@@ -49,7 +49,7 @@ function StrategyCard({ s }: { s: StrategyView }) {
         <span className="min-w-0 truncate font-semibold text-ink">{s.name}</span>
         <Tag>{MARKET_TEXT[s.market]}</Tag>
         {s.current && <Tag mono>v{s.current.n}</Tag>}
-        <span className="ml-auto shrink-0 font-mono text-[11px] text-muted transition-opacity duration-150 group-hover/card:opacity-0">
+        <span className="ml-auto shrink-0 font-mono text-2xs text-muted transition-opacity duration-150 group-hover/card:opacity-0">
           {dateTime(s.updatedAt)}
         </span>
         <IconArrowRight

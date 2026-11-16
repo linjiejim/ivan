@@ -123,7 +123,7 @@ function AccountMenu({ me }: { me: Me | undefined }) {
           aria-haspopup="menu"
           aria-expanded={open}
           className={cx(
-            "flex size-8 items-center justify-center rounded-lg text-[13px] font-semibold text-ink-2 ring-1 ring-line-strong transition-colors ring-inset hover:bg-surface-2 hover:text-ink",
+            "flex size-8 items-center justify-center rounded-lg text-sm font-semibold text-ink-2 ring-1 ring-line-strong transition-colors ring-inset hover:bg-surface-2 hover:text-ink",
             open && "bg-surface-2 text-ink",
           )}
         >

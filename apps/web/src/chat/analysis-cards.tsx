@@ -113,7 +113,7 @@ export function PriceHistoryCard({ output: p }: { output: PriceHistory }) {
         <>
           {name}
           {idOf(p.instrument) && (
-            <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+            <span className="ml-1.5 font-mono text-2xs font-normal text-muted">
               {idOf(p.instrument)}
             </span>
           )}
@@ -122,7 +122,7 @@ export function PriceHistoryCard({ output: p }: { output: PriceHistory }) {
       }
       icon={IconChart}
       right={
-        <span className="font-mono text-[11px] font-normal text-muted">
+        <span className="font-mono text-2xs font-normal text-muted">
           {s.start} ~ {s.end}
         </span>
       }
@@ -198,7 +198,7 @@ export function CompareSecuritiesCard({ output: c }: { output: CompareResult }) 
     <Frame
       title={`对比 · ${c.period.label}`}
       icon={IconCompare}
-      right={<span className="font-mono text-[11px] font-normal text-muted">至 {c.end}</span>}
+      right={<span className="font-mono text-2xs font-normal text-muted">至 {c.end}</span>}
       info="收益按复权价；相关系数用两只都有行情的交易日的日收益算。PE、PB 是倍数。"
     >
       <LinesChart lines={lines} height={210} />
@@ -221,9 +221,7 @@ export function CompareSecuritiesCard({ output: c }: { output: CompareResult }) 
               <Td>
                 {nameOf(i.instrument)}
                 {idOf(i.instrument) && (
-                  <span className="ml-1 font-mono text-[10.5px] text-muted">
-                    {idOf(i.instrument)}
-                  </span>
+                  <span className="ml-1 font-mono text-2xs text-muted">{idOf(i.instrument)}</span>
                 )}
               </Td>
               <Td align="right">
@@ -377,7 +375,7 @@ export function IndustryCard({ output: r }: { output: IndustryPerformance }) {
       }
       icon={IconIndustry}
       right={
-        <span className="font-mono text-[11px] font-normal text-muted">
+        <span className="font-mono text-2xs font-normal text-muted">
           {r.start} ~ {r.end}
         </span>
       }
@@ -406,7 +404,7 @@ export function IndustryCard({ output: r }: { output: IndustryPerformance }) {
               <tr key={x.code} className="text-xs">
                 <Td>
                   {x.name}
-                  <span className="ml-1 font-mono text-[10.5px] text-muted">{x.code}</span>
+                  <span className="ml-1 font-mono text-2xs text-muted">{x.code}</span>
                 </Td>
                 <Td align="right">
                   <Pct x={x.ret} />
@@ -473,7 +471,7 @@ export function FactorHistoryCard({ output: f }: { output: FactorHistory }) {
       title={
         <>
           {f.instrument.name}
-          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+          <span className="ml-1.5 font-mono text-2xs font-normal text-muted">
             {f.instrument.code}
           </span>
           <span className="ml-1.5 font-normal text-muted">· 估值与因子 · {f.period.label}</span>
@@ -536,7 +534,7 @@ export function FinancialsCard({ output: f }: { output: FinancialHistory }) {
       title={
         <>
           {f.instrument.name}
-          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+          <span className="ml-1.5 font-mono text-2xs font-normal text-muted">
             {f.instrument.code}
           </span>
           <span className="ml-1.5 font-normal text-muted">· 财报与分红</span>
@@ -635,7 +633,7 @@ export function CalcCard({
           <div key={`${n}-${i.label}`} className="grid grid-cols-[1fr_auto] gap-x-3">
             <dt className="min-w-0">
               <div className="text-ink-2">{i.label}</div>
-              <div className="truncate font-mono text-[10.5px] text-muted">{i.expr}</div>
+              <div className="truncate font-mono text-2xs text-muted">{i.expr}</div>
             </dt>
             <dd
               className={cx("tabular self-center font-medium", i.error ? "text-warn" : "text-ink")}

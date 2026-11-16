@@ -58,7 +58,7 @@ function ItemRow({ it }: { it: EvidenceItem }) {
         <span className="tabular shrink-0 font-medium text-ink">{valueText(it)}</span>
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-muted">
-        <Tag className="h-4 px-1 text-[10px]">
+        <Tag className="h-4 px-1">
           {it.ref.src ? (SOURCE_TAG[it.ref.src] ?? it.ref.src) : "来源未记录"}
         </Tag>
         <span className="font-mono">数据日 {it.availDate}</span>
@@ -105,7 +105,7 @@ export function EvidenceBody({ e }: { e: SecurityEvidence }) {
     <div className="space-y-3 text-xs">
       <p className="text-ink">
         <span className="font-medium">{d.name ?? d.code}</span>
-        <span className="ml-1.5 font-mono text-[11px] text-muted">{d.code}</span>
+        <span className="ml-1.5 font-mono text-2xs text-muted">{d.code}</span>
         <span className="text-muted"> · 决策日 </span>
         <span className="font-mono">{e.decision.decisionDate}</span>
         {e.decision.tradeDate && (

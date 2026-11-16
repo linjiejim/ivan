@@ -133,7 +133,7 @@ export function CompareTable({ rows }: { rows: CompareRow[] }) {
               <span className="inline-flex items-center gap-1.5 font-medium text-ink-2">
                 <SeriesDot color={SLOTS[i]} />v{r.versionN ?? "?"}
               </span>
-              <div className="font-mono text-[10.5px]">
+              <div className="font-mono text-2xs">
                 {r.params.start} ~ {r.params.end}
               </div>
             </Th>

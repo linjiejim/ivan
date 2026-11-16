@@ -6,7 +6,6 @@ import { useState } from "react";
 import { IconImport, IconSignals } from "../components/icons.tsx";
 import {
   Button,
-  Callout,
   Card,
   Empty,
   ErrorNote,
@@ -56,11 +55,15 @@ export function SignalsPage() {
       <PageHeader
         back={{ to: "/strategies", label: "策略" }}
         title="信号集"
-        meta={<span>导入一串历史推荐，只测「怎么买、买多少、何时卖」</span>}
+        info={
+          <>
+            <p>导入一串历史推荐，只测「怎么买、买多少、何时卖」。</p>
+            <p className="mt-1.5">
+              信号集是一串「某天推荐了某只股票」的记录（比如你过去的选股）。用它建一个「信号模式」的策略，就能只测买卖与仓位规则：信号日收盘后决策，次日开盘买入。
+            </p>
+          </>
+        }
       />
-      <Callout tone="info">
-        信号集是一串「某天推荐了某只股票」的记录（比如你过去的选股）。用它建一个「信号模式」的策略，就能只测买卖与仓位规则：信号日收盘后决策，次日开盘买入。
-      </Callout>
       <Card title="导入" icon={IconImport}>
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_160px]">
@@ -131,8 +134,8 @@ export function SignalsPage() {
                 <span className="text-ink-2">
                   <span className="tabular">{d.count}</span> 条
                 </span>
-                <code className="text-[11px] text-muted">{d.id}</code>
-                <span className="ml-auto font-mono text-[11px] text-muted">
+                <code className="text-2xs text-muted">{d.id}</code>
+                <span className="ml-auto font-mono text-2xs text-muted">
                   {dateTime(d.createdAt)}
                 </span>
               </li>

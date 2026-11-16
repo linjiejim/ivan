@@ -35,7 +35,7 @@ function Name({ it }: { it: { code: string; name: string | null } }) {
   return (
     <>
       <span className="text-ink">{it.name ?? it.code}</span>
-      <span className="ml-1.5 font-mono text-[11px] text-muted">{it.code}</span>
+      <span className="ml-1.5 font-mono text-2xs text-muted">{it.code}</span>
     </>
   );
 }

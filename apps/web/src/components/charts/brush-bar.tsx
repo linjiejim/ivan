@@ -23,7 +23,7 @@ export function BrushBar({
     );
   return (
     <div className="flex animate-pop items-center gap-1.5">
-      <span className="inline-flex h-7 items-center rounded-lg bg-accent-wash px-2 font-mono text-[11px] text-accent tabular">
+      <span className="inline-flex h-7 items-center rounded-lg bg-accent-wash px-2 font-mono text-2xs text-accent tabular">
         {range.from} → {range.to}
       </span>
       <Button size="sm" variant="ai" icon={IconAI} onClick={onAsk}>

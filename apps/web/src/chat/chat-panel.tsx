@@ -67,7 +67,7 @@ function Inline({ text }: { text: string }) {
             {p.slice(2, -2)}
           </strong>
         ) : p.startsWith("`") && p.endsWith("`") ? (
-          <code key={i} className="rounded-[5px] bg-surface-2 px-1 py-px text-[12px] text-ink">
+          <code key={i} className="rounded-[5px] bg-surface-2 px-1 py-px text-xs text-ink">
             {p.slice(1, -1)}
           </code>
         ) : (
@@ -635,7 +635,7 @@ export function ChatPanel({
                       }}
                     >
                       <span className="min-w-0 flex-1 truncate">{t.title ?? "对话"}</span>
-                      <span className="shrink-0 font-mono text-[10.5px] text-muted">
+                      <span className="shrink-0 font-mono text-2xs text-muted">
                         {dateTime(t.updatedAt)}
                       </span>
                     </button>

@@ -376,7 +376,7 @@ export function RunCard({ runId }: { runId: string }) {
   return (
     <Frame
       title={
-        <span className="font-mono text-[11px]">
+        <span className="font-mono text-2xs">
           {r.params.start} ~ {r.params.end}
         </span>
       }
@@ -447,7 +447,7 @@ export function SweepCard({ runId }: { runId: string }) {
               key={c.id}
               className="grid grid-cols-[minmax(0,6rem)_1fr_auto] items-center gap-2.5 text-xs"
             >
-              <span className="truncate font-mono text-[11px] text-ink-2">
+              <span className="truncate font-mono text-2xs text-ink-2">
                 {c.label?.split(" = ").pop()}
               </span>
               <span className="h-2">
@@ -507,7 +507,7 @@ export function QueryCard({
           {dd.map((d) => (
             <tr key={d.peak} className="border-b border-line last:border-0">
               <td className="py-1.5 font-medium text-down">{pct(d.depth, 1, false)}</td>
-              <td className="py-1.5 font-mono text-[11px] text-ink-2">
+              <td className="py-1.5 font-mono text-2xs text-ink-2">
                 {d.peak} → {d.trough}
               </td>
               <td className="py-1.5 text-right text-muted">
@@ -554,7 +554,7 @@ export function QueryCard({
     } | null;
     body = snap ? (
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 font-mono text-[11px] text-muted">{snap.date}</span>
+        <span className="mr-1 font-mono text-2xs text-muted">{snap.date}</span>
         {snap.items.map((i) => (
           <Tag key={i.code} mono>
             {i.code} {pct(i.weight, 0, false)}
@@ -581,7 +581,7 @@ export function QueryCard({
           <tbody>
             {trades.slice(0, 30).map((t) => (
               <tr key={t.seq} className="border-b border-line last:border-0">
-                <td className="py-1.5 font-mono text-[11px] text-muted">{t.date}</td>
+                <td className="py-1.5 font-mono text-2xs text-muted">{t.date}</td>
                 <td className="py-1.5 text-ink">{t.name ?? t.code}</td>
                 <td className={cx("py-1.5", t.side === "buy" ? "text-up" : "text-down")}>
                   {t.side === "buy" ? "买" : "卖"}
@@ -712,12 +712,12 @@ export function SecurityCard({
       title={
         <>
           {sec.name}
-          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">{sec.code}</span>
+          <span className="ml-1.5 font-mono text-2xs font-normal text-muted">{sec.code}</span>
         </>
       }
       icon={IconScreen}
       right={
-        <span className="font-mono text-[11px] font-normal text-muted">{String(f.date ?? "")}</span>
+        <span className="font-mono text-2xs font-normal text-muted">{String(f.date ?? "")}</span>
       }
     >
       <div className="mb-3 flex flex-wrap items-center gap-1.5 text-xs text-muted">
@@ -853,7 +853,7 @@ export function ScreenCard({
       title={
         <>
           {title}
-          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">{output.date}</span>
+          <span className="ml-1.5 font-mono text-2xs font-normal text-muted">{output.date}</span>
         </>
       }
       icon={IconScreen}
@@ -965,7 +965,7 @@ export function OverviewCard({ output }: { output: OverviewOutput }) {
           {output.plans.map((p) => (
             <div key={p.trackingId} className="flex flex-wrap items-center gap-1 text-xs">
               <span className="mr-0.5 text-muted">
-                {p.strategyName} <span className="font-mono text-[11px]">{p.planDate}</span>
+                {p.strategyName} <span className="font-mono text-2xs">{p.planDate}</span>
               </span>
               {p.buys.map((n) => (
                 <Badge key={`b-${n}`} tone="up">
@@ -1111,7 +1111,7 @@ export function PlanCard({
       title={
         <>
           「{output.strategyName}」的计划
-          <span className="ml-1.5 font-mono text-[11px] font-normal text-muted">
+          <span className="ml-1.5 font-mono text-2xs font-normal text-muted">
             决策日 {p.decisionDate}
           </span>
         </>

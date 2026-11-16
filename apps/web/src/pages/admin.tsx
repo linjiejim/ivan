@@ -321,10 +321,10 @@ export function DataQualityCard({ quality }: { quality: DataQuality | null }) {
               <tbody>
                 {quality.open.map((o) => (
                   <tr key={o.id}>
-                    <Td className="font-mono text-[12px] whitespace-nowrap text-muted">{o.date}</Td>
+                    <Td className="font-mono text-xs whitespace-nowrap text-muted">{o.date}</Td>
                     <Td className="whitespace-nowrap">
                       <span className="text-ink">{o.name ?? o.code}</span>{" "}
-                      <span className="font-mono text-[12px] text-muted">{o.code}</span>
+                      <span className="font-mono text-xs text-muted">{o.code}</span>
                     </Td>
                     <Td>
                       <Badge tone={o.severity === "reject" ? "warn" : "neutral"}>
@@ -554,12 +554,12 @@ function TrialRequestsCard() {
                       </Badge>
                     </span>
                   )}
-                  <span className="ml-auto font-mono text-[11px] text-muted">
+                  <span className="ml-auto font-mono text-2xs text-muted">
                     {dateTime(r.createdAt)}
                   </span>
                 </div>
                 {r.message && (
-                  <p className="mt-1 text-[13px] leading-6 whitespace-pre-line text-ink-2">
+                  <p className="mt-1 text-sm leading-6 whitespace-pre-line text-ink-2">
                     {r.message}
                   </p>
                 )}
@@ -587,14 +587,14 @@ function TrialRequestsCard() {
                 )}
                 {result &&
                   (result.emailed ? (
-                    <p className="mt-2 flex items-center gap-1.5 text-[13px] text-ink-2">
+                    <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-2">
                       <IconCheck size={14} className="text-accent" />
                       注册链接已发到对方邮箱
                     </p>
                   ) : (
                     <Callout
                       tone="warn"
-                      className="mt-2 text-[13px]"
+                      className="mt-2"
                       action={<CopyButton text={result.link} label="复制注册链接" />}
                     >
                       邮件没发出去（{result.emailError}），复制注册链接自己发给对方。
@@ -811,7 +811,7 @@ export function AdminPage() {
                 const st = STATUS[j.status] ?? { text: j.status, tone: "neutral" as const };
                 return (
                   <tr key={j.id}>
-                    <Td className="font-mono text-[12px] whitespace-nowrap text-muted">
+                    <Td className="font-mono text-xs whitespace-nowrap text-muted">
                       {dateTime(j.createdAt)}
                     </Td>
                     <Td className="whitespace-nowrap text-ink">
@@ -877,7 +877,7 @@ export function AdminPage() {
                 >
                   <code
                     className={cx(
-                      "text-[13px] tracking-[0.18em]",
+                      "text-sm tracking-[0.18em]",
                       i.usedBy || expired ? "text-muted line-through decoration-faint" : "text-ink",
                     )}
                   >
@@ -891,7 +891,7 @@ export function AdminPage() {
                   ) : (
                     <CopyButton text={inviteLink(i.code)} label="复制注册链接" />
                   )}
-                  <span className="ml-auto font-mono text-[11px] text-muted">
+                  <span className="ml-auto font-mono text-2xs text-muted">
                     {dateTime(i.createdAt)}
                   </span>
                 </li>
@@ -983,7 +983,7 @@ export function AdminPage() {
             <tbody>
               {usage.data.map((d) => (
                 <tr key={d.day} className="transition-colors hover:bg-surface-2/60">
-                  <Td className="font-mono text-[12px] whitespace-nowrap text-ink-2">{d.day}</Td>
+                  <Td className="font-mono text-xs whitespace-nowrap text-ink-2">{d.day}</Td>
                   <Td align="right">{d.chatMessages}</Td>
                   <Td align="right">{d.backtests}</Td>
                   <Td align="right">{d.analyses ?? 0}</Td>

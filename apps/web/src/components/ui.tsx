@@ -12,6 +12,7 @@ import {
   type ComponentPropsWithRef,
   type CSSProperties,
   type InputHTMLAttributes,
+  type PointerEvent,
   type ReactNode,
   type RefObject,
   type SelectHTMLAttributes,
@@ -46,7 +47,13 @@ import {
 
 /** 组件自带的 class 可以被调用方覆盖：冲突的工具类以后写的为准（tailwind-merge） */
 const merge = extendTailwindMerge({
-  extend: { theme: { animate: ["enter", "pop", "fade", "modal", "sheet", "shimmer", "live"] } },
+  // text-title-lg 不是 t-shirt 尺寸，不登记会被当成文字颜色，和 text-ink 互相覆盖
+  extend: {
+    theme: {
+      animate: ["enter", "pop", "fade", "modal", "sheet", "shimmer", "live"],
+      text: ["title-lg"],
+    },
+  },
 });
 
 export function cx(...a: Parameters<typeof clsx>) {
@@ -246,6 +253,9 @@ export function MenuLink({
 /**
  * ⓘ 按需说明：次要信息（口径、元数据、次要指标）收在这里，悬停或点一下才出来。
  * 页面上只留回答「现在怎么样」的数字。
+ *
+ * 鼠标指上去（或 Tab 聚焦）打开，移开就收；点一下（触屏点按、键盘回车）固定住，
+ * 直到再点一下、点别处、滚动、Esc 或 Tab 走开（jim-uiux 1.4.0 的 Info）。
  */
 export function Info({
   children,
@@ -262,20 +272,31 @@ export function Info({
   const btn = useRef<HTMLButtonElement>(null);
   const layer = useRef<HTMLDivElement>(null);
   const timer = useRef<number | undefined>(undefined);
-  const openedAt = useRef(0);
+  // 点开的（而不是指上去的）：鼠标移开、失焦都不收
+  const pinned = useRef(false);
   const [refs] = useState(() => [btn, layer]);
   const style = useAnchoredLayer(open, btn, width);
-  const [close] = useState(() => () => setOpen(false));
+  const [close] = useState(() => () => {
+    window.clearTimeout(timer.current);
+    pinned.current = false;
+    setOpen(false);
+  });
   const tipId = useId();
   useDismiss(open, close, refs);
   const show = () => {
     window.clearTimeout(timer.current);
-    if (!open) openedAt.current = Date.now();
     setOpen(true);
   };
   const hideSoon = () => {
+    if (pinned.current) return;
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setOpen(false), 150);
+  };
+  // 只认鼠标：触屏点按也会补发 hover，交给 click 处理
+  const hover = (e: PointerEvent<HTMLElement>, on: boolean) => {
+    if (e.pointerType !== "mouse") return;
+    if (on) show();
+    else hideSoon();
   };
   return (
     <>
@@ -292,16 +313,23 @@ export function Info({
           open && "text-ink-2",
           className,
         )}
-        onMouseEnter={show}
-        onMouseLeave={hideSoon}
+        onPointerEnter={(e) => hover(e, true)}
+        onPointerLeave={(e) => hover(e, false)}
         onFocus={show}
-        onBlur={hideSoon}
+        onBlur={(e) => {
+          // 固定住的：Tab 到别的控件才收；点进面板里（选字）、点空白处的失焦不算
+          if (!pinned.current) hideSoon();
+          else if (e.relatedTarget && !layer.current?.contains(e.relatedTarget)) close();
+        }}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          // 触屏上 hover 和 click 会连着来：刚被 hover 打开的不要立刻关
-          if (open && Date.now() - openedAt.current > 400) setOpen(false);
-          else show();
+          // 指上去已经打开的，点一下是固定；固定住的，再点一下收起
+          if (pinned.current) close();
+          else {
+            pinned.current = true;
+            show();
+          }
         }}
       >
         <IconInfo size={14} />
@@ -314,8 +342,8 @@ export function Info({
             id={tipId}
             role="tooltip"
             style={style}
-            onMouseEnter={show}
-            onMouseLeave={hideSoon}
+            onPointerEnter={(e) => hover(e, true)}
+            onPointerLeave={(e) => hover(e, false)}
             className="animate-pop rounded-xl border border-line bg-surface px-3.5 py-2.5 text-xs leading-5 text-ink-2 shadow-pop"
           >
             {children}
@@ -502,7 +530,10 @@ export function MoreActions({ actions }: { actions: MoreAction[] }) {
   );
 }
 
-/** 复制按钮：点了之后 1.6 秒内显示「已复制」，不用弹窗打扰 */
+/**
+ * 复制按钮：点了之后 1.6 秒内显示「已复制」，失败时「复制失败」（剪贴板不可用、被浏览器拒绝）；
+ * 按钮自己说，不用弹窗打扰
+ */
 export function CopyButton({
   text,
   label = "复制",
@@ -512,29 +543,45 @@ export function CopyButton({
   label?: string;
   className?: string;
 }) {
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
   useEffect(() => {
-    if (!done) return;
-    const t = window.setTimeout(() => setDone(false), 1600);
+    if (state === "idle") return;
+    const t = window.setTimeout(() => setState("idle"), 1600);
     return () => window.clearTimeout(t);
-  }, [done]);
+  }, [state]);
   return (
     <button
       type="button"
       onClick={async () => {
-        await navigator.clipboard.writeText(text);
-        setDone(true);
+        try {
+          // 非 https 的地址上没有 navigator.clipboard
+          if (!navigator.clipboard) throw new Error("clipboard unavailable");
+          await navigator.clipboard.writeText(text);
+          setState("done");
+        } catch {
+          setState("failed");
+        }
       }}
       className={cx(
         "relative inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors",
         HIT,
         "pointer-coarse:after:inset-x-0 pointer-coarse:after:-inset-y-2",
-        done ? "text-down" : "text-accent hover:bg-accent-wash",
+        state === "done" && "text-down",
+        state === "failed" && "text-warn",
+        state === "idle" && "text-accent hover:bg-accent-wash",
         className,
       )}
     >
-      {done ? <IconCheck size={14} weight="bold" /> : <IconCopy size={14} />}
-      <span aria-live="polite">{done ? "已复制" : label}</span>
+      {state === "done" ? (
+        <IconCheck size={14} weight="bold" />
+      ) : state === "failed" ? (
+        <IconWarn size={14} weight="fill" />
+      ) : (
+        <IconCopy size={14} />
+      )}
+      <span aria-live="polite">
+        {state === "done" ? "已复制" : state === "failed" ? "复制失败" : label}
+      </span>
     </button>
   );
 }
@@ -660,15 +707,18 @@ export function Card({
   );
 }
 
-/** 页头：标题 + 元信息 + 右侧动作；可带返回上一级 */
+/** 页头：标题 + 元信息 + 右侧动作；可带返回上一级。标题下不写解释句，要解释的放进标题旁的 ⓘ（`info`） */
 export function PageHeader({
   title,
+  info,
   badges,
   meta,
   actions,
   back,
 }: {
   title: ReactNode;
+  /** 标题旁的 ⓘ：这一页是什么、怎么用 */
+  info?: ReactNode;
   badges?: ReactNode;
   meta?: ReactNode;
   actions?: ReactNode;
@@ -695,9 +745,16 @@ export function PageHeader({
           </Link>
         )}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-          <h1 className="text-[22px] leading-8 font-semibold tracking-[-0.01em] text-ink">
-            {title}
-          </h1>
+          <h1 className="text-title-lg font-semibold tracking-[-0.01em] text-ink">{title}</h1>
+          {info && (
+            <Info
+              label={typeof title === "string" ? `${title}：说明` : undefined}
+              width={320}
+              className="-ml-0.5"
+            >
+              {info}
+            </Info>
+          )}
           {badges}
         </div>
         {meta && (
@@ -733,7 +790,7 @@ export function Badge({
   return (
     <span
       className={cx(
-        "inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-md px-1.5 text-[11px] font-medium leading-none",
+        "inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-md px-1.5 text-2xs font-medium leading-none",
         tone === "neutral" && "bg-surface-2 text-ink-2",
         tone === "accent" && "bg-accent-wash text-accent",
         tone === "warn" && "bg-warn-bg text-warn",
@@ -761,7 +818,7 @@ export function Tag({
   return (
     <span
       className={cx(
-        "inline-flex h-5 items-center whitespace-nowrap rounded-md px-1.5 text-[11px] leading-none font-medium text-ink-2 ring-1 ring-line-strong ring-inset",
+        "inline-flex h-5 items-center whitespace-nowrap rounded-md px-1.5 text-2xs leading-none font-medium text-ink-2 ring-1 ring-line-strong ring-inset",
         mono && "font-mono tracking-tight",
         className,
       )}
@@ -794,7 +851,7 @@ export function LiveDot({ className }: { className?: string }) {
 
 export function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[5px] border border-line-strong bg-surface-2 px-1 font-mono text-[10px] leading-none text-muted">
+    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-[5px] border border-line-strong bg-surface-2 px-1 font-mono text-2xs leading-none text-muted">
       {children}
     </kbd>
   );
@@ -1261,7 +1318,7 @@ export function Tabs<T extends string>({
             {it.count !== undefined && (
               <span
                 className={cx(
-                  "tabular rounded-md px-1 text-[11px] leading-4",
+                  "tabular rounded-md px-1 text-2xs leading-4",
                   on ? "bg-surface-3 text-ink-2" : "bg-surface-2 text-muted",
                 )}
               >
@@ -1378,7 +1435,7 @@ export function Modal({
       >
         <header className="flex items-center gap-2.5 border-b border-line py-3 pr-3 pl-5">
           {Ico && <Ico size={18} className="shrink-0 text-muted" />}
-          <h3 id={titleId} className="min-w-0 flex-1 truncate text-[15px] font-semibold text-ink">
+          <h3 id={titleId} className="min-w-0 flex-1 truncate text-base font-semibold text-ink">
             {title}
           </h3>
           <IconButton icon={IconClose} label="关闭" size="sm" onClick={onClose} />

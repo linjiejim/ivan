@@ -56,7 +56,7 @@ export function EventsBody({ e }: { e: SecurityEvents }) {
     <div className="space-y-3 text-xs">
       <p className="text-ink">
         <span className="font-medium">{e.name ?? e.code}</span>
-        <span className="ml-1.5 font-mono text-[11px] text-muted">{e.code}</span>
+        <span className="ml-1.5 font-mono text-2xs text-muted">{e.code}</span>
         <span className="text-muted"> · 截至 </span>
         <span className="font-mono">{e.asOf}</span>
         <span className="text-muted">（只含当时已公布的数据）</span>

@@ -8,7 +8,7 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 [`components/icons.tsx`](../apps/web/src/components/icons.tsx)，品牌在
 [`components/brand.tsx`](../apps/web/src/components/brand.tsx)。这份文档说明「为什么」和「什么时候用哪个」。
 
-**和 jim-uiux 的关系**：交互规则跟 jim-uiux 1.3.0（https://design.linjiejim.com）一致：原则、文案、弹层、表单、反馈。皮肤「墨」、组件和本文的数值是 Ivan 自己的。和 jim-uiux 不同、有意保留的三处：红色是「涨」，报错用 `warn`（§3）；细注 11px，低于 jim-uiux 的 12px 底线，只用在次要位置（§4）；窄屏表格先收次要列、再横滑，不变成摘要列表（§8 `DataTable`）。
+**和 jim-uiux 的关系**：交互规则跟 jim-uiux 1.4.0（https://design.linjiejim.com）一致：原则、文案、弹层、表单、反馈。皮肤「墨」、组件和本文的数值是 Ivan 自己的。和 jim-uiux 不同、有意保留的三处：红色是「涨」，报错用 `warn`（§3）；细注 11px，低于 jim-uiux 的 12px 底线，只用在次要位置（§4）；窄屏表格先收次要列、再横滑，不变成摘要列表（§8 `DataTable`）。
 
 **设计判断**：数据产品的改版（保留信息架构，重做视觉），面向自己做研究的 A 股 / 港股投资者，
 语言是「研究仪器 + 水墨」：Tailwind v4 的 CSS 变量 token + Geist / Geist Mono + Phosphor 图标 + 克制的动效。
@@ -103,12 +103,17 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 
 | 用途 | 规格 |
 |---|---|
-| 页面标题 | 22px / 32px，600 |
+| 页面标题 | 22px / 32px（`text-title-lg`），600 |
+| 弹窗标题 | 16px（`text-base`），600 |
 | 卡片标题 | 14px / 20px，600，前面可带 16px 图标（muted） |
-| 正文 | 14px / 20–24px；简报 14.5px / 28px，最大宽度 72 个字 |
+| 正文 | 14px / 20–24px（`text-sm`）；简报 14.5px / 28px，最大宽度 72 个字 |
 | 标签、说明 | 12px（`text-xs`），`muted` |
 | 细注 | 11px（`text-2xs`），只用在页脚、图例、表单提示这类次要位置 |
 | 指标大数字 | 26px / 32px，600，字距 -0.02em（`Stat`） |
+
+组件里的字号只用上表的 token，不写 `text-[Npx]`，也不低于 11px。单独调过的展示字号是例外，各只有一处：
+指标大数字 26px（`Stat`）、策略页回测摘要的三个数 22px、简报 14.5px、登录页标题 28 / 34px、字标 15 / 22px（`Wordmark`）。
+图表坐标轴的 10.5px 画在 canvas 上，见 §11。
 
 **数字的排版**（`Figure`）：「+15.4%」里正负号和单位（% 万 亿 倍 天）退后一步——单位缩到 0.62em、透明度 0.72，
 让数本身说话。大数字用比例数字；表格列、坐标轴、会上下对比的数用等宽数字（`.tabular`）。
@@ -188,7 +193,7 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 | `IconButton` | 只有图标的按钮（关闭、翻页、新对话），必须给 `label` |
 | `TextLink` | 「完整报告 ›」这类去别处看的入口（花青）；`onClick` 变体给「恢复默认」这类就地的小操作 |
 | `Card` | 标题（可带图标、ⓘ、右侧动作）+ 内容；列表、表格用 `flush` 自己管边距；右侧动作放不下时换到标题下面一行 |
-| `PageHeader` | 每个页面的抬头：返回上一级、标题、标签、元信息、动作；窄屏时动作换行 |
+| `PageHeader` | 每个页面的抬头：返回上一级、标题、标签、元信息、动作；窄屏时动作换行。标题下不写解释句，「这一页是什么、怎么用」放进标题旁的 ⓘ（`info`） |
 | `MoreActions` | 页头里的次要动作（复核数据、完整重跑这类 `ghost`）：宽的时候平铺，手机上（< 640px）收进行尾的「⋯」菜单，一行只留主要动作（D112） |
 | `Tag` vs `Badge` | `Tag` 描边无底色 = 分类元数据（市场、版本号）；`Badge` 有底色 = 状态（运行中、失败、待确认、买卖） |
 | `Tabs` vs `Segmented` | `Tabs`（下划线，可带图标和计数）= 换一块内容；`Segmented`（分段）= 同一块内容换个看法（净值 / 超额 / 回撤）。`Tabs` 放不下时横向滚：选中的那个滚进视野，被裁掉的一侧淡出 |
@@ -197,12 +202,12 @@ token 的唯一来源是 [`apps/web/src/styles.css`](../apps/web/src/styles.css)
 | `Callout` | `info`（花青）/ `warn`（赭）/ `neutral`，图标 + 文字；`ErrorNote` 是它的报错用法 |
 | `Empty` / `ArtCard` | 空状态要说清「为什么空、怎么让它不空」；整块留白的地方配水墨（`art`），小块只用图标 |
 | `Skeleton` / `PageSkeleton` / `ListSkeleton` | 首屏加载；按钮里的等待用 `loading` |
-| `Modal` | 需要确认或填几个参数的操作（回测、上线、停止、重置密码）；不再用浏览器的 `confirm` / `prompt`。手机上（< 640px）是贴底弹层：全宽、上圆角、从底边升上来，按钮平分一行，底部让开安全区 |
+| `Modal` | 需要确认或填几个参数的操作（回测、上线、停止、重置密码）；不再用浏览器的 `confirm` / `prompt`。操作失败时弹窗不关，原因用 `ErrorNote` 写在弹窗里（按钮上方）。手机上（< 640px）是贴底弹层：全宽、上圆角、从底边升上来，按钮平分一行，底部让开安全区 |
 | `Popover` + `MenuItem` / `MenuLink` | 账户菜单、历史对话 |
-| `Info` + `InfoRows` | ⓘ 按需说明（D40）：口径、次要指标、设置 |
+| `Info` + `InfoRows` | ⓘ 按需说明（D40）：口径、次要指标、设置。鼠标指上去或 Tab 聚焦时打开，移开就收；点一下（触屏点按、键盘回车）固定住，再点一下、点别处、滚动、Esc 或 Tab 走开才收 |
 | `DataTable` + `Th` / `Td` | 所有表格：表头 muted、数字右对齐等宽、行间一道发丝线、窄屏横向滚动。窄的时候先收起次要列（容器宽度 `@max-md:hidden`，信息在 ⓘ 或详情里还找得到），实在放不下才横滑；日期列不折行 |
 | `Field` + `Input` / `Select` / `Textarea` / `Checkbox` | 标签在上、说明在下、错误在最下；不用占位符当标签 |
-| `CopyButton` | 复制后 1.6 秒内显示「已复制」 |
+| `CopyButton` | 复制后 1.6 秒内显示「已复制」，失败时「复制失败」；复制从不另外弹提示 |
 | `SeriesDot` / `LiveDot` | 策略色点（和图里的线同色）/ 运行中的实时点（只用在真实状态上） |
 | `Kbd` | 键盘提示 |
 | `EvidenceCard` / `EvidenceModal`（`components/evidence-modal.tsx`） | 个股证据（D67）：抬头「名称 代码 · 决策日 X（次日 Y 开盘成交）」，提示用 `Callout`，分组列出估值与价格 / 质量与成长 / 财报 / 数据状态，每行有来源 `Tag`（东方财富、腾讯、中证、深交所、来源未记录）与「数据日」；带策略时多一块名次或没满足的条件与各项分位细条；底部「数据版本 #N · 校验 前 8 位」和「仅供研究，不构成投资建议」，空值写 `--`。对话里是卡片，回测页成交 / 持仓、跟踪页持仓每行一个 `IconButton`「证据」打开同一张 |

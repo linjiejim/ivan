@@ -434,7 +434,7 @@ function RunsTab({ runs }: { runs: RunSummary[] }) {
                     to={`/runs/${r.id}`}
                     className={cx(
                       "text-ink transition-colors hover:text-accent",
-                      r.kind !== "sweep" && "font-mono text-[13px]",
+                      r.kind !== "sweep" && "font-mono text-sm",
                     )}
                   >
                     {r.kind === "sweep"
@@ -521,7 +521,7 @@ function VersionsTab({ s, currentId }: { s: StrategyDetail; currentId: string })
                 <span className="font-mono text-sm font-semibold text-ink">v{v.n}</span>
                 {current && <Badge tone="accent">当前</Badge>}
                 <Tag>{SOURCE_TEXT[v.source] ?? v.source}</Tag>
-                <span className="font-mono text-[11px] text-muted">{dateTime(v.createdAt)}</span>
+                <span className="font-mono text-2xs text-muted">{dateTime(v.createdAt)}</span>
               </div>
               {v.note && <p className="mt-1 text-sm text-ink-2">{v.note}</p>}
               <div className="mt-2.5 rounded-lg border border-line bg-page/60 px-3.5 py-3">
@@ -559,7 +559,7 @@ function LastRun({ run, onRun }: { run: RunSummary | undefined; onRun: () => voi
   ];
   return (
     <div>
-      <div className="font-mono text-[11px] text-muted">
+      <div className="font-mono text-2xs text-muted">
         {run.params.start} ~ {run.params.end}
       </div>
       <div className="mt-3 grid grid-cols-3 gap-4">
