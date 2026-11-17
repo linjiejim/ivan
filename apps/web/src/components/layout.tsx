@@ -66,10 +66,11 @@ function useChatWidth() {
 }
 
 /**
- * 对话栏左边缘的拖柄（规格跟 jim-uiux 1.5.0 的 ResizeHandle）：8px 宽，骑在边线上。
+ * 对话栏左边缘的拖柄（规格跟 jim-uiux 1.5.1 的 ResizeHandle）：8px 宽，骑在边线上。
  * 拖动，或聚焦后按 ← → 调整（每步 16px），Home / End 到最窄 / 最宽，双击回到默认宽度；
  * 处理过的按键不再传给页面。`onChange` 在拖动中调用，`onCommit` 在松手、按键、双击后各一次。
  * 悬停是一道中性细线，聚焦和拖动时是花青（焦点色）；拖动时整页保持调整光标、不选中文字。
+ * 用鼠标按下拿到的焦点不亮花青线（拖完不会一直亮着），第一次按键才亮。
  */
 function ChatResizeHandle({
   value,
@@ -89,6 +90,8 @@ function ChatResizeHandle({
   const clamp = (v: number) => Math.round(Math.min(max, Math.max(min, v)));
   const drag = useRef<{ at: number; from: number; now: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  // 焦点是按下给的、不是键盘来的：浏览器也算它 focus-visible，拖完花青线就一直亮着。第一次按键或失焦后恢复
+  const [pressed, setPressed] = useState(false);
   // 拖动前页面的光标与选字：不管拖动怎么结束（松手、取消、丢了指针捕获、拖到一半被卸载）都放回去
   const pageStyle = useRef<{ cursor: string; userSelect: string } | null>(null);
   const restorePage = () => {
@@ -135,10 +138,13 @@ function ChatResizeHandle({
       tabIndex={0}
       title="拖动调整宽度，双击复位"
       data-dragging={dragging || undefined}
+      data-pressed={pressed || undefined}
+      onBlur={() => setPressed(false)}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         // 拿到焦点（接着能用方向键），但不开始选字
         e.currentTarget.focus({ preventScroll: true });
+        setPressed(true);
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
         drag.current = { at: e.clientX, from: value, now: value };
@@ -164,6 +170,7 @@ function ChatResizeHandle({
       onLostPointerCapture={end}
       onDoubleClick={() => commit(defaultValue)}
       onKeyDown={(e) => {
+        setPressed(false);
         if (e.key === "ArrowLeft") commit(value + CHAT_STEP);
         else if (e.key === "ArrowRight") commit(value - CHAT_STEP);
         else if (e.key === "Home") commit(min);
@@ -179,7 +186,9 @@ function ChatResizeHandle({
         aria-hidden
         className={cx(
           "absolute inset-y-0 left-[3px] w-0.5 transition-colors duration-150",
-          dragging ? "bg-accent" : "group-hover:bg-line-strong group-focus-visible:bg-accent",
+          dragging
+            ? "bg-accent"
+            : cx("group-hover:bg-line-strong", !pressed && "group-focus-visible:bg-accent"),
         )}
       />
     </div>
