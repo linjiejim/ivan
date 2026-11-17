@@ -8,7 +8,7 @@
  */
 import { defaultExec, describeExec, isLegacyExec, isLegacyFill } from "@ivan/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import {
@@ -50,6 +50,7 @@ import {
   MoreActions,
   PageHeader,
   PageSkeleton,
+  Progress,
   Skeleton,
   Stat,
   Tabs,
@@ -381,30 +382,20 @@ function SweepChart({
 
 function RunningCard({ r }: { r: RunDetail }) {
   const progress = Math.round((r.job?.progress ?? 0) * 100);
+  const noteId = useId();
   return (
     <div className="space-y-5">
       <Card>
         <div className="py-2">
           <div className="flex items-baseline justify-between gap-3 text-sm">
-            <span className="ai-shimmer font-medium">
+            <span id={noteId} className="ai-shimmer font-medium">
               {r.status === "queued"
                 ? (computePausedNote(r) ?? "排队中…")
                 : (r.job?.note ?? "回测中…")}
             </span>
             <span className="tabular text-xs text-muted">{progress}%</span>
           </div>
-          <div
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress}
-            className="mt-3 h-1 overflow-hidden rounded-full bg-surface-2"
-          >
-            <div
-              className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
-              style={{ width: `${Math.max(progress, 2)}%` }}
-            />
-          </div>
+          <Progress value={progress} aria-labelledby={noteId} className="mt-3" />
           <p className="mt-3 text-xs text-muted">
             在点时正确的历史数据上逐日重放；全市场、长区间的回测大约要半分钟。
           </p>

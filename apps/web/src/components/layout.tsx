@@ -3,7 +3,7 @@
  * 首页 = 看板 + 常驻对话；其他页面在宽屏上对话是可收起的侧栏，窄屏上走全屏对话页。
  */
 import { useQuery } from "@tanstack/react-query";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useChatUi } from "../chat/chat-context.tsx";
 import { api } from "../lib/api.ts";
@@ -34,45 +34,156 @@ const CHAT_MIN = 320;
 const CHAT_DEFAULT = 440;
 /** 主区域至少留这么宽，拖不过去 */
 const MAIN_MIN = 480;
+/** 方向键每步（跟 jim-uiux 1.5.0） */
+const CHAT_STEP = 16;
+const CHAT_WIDTH_KEY = "ivan.chat.width";
 
-/** 对话栏宽度（D45）：左边缘可拖、方向键可调、双击复位；记在本机 */
+const chatMax = () => Math.max(CHAT_MIN, window.innerWidth - MAIN_MIN);
+
+/**
+ * 对话栏宽度（D45），记在本机。存的是自己选的宽度：窗口变窄时只在显示上收窄，
+ * 窗口再变宽会回到原来的宽度。拖动中只改界面（`change`），完成后才存（`commit`）。
+ */
 function useChatWidth() {
-  const clamp = (v: number) =>
-    Math.round(Math.max(CHAT_MIN, Math.min(v, Math.max(CHAT_MIN, window.innerWidth - MAIN_MIN))));
-  const [width, setWidth] = useState(() =>
-    clamp(Number(localStorage.getItem("ivan.chat.width")) || CHAT_DEFAULT),
+  const [max, setMax] = useState(chatMax);
+  const [chosen, setChosen] = useState(
+    () => Number(localStorage.getItem(CHAT_WIDTH_KEY)) || CHAT_DEFAULT,
   );
-  const [dragging, setDragging] = useState(false);
   useEffect(() => {
-    localStorage.setItem("ivan.chat.width", String(width));
-  }, [width]);
-  useEffect(() => {
-    const onResize = () => setWidth((w) => clamp(w));
+    const onResize = () => setMax(chatMax());
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
-  const set = (v: number) => setWidth(clamp(v));
-  const startDrag = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const el = e.currentTarget;
-    el.setPointerCapture(e.pointerId);
-    setDragging(true);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const move = (ev: PointerEvent) => setWidth(clamp(window.innerWidth - ev.clientX));
-    const up = () => {
-      el.removeEventListener("pointermove", move);
-      el.removeEventListener("pointerup", up);
-      el.removeEventListener("pointercancel", up);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      setDragging(false);
-    };
-    el.addEventListener("pointermove", move);
-    el.addEventListener("pointerup", up);
-    el.addEventListener("pointercancel", up);
+  return {
+    width: Math.round(Math.min(max, Math.max(CHAT_MIN, chosen))),
+    max,
+    change: setChosen,
+    commit: (v: number) => {
+      setChosen(v);
+      localStorage.setItem(CHAT_WIDTH_KEY, String(v));
+    },
   };
-  return { width, set, startDrag, dragging };
+}
+
+/**
+ * 对话栏左边缘的拖柄（规格跟 jim-uiux 1.5.0 的 ResizeHandle）：8px 宽，骑在边线上。
+ * 拖动，或聚焦后按 ← → 调整（每步 16px），Home / End 到最窄 / 最宽，双击回到默认宽度；
+ * 处理过的按键不再传给页面。`onChange` 在拖动中调用，`onCommit` 在松手、按键、双击后各一次。
+ * 悬停是一道中性细线，聚焦和拖动时是花青（焦点色）；拖动时整页保持调整光标、不选中文字。
+ */
+function ChatResizeHandle({
+  value,
+  min,
+  max,
+  defaultValue,
+  onChange,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  defaultValue: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  const clamp = (v: number) => Math.round(Math.min(max, Math.max(min, v)));
+  const drag = useRef<{ at: number; from: number; now: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  // 拖动前页面的光标与选字：不管拖动怎么结束（松手、取消、丢了指针捕获、拖到一半被卸载）都放回去
+  const pageStyle = useRef<{ cursor: string; userSelect: string } | null>(null);
+  const restorePage = () => {
+    const saved = pageStyle.current;
+    if (!saved) return;
+    document.documentElement.style.cursor = saved.cursor;
+    document.documentElement.style.userSelect = saved.userSelect;
+    pageStyle.current = null;
+  };
+  useEffect(
+    () => () => {
+      const saved = pageStyle.current;
+      if (!saved) return;
+      document.documentElement.style.cursor = saved.cursor;
+      document.documentElement.style.userSelect = saved.userSelect;
+    },
+    [],
+  );
+
+  const commit = (v: number) => {
+    // 拖动中宽度归指针管：这时的按键、双击松手后会被覆盖，干脆不算
+    if (drag.current) return;
+    const next = clamp(v);
+    onChange(next);
+    onCommit(next);
+  };
+  const end = () => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    setDragging(false);
+    restorePage();
+    if (d.now !== d.from) onCommit(d.now);
+  };
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整对话栏宽度"
+      aria-valuenow={value}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      title="拖动调整宽度，双击复位"
+      data-dragging={dragging || undefined}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        // 拿到焦点（接着能用方向键），但不开始选字
+        e.currentTarget.focus({ preventScroll: true });
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { at: e.clientX, from: value, now: value };
+        setDragging(true);
+        // 指针跑到拖柄前面时整页仍是调整光标
+        restorePage();
+        const page = document.documentElement.style;
+        pageStyle.current = { cursor: page.cursor, userSelect: page.userSelect };
+        page.cursor = "col-resize";
+        page.userSelect = "none";
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        // 拖柄在面板左边：往左拖变宽
+        const next = clamp(d.from - (e.clientX - d.at));
+        if (next === d.now) return;
+        d.now = next;
+        onChange(next);
+      }}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onLostPointerCapture={end}
+      onDoubleClick={() => commit(defaultValue)}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowLeft") commit(value + CHAT_STEP);
+        else if (e.key === "ArrowRight") commit(value - CHAT_STEP);
+        else if (e.key === "Home") commit(min);
+        else if (e.key === "End") commit(max);
+        else return;
+        e.preventDefault();
+        // 页面上的方向键（列表导航、图表）不跟着动
+        e.stopPropagation();
+      }}
+      className="group absolute inset-y-0 -left-1 z-(--z-rail) w-2 cursor-col-resize touch-none outline-none"
+    >
+      <span
+        aria-hidden
+        className={cx(
+          "absolute inset-y-0 left-[3px] w-0.5 transition-colors duration-150",
+          dragging ? "bg-accent" : "group-hover:bg-line-strong group-focus-visible:bg-accent",
+        )}
+      />
+    </div>
+  );
 }
 
 export function useMe() {
@@ -326,29 +437,14 @@ export function Layout() {
           className="relative flex h-full shrink-0 flex-col border-l border-line bg-surface"
           style={{ width: chatWidth.width }}
         >
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="拖动调整对话栏宽度（双击复位）"
-            aria-valuenow={chatWidth.width}
-            aria-valuemin={CHAT_MIN}
-            tabIndex={0}
-            title="拖动调整宽度，双击复位"
-            onPointerDown={chatWidth.startDrag}
-            onDoubleClick={() => chatWidth.set(CHAT_DEFAULT)}
-            onKeyDown={(e) => {
-              if (e.key === "ArrowLeft") chatWidth.set(chatWidth.width + 24);
-              if (e.key === "ArrowRight") chatWidth.set(chatWidth.width - 24);
-            }}
-            className="group absolute inset-y-0 -left-1.5 z-(--z-rail) w-3 cursor-col-resize touch-none outline-none"
-          >
-            <span
-              className={cx(
-                "absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full transition-colors duration-150 group-hover:bg-accent/50 group-focus-visible:bg-accent",
-                chatWidth.dragging && "bg-accent",
-              )}
-            />
-          </div>
+          <ChatResizeHandle
+            value={chatWidth.width}
+            min={CHAT_MIN}
+            max={chatWidth.max}
+            defaultValue={CHAT_DEFAULT}
+            onChange={chatWidth.change}
+            onCommit={chatWidth.commit}
+          />
           <Suspense fallback={<Spinner className="px-4" />}>
             <ChatPanel docked={isHome} />
           </Suspense>
