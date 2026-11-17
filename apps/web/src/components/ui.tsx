@@ -960,6 +960,35 @@ export function Spinner({ label, className }: { label?: string; className?: stri
   );
 }
 
+/**
+ * 知道总量的真实进度（回测、参数扫描）：`value` / `max`（默认 100），条的长度就是这个比例，
+ * 不垫最小宽度，也不按时间往前走；不知道总量时用 `Spinner`。
+ * 要有名字（`aria-labelledby` 指向旁边的状态文字，或 `aria-label`），数字也用文字写出来。
+ */
+export function Progress({
+  value,
+  max = 100,
+  className,
+  ...rest
+}: Omit<ComponentPropsWithRef<"div">, "children"> & { value: number; max?: number }) {
+  const now = Math.min(max, Math.max(0, value));
+  return (
+    <div
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={max}
+      aria-valuenow={now}
+      className={cx("h-1 overflow-hidden rounded-full bg-surface-2", className)}
+      {...rest}
+    >
+      <div
+        className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
+        style={{ width: `${max > 0 ? (now / max) * 100 : 0}%` }}
+      />
+    </div>
+  );
+}
+
 /** 骨架块：形状贴合最终布局，不用转圈 */
 export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
   return <div aria-hidden className={cx("skeleton", className)} style={style} />;

@@ -2,7 +2,7 @@
  * 工具卡片（D16）：卡片直接渲染工具输出或按 id 读库，数字以卡片为准；LLM 的文字只做解读。
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router";
 import { NavChart } from "../components/charts/nav-chart.tsx";
 import { MonthlyTable, PnlBars } from "../components/charts/small.tsx";
@@ -51,6 +51,7 @@ import {
   Figure,
   Info,
   InfoRows,
+  Progress,
   Tag,
   TextLink,
 } from "../components/ui.tsx";
@@ -123,22 +124,23 @@ export function MiniStats({ items }: { items: Array<[string, string, string?]> }
   );
 }
 
-/** 进度：一行说明 + 一道细进度条 */
-function Progress({ note, progress }: { note: string; progress: number }) {
-  const p = Math.round(progress * 100);
+/**
+ * 任务进度：一行说明 + 一道细进度条，条以说明为名、百分比写成文字。
+ * 还不知道进度（任务还没读到）时只有转圈和说明，不画条。
+ */
+function JobProgress({ note, progress }: { note: string; progress?: number }) {
+  const noteId = useId();
+  const p = progress === undefined ? undefined : Math.round(progress * 100);
   return (
     <div>
       <div className="flex items-center gap-2 text-xs">
         <IconSpinner size={13} className="animate-spin text-accent" />
-        <span className="ai-shimmer font-medium">{note}</span>
-        <span className="tabular ml-auto text-muted">{p}%</span>
+        <span id={noteId} className="ai-shimmer font-medium">
+          {note}
+        </span>
+        {p !== undefined && <span className="tabular ml-auto text-muted">{p}%</span>}
       </div>
-      <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-2">
-        <div
-          className="h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
-          style={{ width: `${Math.max(p, 3)}%` }}
-        />
-      </div>
+      {p !== undefined && <Progress value={p} aria-labelledby={noteId} className="mt-2" />}
     </div>
   );
 }
@@ -350,7 +352,7 @@ export function RunCard({ runId }: { runId: string }) {
   if (!r)
     return (
       <Frame title="回测" icon={IconBacktest}>
-        {q.error ? <ErrorNote error={q.error} /> : <Progress note="读取中" progress={0} />}
+        {q.error ? <ErrorNote error={q.error} /> : <JobProgress note="读取中…" />}
       </Frame>
     );
   if (r.status !== "done") {
@@ -359,7 +361,7 @@ export function RunCard({ runId }: { runId: string }) {
         {r.status === "failed" ? (
           <ErrorNote error={new Error(r.error ?? "失败")} className="mt-0" />
         ) : (
-          <Progress
+          <JobProgress
             note={
               r.status === "queued"
                 ? (computePausedNote(r) ?? "排队中…")
@@ -428,7 +430,10 @@ export function SweepCard({ runId }: { runId: string }) {
   if (!r || r.status !== "done")
     return (
       <Frame title="参数扫描" icon={IconSweep}>
-        <Progress note={r?.job?.note ?? "扫描中…"} progress={r?.job?.progress ?? 0} />
+        <JobProgress
+          note={r ? (r.job?.note ?? "扫描中…") : "读取中…"}
+          progress={r ? (r.job?.progress ?? 0) : undefined}
+        />
       </Frame>
     );
   const max = Math.max(...r.children.map((c) => Math.abs(c.headline?.excessCagr ?? 0)), 0.01);
