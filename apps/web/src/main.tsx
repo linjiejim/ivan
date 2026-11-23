@@ -15,6 +15,7 @@ import {
 import { ChatProvider } from "./chat/chat-context.tsx";
 import { IconArrowRight } from "./components/icons.tsx";
 import { Layout } from "./components/layout.tsx";
+import { NewVersionPrompt } from "./components/new-version.tsx";
 import { InkArt } from "./components/ui.tsx";
 import { applyTheme, readThemePref } from "./lib/theme.ts";
 
@@ -105,6 +106,7 @@ createRoot(document.getElementById("root")!).render(
       <QueryClientProvider client={queryClient}>
         <ChatProvider>
           <RouterProvider router={router} />
+          <NewVersionPrompt />
         </ChatProvider>
       </QueryClientProvider>
     </IconContext.Provider>
