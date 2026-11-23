@@ -1488,6 +1488,44 @@ export function Modal({
   );
 }
 
+// ── 提示 ─────────────────────────────────────────────
+
+/**
+ * 等你处理、但不是错误的提示（jim-uiux 的 prompt，现在只有「新版本已发布，刷新后生效 · 刷新页面」）：
+ * 右上角一张浮层，一句话 + 一个动作，不自动消失，右上角 ✕ 关掉；手机上贴顶、占满宽度、让开刘海。
+ * 一次只有一条。播报区一直挂着、内容后放进去，读屏才会念。结果就在眼前的操作不用它，复制用 CopyButton。
+ */
+export function Toast({
+  open,
+  children,
+  action,
+  onClose,
+}: {
+  open: boolean;
+  children: ReactNode;
+  action: { label: string; onClick: () => void };
+  onClose: () => void;
+}) {
+  return createPortal(
+    <div
+      aria-live="polite"
+      className="pointer-events-none fixed inset-x-3 top-[max(12px,env(safe-area-inset-top))] sm:inset-x-auto sm:top-4 sm:right-4 sm:w-90"
+      style={{ zIndex: "var(--z-popover)" }}
+    >
+      {open && (
+        <div className="pointer-events-auto flex animate-pop items-center gap-3 rounded-xl border border-line bg-surface py-2.5 pr-2.5 pl-4 text-sm text-ink shadow-pop">
+          <p className="min-w-0 flex-1">{children}</p>
+          <Button size="sm" onClick={action.onClick}>
+            {action.label}
+          </Button>
+          <IconButton icon={IconClose} label="关闭" size="sm" className="-ml-1" onClick={onClose} />
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
 // ── 诚实检查 ─────────────────────────────────────────
 
 /** 诚实检查：warn 用警示色 + 图标 + 文字，从不只靠颜色；compact 只露标题，细节收进 ⓘ */

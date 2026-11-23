@@ -661,7 +661,8 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
   const dist = resolve(env().cfg.root, "apps/web/dist");
   if (existsSync(dist)) {
     const root = relative(process.cwd(), dist) || ".";
-    // 带哈希的构建产物永久缓存；index.html 每次都要回源确认，否则升级后浏览器还拿着旧页面
+    // 带哈希的构建产物永久缓存；index.html 和 /version.json（打开着的页面靠它发现新版本）每次都要回源确认，
+    // 否则升级后浏览器还拿着旧页面
     const cacheHeader = (path: string) =>
       path.includes("/assets/") ? "public, max-age=31536000, immutable" : "no-cache";
     app.use(
@@ -671,6 +672,8 @@ export function createApp(auth: Auth, extraRoutes?: (app: Hono<AppEnv>) => void)
     app.get("*", (c) => {
       if (c.req.path.startsWith("/api/")) return c.json({ error: "接口不存在" }, 404);
       c.header("Cache-Control", "no-cache");
+      // 部署中前端正在重新构建、还没有 /version.json：给 404，不回退成页面
+      if (c.req.path === "/version.json") return c.json({ error: "没有版本信息" }, 404);
       return c.html(readFileSync(resolve(dist, "index.html"), "utf8"));
     });
   }
